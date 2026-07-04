@@ -11,7 +11,7 @@ struct EmployeeAutomationsView: View {
                         .font(.system(size: 24, weight: .bold))
                     Text("配置定时或事件触发的自动化任务")
                         .font(.system(size: 14))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button {
@@ -21,16 +21,17 @@ struct EmployeeAutomationsView: View {
                         .font(.system(size: 13, weight: .medium))
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.blue)
             }
 
             // Info banner
             HStack(spacing: 10) {
                 Image(systemName: "info.circle")
                     .font(.system(size: 16))
-                    .foregroundColor(.blue)
+                    .foregroundStyle(.blue)
                 Text("自动任务支持 Cron 定时调度和 Webhook 事件触发两种模式，员工将按照预设指令自动执行工作。")
                     .font(.system(size: 13))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
             .padding(14)
             .background(
@@ -46,26 +47,27 @@ struct EmployeeAutomationsView: View {
             VStack(spacing: 16) {
                 Image(systemName: "clock.arrow.circlepath")
                     .font(.system(size: 48))
-                    .foregroundColor(.secondary.opacity(0.3))
+                    .foregroundStyle(.secondary.opacity(0.3))
 
                 Text("暂无自动任务")
                     .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
 
                 Text("创建第一个自动任务，让员工定时执行重复性工作")
                     .font(.system(size: 13))
-                    .foregroundColor(.secondary.opacity(0.7))
+                    .foregroundStyle(.secondary.opacity(0.7))
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 60)
             .background(
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .fill(.regularMaterial)
+                    .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
-                    .foregroundColor(.secondary.opacity(0.2))
+                    .foregroundStyle(.secondary.opacity(0.2))
             )
         }
     }

@@ -24,13 +24,14 @@ struct WorkRecordView: View {
                         } label: {
                             Text(tab)
                                 .font(.system(size: 12))
-                                .foregroundColor(selectedRecordTab == tab ? .primary : .secondary)
+                                .foregroundStyle(selectedRecordTab == tab ? .primary : .secondary)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 5)
                                 .background(
                                     selectedRecordTab == tab
-                                        ? RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor))
-                                        : nil
+                                        ? AnyShapeStyle(.regularMaterial)
+                                        : AnyShapeStyle(.clear)
+                                    , in: RoundedRectangle(cornerRadius: 6)
                                 )
                         }
                         .buttonStyle(.plain)
@@ -71,7 +72,7 @@ struct WorkRecordView: View {
                     Spacer()
                     Text("少")
                         .font(.system(size: 10))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                     ForEach(0..<5, id: \.self) { level in
                         RoundedRectangle(cornerRadius: 2)
                             .fill(heatmapColor(Double(level) / 4.0))
@@ -79,16 +80,13 @@ struct WorkRecordView: View {
                     }
                     Text("多")
                         .font(.system(size: 10))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
-        )
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
     }
 
     private var daysSinceJoin: Int {
@@ -100,20 +98,18 @@ struct WorkRecordView: View {
             HStack(spacing: 4) {
                 Image(systemName: icon)
                     .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                 Text(title)
                     .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
             Text(value)
                 .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(.primary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.secondary.opacity(0.06))
-        )
+        .background(.blue.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func heatmapIntensity(week: Int, day: Int) -> Double {
@@ -130,6 +126,6 @@ struct WorkRecordView: View {
         if intensity <= 0 {
             return Color.secondary.opacity(0.08)
         }
-        return Color.green.opacity(0.2 + intensity * 0.6)
+        return Color.blue.opacity(0.15 + intensity * 0.65)
     }
 }

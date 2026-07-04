@@ -44,9 +44,9 @@ struct ConversationView: View {
     @State private var selectedPanelTab: CapabilityPanelTab = .plan
 
     private let conversations: [ConversationItem] = [
-        ConversationItem(employeeName: "小丁", avatarColor: .green, preview: "好的，我来看看这个组件的实现...", timestamp: "刚刚"),
-        ConversationItem(employeeName: "T", avatarColor: .blue, preview: "API 接口已经部署完成", timestamp: "5 分钟前"),
-        ConversationItem(employeeName: "小凯", avatarColor: .orange, preview: "测试用例全部通过", timestamp: "1 小时前"),
+        ConversationItem(employeeName: "Luna", avatarColor: .green, preview: "好的，我来看看这个组件的实现...", timestamp: "刚刚"),
+        ConversationItem(employeeName: "Theo", avatarColor: .blue, preview: "API 接口已经部署完成", timestamp: "5 分钟前"),
+        ConversationItem(employeeName: "Ivy", avatarColor: .purple, preview: "版本范围已经同步到路线图里。", timestamp: "1 小时前"),
     ]
 
     private let suggestions: [SuggestionCard] = [
@@ -57,19 +57,18 @@ struct ConversationView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // Left: conversation list
             VStack(spacing: 0) {
                 HStack {
                     Text("对话")
                         .font(.system(size: 16, weight: .semibold))
                     Spacer()
                     Button {
-                        // new conversation
                     } label: {
                         Image(systemName: "square.and.pencil")
                             .font(.system(size: 14))
                     }
                     .buttonStyle(.plain)
+                    .tint(.blue)
                 }
                 .padding(14)
 
@@ -88,22 +87,22 @@ struct ConversationView: View {
                                             .frame(width: 36, height: 36)
                                         Text(String(conv.employeeName.prefix(1)))
                                             .font(.system(size: 14, weight: .semibold))
-                                            .foregroundColor(.white)
+                                            .foregroundStyle(.white)
                                     }
 
                                     VStack(alignment: .leading, spacing: 3) {
                                         HStack {
                                             Text(conv.employeeName)
                                                 .font(.system(size: 13, weight: .medium))
-                                                .foregroundColor(.primary)
+                                                .foregroundStyle(.primary)
                                             Spacer()
                                             Text(conv.timestamp)
                                                 .font(.system(size: 11))
-                                                .foregroundColor(.secondary)
+                                                .foregroundStyle(.secondary)
                                         }
                                         Text(conv.preview)
                                             .font(.system(size: 12))
-                                            .foregroundColor(.secondary)
+                                            .foregroundStyle(.secondary)
                                             .lineLimit(1)
                                     }
                                 }
@@ -123,13 +122,11 @@ struct ConversationView: View {
                 }
             }
             .frame(width: 280)
-            .background(Color(nsColor: .controlBackgroundColor))
+            .background(.ultraThinMaterial)
 
             Divider()
 
-            // Center: chat area
             VStack(spacing: 0) {
-                // Top bar
                 HStack(spacing: 10) {
                     Spacer()
                     Button {} label: {
@@ -137,6 +134,7 @@ struct ConversationView: View {
                             .font(.system(size: 12))
                     }
                     .buttonStyle(.bordered)
+                    .tint(.blue)
                     .controlSize(.small)
 
                     Button {} label: {
@@ -144,6 +142,7 @@ struct ConversationView: View {
                             .font(.system(size: 12))
                     }
                     .buttonStyle(.bordered)
+                    .tint(.blue)
                     .controlSize(.small)
 
                     Button {
@@ -160,9 +159,14 @@ struct ConversationView: View {
                         .padding(.vertical, 5)
                         .background(
                             RoundedRectangle(cornerRadius: 6)
-                                .fill(showCapabilityPanel ? Color.accentColor : Color.secondary.opacity(0.1))
+                                .fill(showCapabilityPanel ? Color.blue : Color.clear)
                         )
-                        .foregroundColor(showCapabilityPanel ? .white : .primary)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(.regularMaterial)
+                                .opacity(showCapabilityPanel ? 0 : 1)
+                        )
+                        .foregroundStyle(showCapabilityPanel ? .white : .primary)
                     }
                     .buttonStyle(.plain)
                 }
@@ -173,21 +177,19 @@ struct ConversationView: View {
 
                 Spacer()
 
-                // Greeting
                 VStack(spacing: 16) {
                     ZStack {
                         Circle()
-                            .fill(Color.green.gradient)
+                            .fill(Color.blue.gradient)
                             .frame(width: 56, height: 56)
                         Text("丁")
                             .font(.system(size: 24, weight: .semibold))
-                            .foregroundColor(.white)
+                            .foregroundStyle(.white)
                     }
 
                     Text("你好，今天我能帮你什么？")
                         .font(.system(size: 20, weight: .medium))
 
-                    // Suggestion cards
                     HStack(spacing: 12) {
                         ForEach(suggestions) { suggestion in
                             Button {
@@ -196,10 +198,10 @@ struct ConversationView: View {
                                 HStack(spacing: 8) {
                                     Image(systemName: "sparkles")
                                         .font(.system(size: 12))
-                                        .foregroundColor(.accentColor)
+                                        .foregroundStyle(.blue)
                                     Text(suggestion.text)
                                         .font(.system(size: 13))
-                                        .foregroundColor(.primary)
+                                        .foregroundStyle(.primary)
                                         .lineLimit(2)
                                         .multilineTextAlignment(.leading)
                                 }
@@ -207,11 +209,11 @@ struct ConversationView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(
                                     RoundedRectangle(cornerRadius: 10)
-                                        .fill(Color(nsColor: .controlBackgroundColor))
+                                        .fill(.regularMaterial)
                                 )
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 10)
-                                        .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
+                                        .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
                                 )
                             }
                             .buttonStyle(.plain)
@@ -222,15 +224,13 @@ struct ConversationView: View {
 
                 Spacer()
 
-                // Input area
                 VStack(spacing: 10) {
                     HStack(spacing: 8) {
                         Button {
-                            // select directory
                         } label: {
                             Label("选择工作目录", systemImage: "folder")
                                 .font(.system(size: 12))
-                                .foregroundColor(.secondary)
+                                .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
 
@@ -238,11 +238,11 @@ struct ConversationView: View {
 
                         Text("Auto")
                             .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.accentColor)
+                            .foregroundStyle(.blue)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
                             .background(
-                                Capsule().fill(Color.accentColor.opacity(0.1))
+                                Capsule().fill(Color.blue.opacity(0.1))
                             )
                     }
 
@@ -254,7 +254,7 @@ struct ConversationView: View {
                             .padding(.vertical, 10)
                             .background(
                                 RoundedRectangle(cornerRadius: 10)
-                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .fill(.regularMaterial)
                             )
                             .overlay(
                                 RoundedRectangle(cornerRadius: 10)
@@ -262,22 +262,21 @@ struct ConversationView: View {
                             )
 
                         Button {
-                            // send
                         } label: {
                             Image(systemName: "arrow.up.circle.fill")
                                 .font(.system(size: 28))
-                                .foregroundColor(messageText.isEmpty ? .secondary : .accentColor)
+                                .foregroundStyle(messageText.isEmpty ? Color.secondary : Color.blue)
                         }
                         .buttonStyle(.plain)
                         .disabled(messageText.isEmpty)
                     }
                 }
                 .padding(16)
+                .background(.regularMaterial)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .windowBackgroundColor))
 
-            // Right: capability panel
             if showCapabilityPanel {
                 Divider()
                 capabilityPanel
@@ -285,10 +284,8 @@ struct ConversationView: View {
         }
     }
 
-    // MARK: - Capability Panel
     private var capabilityPanel: some View {
         VStack(spacing: 0) {
-            // Tab bar
             HStack(spacing: 0) {
                 ForEach(CapabilityPanelTab.allCases, id: \.self) { tab in
                     Button {
@@ -300,12 +297,12 @@ struct ConversationView: View {
                             Text(tab.label)
                                 .font(.system(size: 10))
                         }
-                        .foregroundColor(selectedPanelTab == tab ? .accentColor : .secondary)
+                        .foregroundStyle(selectedPanelTab == tab ? .blue : .secondary)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
                         .background(
                             selectedPanelTab == tab
-                                ? Color.accentColor.opacity(0.08)
+                                ? Color.blue.opacity(0.08)
                                 : Color.clear
                         )
                     }
@@ -318,7 +315,6 @@ struct ConversationView: View {
             Divider()
                 .padding(.top, 4)
 
-            // Panel content
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     switch selectedPanelTab {
@@ -360,20 +356,20 @@ struct ConversationView: View {
             }
         }
         .frame(width: 240)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(.ultraThinMaterial)
     }
 
     private func panelSection(title: String, items: [(String, String, Color)]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(.secondary)
+                .foregroundStyle(.secondary)
 
             ForEach(items, id: \.0) { item in
                 HStack(spacing: 8) {
                     Image(systemName: item.1)
                         .font(.system(size: 12))
-                        .foregroundColor(item.2)
+                        .foregroundStyle(item.2)
                         .frame(width: 18)
                     Text(item.0)
                         .font(.system(size: 13))
@@ -383,7 +379,7 @@ struct ConversationView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
                     RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.secondary.opacity(0.04))
+                        .fill(.regularMaterial)
                 )
             }
         }

@@ -25,7 +25,7 @@ struct EmployeeTasksView: View {
                         .font(.system(size: 24, weight: .bold))
                     Text("该员工执行的所有对话任务记录")
                         .font(.system(size: 14))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button {
@@ -35,15 +35,16 @@ struct EmployeeTasksView: View {
                         .font(.system(size: 13, weight: .medium))
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.blue)
             }
 
             // Date range
             HStack(spacing: 8) {
                 Image(systemName: "calendar")
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                 Text("2024-01-01 ~ 2024-01-31")
                     .font(.system(size: 13))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
 
             // Table
@@ -66,7 +67,7 @@ struct EmployeeTasksView: View {
                     HStack(spacing: 0) {
                         Text(task.id)
                             .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.secondary)
                             .frame(width: 100, alignment: .leading)
 
                         Text(task.name)
@@ -75,7 +76,7 @@ struct EmployeeTasksView: View {
 
                         Text(task.source)
                             .font(.system(size: 12))
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.secondary)
                             .frame(width: 80, alignment: .leading)
 
                         statusBadge(task.status)
@@ -83,7 +84,7 @@ struct EmployeeTasksView: View {
 
                         Text(task.createdAt)
                             .font(.system(size: 12))
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.secondary)
                             .frame(width: 160, alignment: .leading)
                     }
                     .padding(.vertical, 10)
@@ -94,7 +95,8 @@ struct EmployeeTasksView: View {
             .padding(.horizontal, 14)
             .background(
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .fill(.regularMaterial)
+                    .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
@@ -108,12 +110,12 @@ struct EmployeeTasksView: View {
             if let width = width {
                 Text(title)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                     .frame(width: width, alignment: .leading)
             } else {
                 Text(title)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -130,7 +132,7 @@ struct EmployeeTasksView: View {
         }()
         return Text(status)
             .font(.system(size: 11))
-            .foregroundColor(color)
+            .foregroundStyle(color)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background(

@@ -11,10 +11,10 @@ struct MemoryTimelineView: View {
     let employee: Employee
 
     private let nodes: [MemoryTimelineNode] = [
-        MemoryTimelineNode(color: .green, label: "学到新技能", skill: "组件架构"),
-        MemoryTimelineNode(color: .blue, label: "学到新技能", skill: "状态管理"),
-        MemoryTimelineNode(color: .purple, label: "学到新技能", skill: "性能优化"),
-        MemoryTimelineNode(color: .orange, label: "学到新技能", skill: "测试策略"),
+        MemoryTimelineNode(color: .blue, label: "学到新技能", skill: "组件架构"),
+        MemoryTimelineNode(color: .cyan, label: "学到新技能", skill: "状态管理"),
+        MemoryTimelineNode(color: .indigo, label: "学到新技能", skill: "性能优化"),
+        MemoryTimelineNode(color: .teal, label: "学到新技能", skill: "测试策略"),
     ]
 
     var body: some View {
@@ -37,15 +37,15 @@ struct MemoryTimelineView: View {
 
                                 Text(node.label)
                                     .font(.system(size: 11))
-                                    .foregroundColor(.secondary)
+                                    .foregroundStyle(.secondary)
                                 Text(node.skill)
                                     .font(.system(size: 12, weight: .medium))
-                                    .foregroundColor(.primary)
+                                    .foregroundStyle(.primary)
                             }
 
                             if index < nodes.count - 1 {
                                 Rectangle()
-                                    .fill(Color.secondary.opacity(0.2))
+                                    .fill(Color.blue.opacity(0.2))
                                     .frame(width: 60, height: 2)
                                     .offset(y: -18)
                             }
@@ -57,10 +57,7 @@ struct MemoryTimelineView: View {
             }
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
-        )
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
     }
 }

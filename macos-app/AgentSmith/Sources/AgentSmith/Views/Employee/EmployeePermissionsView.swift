@@ -13,7 +13,7 @@ enum PermissionAction: String {
 
     var color: Color {
         switch self {
-        case .allow: return .green
+        case .allow: return .blue
         case .ask: return .orange
         case .deny: return .red
         }
@@ -57,7 +57,7 @@ struct EmployeePermissionsView: View {
             HStack(spacing: 6) {
                 Image(systemName: icon)
                     .font(.system(size: 14))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.blue)
                 Text(title)
                     .font(.system(size: 16, weight: .semibold))
             }
@@ -67,13 +67,13 @@ struct EmployeePermissionsView: View {
                     HStack {
                         Text(rule.pattern)
                             .font(.system(size: 13, design: .monospaced))
-                            .foregroundColor(.primary)
+                            .foregroundStyle(.primary)
 
                         Spacer()
 
                         Text(rule.action.rawValue)
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(rule.action.color)
+                            .foregroundStyle(rule.action.color)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)
                             .background(
@@ -88,13 +88,10 @@ struct EmployeePermissionsView: View {
                     }
                 }
             }
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+                    .stroke(.blue.opacity(0.1), lineWidth: 1)
             )
         }
     }
