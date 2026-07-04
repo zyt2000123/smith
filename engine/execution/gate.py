@@ -188,31 +188,264 @@ class RootCauseGate:
 
 
 class SkillRubricGate:
-    """Generic quality check: output must be non-trivial and structured."""
+    """LLM-based quality gate that evaluates skill output against the skill's own rubric.
+
+    Evaluation criteria (heuristic, not LLM call):
+    1. Completeness — output length > 50 chars
+    2. Evidence — contains at least one code block or file reference for technical skills
+    3. No error markers — output does not contain failure indicators
+    """
+
+    # Patterns indicating the output itself reports a failure
+    _ERROR_PATTERNS = re.compile(
+        r"\[ERROR\]|(?<!\w)failed(?!\w)|unable to(?:\s)",
+        re.IGNORECASE,
+    )
+
+    # Code block or file reference (path-like: foo/bar.py, src/main.ts, etc.)
+    _CODE_OR_FILE = re.compile(
+        r"```|[\w./-]+\.\w{1,5}",
+    )
 
     async def check(self, output: str, context: dict) -> GateResult:
         stripped = output.strip()
+        missing: list[str] = []
 
-        if len(stripped) < 100:
-            return GateResult(
-                "retry",
-                f"Output too short ({len(stripped)} chars, minimum 100).",
-                retry_hint="Provide a more detailed response (at least 100 characters).",
-            )
+        # 1. Completeness — non-trivial length
+        if len(stripped) <= 50:
+            missing.append(f"output too short ({len(stripped)} chars, need >50)")
 
-        has_structure = bool(re.search(
-            r"^#{1,3}\s|"           # Markdown headers
-            r"^\s*\d+[.、)]\s|"     # Numbered lists
-            r"```",                 # Code blocks
-            stripped,
-            re.MULTILINE,
+        # 2. Evidence — code block or file reference
+        if not self._CODE_OR_FILE.search(stripped):
+            missing.append("at least one code block or file reference")
+
+        # 3. No error markers
+        error_match = self._ERROR_PATTERNS.search(stripped)
+        if error_match:
+            missing.append(f"output contains error marker: '{error_match.group()}'")
+
+        if not missing:
+            return GateResult("pass", "Skill output meets rubric (completeness, evidence, no errors).")
+
+        return GateResult(
+            "retry",
+            f"Rubric check failed: {'; '.join(missing)}.",
+            retry_hint=(
+                "Provide a more complete response (>50 chars) with concrete code blocks "
+                "or file references, and resolve any errors before reporting results."
+            ),
+        )
+
+
+class DesignGate:
+    """Check that architecture/design output mentions affected files, data flow, and dependencies."""
+
+    _AFFECTED_FILES = re.compile(
+        r"affected\s+files?|涉及文件|修改文件|文件列表|files?\s+to\s+(change|modify|create)|"
+        r"[\w./-]+\.\w{1,5}",  # or any concrete file path
+        re.IGNORECASE,
+    )
+
+    _DATA_FLOW = re.compile(
+        r"data\s*flow|数据流|流程|→|->|flow|sequence|调用链|请求流|pipeline",
+        re.IGNORECASE,
+    )
+
+    _DEPENDENCIES = re.compile(
+        r"dependenc|依赖|import|require|depend\s+on|引入|引用|上下游",
+        re.IGNORECASE,
+    )
+
+    async def check(self, output: str, context: dict) -> GateResult:
+        missing: list[str] = []
+
+        if not self._AFFECTED_FILES.search(output):
+            missing.append("affected files")
+        if not self._DATA_FLOW.search(output):
+            missing.append("data flow")
+        if not self._DEPENDENCIES.search(output):
+            missing.append("dependencies")
+
+        if not missing:
+            return GateResult("pass", "Design output covers affected files, data flow, and dependencies.")
+
+        return GateResult(
+            "fail",
+            f"Design output missing: {', '.join(missing)}.",
+            retry_hint=f"Include the following in your design: {', '.join(missing)}.",
+        )
+
+
+class GitWorktreeGate:
+    """Check that git worktree is properly set up with no conflicts."""
+
+    async def check(self, output: str, context: dict) -> GateResult:
+        has_worktree = bool(re.search(
+            r"worktree|工作树|work.?tree.*(created|ready|set.?up)|"
+            r"切换到.*分支|checkout|switched\s+to",
+            output,
+            re.IGNORECASE,
         ))
 
-        if not has_structure:
+        has_conflict = bool(re.search(
+            r"conflict|冲突|CONFLICT|merge.?conflict|"
+            r"unmerged|both\s+modified|"
+            r"<<<<<<|>>>>>>|======",
+            output,
+            re.IGNORECASE,
+        ))
+
+        has_clean_state = bool(re.search(
+            r"clean|干净|no\s+changes|nothing\s+to\s+commit|"
+            r"working\s+tree\s+clean|ready|就绪",
+            output,
+            re.IGNORECASE,
+        ))
+
+        if has_conflict:
             return GateResult(
-                "retry",
-                "Output lacks structured content (no headers, numbered lists, or code blocks).",
-                retry_hint="Organize the response with headers (## Section), numbered steps, or code blocks for clarity.",
+                "fail",
+                "Git conflicts detected in worktree.",
+                retry_hint="Resolve merge conflicts before proceeding. Run 'git status' to see conflicted files.",
             )
 
-        return GateResult("pass", "Output meets quality bar (length and structure).")
+        if has_worktree and has_clean_state:
+            return GateResult("pass", "Worktree is set up and in a clean state.")
+
+        missing = []
+        if not has_worktree:
+            missing.append("evidence of worktree setup (e.g., 'worktree created at ...')")
+        if not has_clean_state:
+            missing.append("evidence of clean working state (e.g., 'working tree clean')")
+        return GateResult(
+            "retry",
+            f"Worktree gate missing: {', '.join(missing)}.",
+            retry_hint="Set up a git worktree and confirm it is in a clean state with no conflicts.",
+        )
+
+
+class PRGate:
+    """Check commit messages follow conventions and no forbidden files are staged."""
+
+    _FORBIDDEN_PATTERNS = re.compile(
+        r"(?i)"
+        r"\.env($|\.)|"
+        r"credentials|"
+        r"secrets?[./]|"
+        r"\.pem$|\.key$|"
+        r"id_rsa|id_ed25519|"
+        r"\.aws/|\.ssh/"
+    )
+
+    _CONVENTIONAL_PREFIX = re.compile(
+        r"(feat|fix|docs|style|refactor|test|chore|build|ci|perf|revert)"
+        r"(\(.+\))?:\s",
+        re.IGNORECASE,
+    )
+
+    async def check(self, output: str, context: dict) -> GateResult:
+        forbidden_found: list[str] = []
+        for line in output.splitlines():
+            stripped = line.strip()
+            match = self._FORBIDDEN_PATTERNS.search(stripped)
+            if match:
+                if re.match(r"^[MADRCU?\s]{1,3}\s", stripped) or "staged" in stripped.lower():
+                    forbidden_found.append(stripped)
+
+        if forbidden_found:
+            return GateResult(
+                "fail",
+                f"Forbidden files staged: {'; '.join(forbidden_found[:5])}.",
+                retry_hint="Remove sensitive files from staging: git reset HEAD <file>. Add them to .gitignore.",
+            )
+
+        has_commit = bool(re.search(
+            r"commit\s+[a-f0-9]|committed|提交|已提交",
+            output,
+            re.IGNORECASE,
+        ))
+
+        has_conventional = bool(self._CONVENTIONAL_PREFIX.search(output))
+
+        has_message = bool(re.search(
+            r"commit.*message|提交信息|提交消息|"
+            r"-m\s+['\"]|"
+            r"(feat|fix|docs|refactor|test|chore).*:",
+            output,
+            re.IGNORECASE,
+        ))
+
+        if has_commit and (has_conventional or has_message):
+            return GateResult("pass", "Commit follows conventions with no forbidden files.")
+
+        missing = []
+        if not has_commit:
+            missing.append("evidence of a commit (commit hash or confirmation)")
+        if not has_conventional and not has_message:
+            missing.append("conventional commit message (e.g., 'feat: ...', 'fix: ...')")
+        return GateResult(
+            "retry",
+            f"PR gate missing: {', '.join(missing)}.",
+            retry_hint="Use conventional commit format: 'feat(scope): description' or 'fix: description'. Ensure no .env, credentials, or key files are staged.",
+        )
+
+
+class TestDeliveryGate:
+    """Check that tests were actually run and results appear in the output."""
+
+    async def check(self, output: str, context: dict) -> GateResult:
+        has_test_run = bool(re.search(
+            r"pytest|unittest|npm\s+test|yarn\s+test|"
+            r"go\s+test|cargo\s+test|make\s+test|"
+            r"运行.*测试|执行.*测试|test.*run|"
+            r"running\s+tests|ran\s+\d+\s+test",
+            output,
+            re.IGNORECASE,
+        ))
+
+        has_test_counts = bool(re.search(
+            r"\d+\s*(passed|failed|error|skipped|tests?\s+(passed|failed))|"
+            r"(passed|failed|error)\s*:?\s*\d|"
+            r"\d+\s*个.*(通过|失败|跳过)|"
+            r"(通过|失败)\s*\d|"
+            r"Tests:\s*\d|"
+            r"OK\s*\(\d+\s*test|"
+            r"FAILED\s*\(|"
+            r"✓\s*\d|✗\s*\d|"
+            r"\d+\s+passing|"
+            r"\d+\s+failing",
+            output,
+            re.IGNORECASE,
+        ))
+
+        has_artifacts = bool(re.search(
+            r"coverage|覆盖率|\d+%|"
+            r"duration|耗时|\d+(\.\d+)?s\b|"
+            r"test.*report|测试报告",
+            output,
+            re.IGNORECASE,
+        ))
+
+        if has_test_run and has_test_counts:
+            return GateResult(
+                "pass",
+                "Tests were executed and results are present in output.",
+            )
+
+        if has_test_run and has_artifacts and not has_test_counts:
+            return GateResult(
+                "retry",
+                "Tests appear to have run but specific pass/fail counts are missing.",
+                retry_hint="Include the full test output showing how many tests passed/failed (e.g., '5 passed, 0 failed').",
+            )
+
+        missing = []
+        if not has_test_run:
+            missing.append("evidence of test execution (e.g., 'pytest ...', 'npm test')")
+        if not has_test_counts:
+            missing.append("test result counts (e.g., '5 passed, 0 failed')")
+        return GateResult(
+            "retry",
+            f"Test delivery missing: {', '.join(missing)}.",
+            retry_hint="Run the test suite and include the full output showing pass/fail counts. Do not just claim tests passed — show the actual output.",
+        )
