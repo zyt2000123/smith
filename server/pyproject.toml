@@ -1,0 +1,16 @@
+[project]
+name = "agent-smith-server"
+version = "0.1.0"
+description = "Agent-Smith local digital employee server"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "aiosqlite>=0.21",
+    "pyyaml>=6.0",
+    "pydantic>=2.10",
+    "sse-starlette>=2.2",
+]
+
+[project.optional-dependencies]
+dev = ["httpx>=0.28", "pytest>=8.0", "pytest-asyncio>=0.25"]
