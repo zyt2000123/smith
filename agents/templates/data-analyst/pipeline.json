@@ -1,0 +1,6 @@
+[
+  {"task_type": "analysis", "pipeline": ["clarify-question", "check-data-availability", "explore-data", "analyze-and-visualize", "validate-findings", "write-report", "present-recommendations"]},
+  {"task_type": "dashboard", "pipeline": ["define-metrics", "identify-data-sources", "build-queries", "design-layout", "implement-dashboard", "validate-accuracy", "deploy-and-document"]},
+  {"task_type": "review", "pipeline": ["check-methodology", "verify-data-sources", "validate-calculations", "review-visualizations", "confirm-conclusions"]},
+  {"task_type": "data-quality", "pipeline": ["profile-data", "identify-issues", "define-rules", "implement-checks", "monitor-and-alert"]}
+]

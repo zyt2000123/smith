@@ -1,0 +1,6 @@
+[
+  {"task_type": "feature", "pipeline": ["read-prd", "collect-references", "check-design-system", "wireframe", "visual-design", "interaction-spec", "responsive-variants", "accessibility-check", "handoff-to-frontend"]},
+  {"task_type": "component", "pipeline": ["define-use-cases", "design-all-states", "create-tokens", "document-guidelines", "review-with-frontend", "add-to-design-system"]},
+  {"task_type": "review", "pipeline": ["check-consistency", "verify-accessibility", "validate-responsive", "check-interaction-completeness", "compare-with-design-system"]},
+  {"task_type": "audit", "pipeline": ["inventory-components", "check-consistency-violations", "measure-design-debt", "propose-improvements", "prioritize-fixes"]}
+]

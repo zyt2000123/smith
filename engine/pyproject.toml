@@ -1,0 +1,12 @@
+[project]
+name = "agent-smith-engine"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.28", "pyyaml>=6.0", "aiosqlite>=0.21"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

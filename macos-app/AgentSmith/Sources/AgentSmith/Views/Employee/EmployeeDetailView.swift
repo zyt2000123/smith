@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum EmployeeDetailTab: String, CaseIterable {
-    case home, projects, automations, tasks, memory, skills, connectors, permissions
+    case home, projects, automations, tasks, memory, skills, connectors, im, permissions
 
     var label: String {
         switch self {
@@ -12,6 +12,7 @@ enum EmployeeDetailTab: String, CaseIterable {
         case .memory: return "记忆"
         case .skills: return "技能"
         case .connectors: return "连接器"
+        case .im: return "IM"
         case .permissions: return "权限"
         }
     }
@@ -25,6 +26,7 @@ enum EmployeeDetailTab: String, CaseIterable {
         case .memory: return "brain.head.profile"
         case .skills: return "puzzlepiece"
         case .connectors: return "link"
+        case .im: return "message"
         case .permissions: return "shield"
         }
     }
@@ -119,6 +121,16 @@ struct EmployeeDetailView: View {
                         EmployeeConnectorsView(employee: employee)
                     case .permissions:
                         EmployeePermissionsView(employee: employee)
+                    case .im:
+                        VStack(spacing: 8) {
+                            Image(systemName: "message")
+                                .font(.system(size: 40))
+                                .foregroundColor(.secondary.opacity(0.5))
+                            Text("暂无 IM 连接")
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(.top, 120)
                     case .projects:
                         VStack(spacing: 8) {
                             Image(systemName: "folder")

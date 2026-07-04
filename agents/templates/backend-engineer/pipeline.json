@@ -1,0 +1,6 @@
+[
+  {"task_type": "feature", "pipeline": ["define-api-contract", "design-data-model", "write-migration", "implement-repository", "implement-service", "implement-controller", "write-tests", "update-api-docs", "pr-with-test-report"]},
+  {"task_type": "bugfix", "pipeline": ["reproduce-with-logs", "trace-request-flow", "identify-root-cause", "fix-and-add-test", "verify-no-regression", "pr-with-evidence"]},
+  {"task_type": "review", "pipeline": ["check-api-contract", "review-sql-queries", "verify-error-handling", "check-security", "validate-test-coverage"]},
+  {"task_type": "migration", "pipeline": ["backup-strategy", "write-migration", "test-rollback", "migrate-staging", "verify-data-integrity", "migrate-production"]}
+]

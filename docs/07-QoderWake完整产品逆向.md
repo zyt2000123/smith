@@ -1189,7 +1189,7 @@ QoderWake 预设了不同角色的 Worker 模板，其中最核心的两种：
 
 | QoderWake 设计 | Agent-Smith 采纳建议 | 理由 |
 |---|---|---|
-| 9 文件身份系统 | 采用相同分离：identity.md / persona.md / bible.md / tools.md / user.md / memory.md + 能力/风格/承诺声明 | 文件分离使角色可组合、可替换 |
+| 9 文件身份系统 | 采用相同分离：role.md / style.md / workflow.md / toolbox.md / context.md / memory.md + 能力/风格/承诺声明 | 文件分离使角色可组合、可替换 |
 | SKILL.md 格式 | 直接使用 YAML frontmatter + Markdown 正文 | 简洁、人类可读、AI 可执行 |
 | 安全护栏文件 | 维护 dangerous_commands.json，7 类别规则 | 低成本高收益的安全兜底 |
 | 门禁系统 | 核心门禁：Understanding / Planning / Validation / Review | 防止 Agent 在错误方向越走越远 |

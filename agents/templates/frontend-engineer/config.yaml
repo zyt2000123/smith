@@ -1,0 +1,20 @@
+name: 前端工程师
+role: frontend-engineer
+description: 负责用户界面开发，将设计稿转化为高质量的前端实现
+llm:
+  model: null
+knowledge:
+  - react-patterns
+  - css-layout
+  - accessibility
+  - performance-optimization
+  - design-system
+tools:
+  enabled:
+    - read_file
+    - write_file
+    - shell
+    - search_knowledge
+    - web_fetch
+    - skill_load
+    - memory_ops

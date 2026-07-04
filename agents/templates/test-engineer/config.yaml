@@ -1,0 +1,20 @@
+name: 测试工程师
+role: test-engineer
+description: 负责测试策略设计、测试用例编写和质量保障
+llm:
+  model: null
+knowledge:
+  - testing-patterns
+  - test-frameworks
+  - boundary-analysis
+  - mocking-strategies
+  - ci-cd-testing
+tools:
+  enabled:
+    - read_file
+    - write_file
+    - shell
+    - search_knowledge
+    - web_fetch
+    - skill_load
+    - memory_ops

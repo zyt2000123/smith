@@ -314,7 +314,7 @@ GitHub QoderAI 组织 23 个公开仓库，核心闭源。
 |---|---|---|
 | Swift 菜单栏壳 (647KB) + daemon | Electron 或 daemon + 浏览器 | 原生壳极轻，Phase 0 可 spike |
 | React + Vite + Tailwind + antd | React + Vite + Tailwind + shadcn | 技术路线一致，验证方向正确 |
-| IDENTITY.md / PERSONA.md / BIBLE.md | identity.md / persona.md / bible.md | 设计完全吻合 |
+| IDENTITY.md / PERSONA.md / BIBLE.md | role.md / style.md / workflow.md | 设计完全吻合 |
 | SQLite 76 表 + 事件溯源 | 文件 + SQLite | 可先简单后复杂，事件溯源是演进方向 |
 | sqlite-vec 本地向量搜索 | Hub 提供检索 | 本地 RAG 是可选升级路径 |
 | Git 版本化 Memory/Skills | 文件系统 | Git 管理记忆版本是低成本好方案 |

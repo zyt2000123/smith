@@ -1,0 +1,8 @@
+[
+  {"name": "api-development", "description": "RESTful/GraphQL API 设计与实现，含版本管理和文档生成"},
+  {"name": "database-design", "description": "关系型和文档型数据库建模、迁移管理、查询优化"},
+  {"name": "service-integration", "description": "第三方服务对接：支付、消息推送、存储、认证"},
+  {"name": "security-implementation", "description": "认证授权实现：JWT/OAuth/RBAC/数据加密"},
+  {"name": "performance-optimization", "description": "后端性能调优：缓存策略、连接池、查询优化、异步处理"},
+  {"name": "error-handling", "description": "结构化错误处理：错误码体系、日志追踪、优雅降级"}
+]

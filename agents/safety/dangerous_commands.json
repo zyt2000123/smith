@@ -1,0 +1,242 @@
+[
+  {
+    "id": "cmd-inj-001",
+    "tools": ["shell"],
+    "category": "command_injection",
+    "severity": "critical",
+    "patterns": ["\\|\\s*(bash|sh|zsh|dash)", "\\|\\s*\\$\\(", "\\|\\s*`"],
+    "excludePatterns": ["\\|\\s*grep", "\\|\\s*sort", "\\|\\s*head", "\\|\\s*tail", "\\|\\s*wc"],
+    "description": "Pipe output to shell interpreter allows arbitrary command execution",
+    "remediation": "Use specific commands instead of piping to a shell. Process output programmatically."
+  },
+  {
+    "id": "cmd-inj-002",
+    "tools": ["shell"],
+    "category": "command_injection",
+    "severity": "critical",
+    "patterns": ["`[^`]+`", "\\$\\([^)]+\\)"],
+    "excludePatterns": ["\\$\\(date", "\\$\\(whoami\\)", "\\$\\(pwd\\)"],
+    "description": "Backtick or $() command substitution can execute injected commands",
+    "remediation": "Avoid dynamic command construction. Use parameterized commands or pre-validated inputs."
+  },
+  {
+    "id": "cmd-inj-003",
+    "tools": ["shell"],
+    "category": "command_injection",
+    "severity": "critical",
+    "patterns": ["\\beval\\s+", "\\beval\\s*\\("],
+    "excludePatterns": [],
+    "description": "eval executes arbitrary string as shell command",
+    "remediation": "Never use eval with dynamic input. Use direct command execution instead."
+  },
+  {
+    "id": "cmd-inj-004",
+    "tools": ["shell"],
+    "category": "command_injection",
+    "severity": "critical",
+    "patterns": ["\\$\\{[^}]*\\}", ";\\s*\\w+", "&&\\s*\\w+"],
+    "excludePatterns": ["\\$\\{HOME\\}", "\\$\\{USER\\}", "\\$\\{PATH\\}", "&&\\s*(echo|test|\\[)"],
+    "description": "Subshell injection via variable expansion or command chaining",
+    "remediation": "Validate and quote all variable expansions. Avoid uncontrolled command chaining."
+  },
+  {
+    "id": "res-abuse-001",
+    "tools": ["shell"],
+    "category": "resource_abuse",
+    "severity": "critical",
+    "patterns": [":\\(\\)\\{\\s*:\\|:\\s*&\\s*\\}\\s*;\\s*:", "fork\\s*bomb", "\\.\\s*\\(\\)\\s*\\{"],
+    "excludePatterns": [],
+    "description": "Fork bomb pattern that exhausts system process table",
+    "remediation": "Never execute recursive process spawning. Use controlled concurrency with limits."
+  },
+  {
+    "id": "res-abuse-002",
+    "tools": ["shell"],
+    "category": "resource_abuse",
+    "severity": "major",
+    "patterns": ["while\\s+true\\s*;\\s*do", "for\\s*\\(\\(\\s*;\\s*;\\s*\\)\\)", "while\\s+\\[\\s+1\\s+\\]"],
+    "excludePatterns": ["while\\s+true.*sleep", "while\\s+true.*break"],
+    "description": "Infinite loop pattern without exit condition may hang the system",
+    "remediation": "Add explicit exit conditions and timeouts to all loops."
+  },
+  {
+    "id": "res-abuse-003",
+    "tools": ["shell"],
+    "category": "resource_abuse",
+    "severity": "major",
+    "patterns": ["dd\\s+if=.*of=.*count=\\d{6,}", "fallocate.*-l\\s*\\d+[GT]", "truncate.*-s\\s*\\d+[GT]"],
+    "excludePatterns": [],
+    "description": "Creating extremely large files can exhaust disk space",
+    "remediation": "Limit file creation size. Check available disk space before creating large files."
+  },
+  {
+    "id": "code-exec-001",
+    "tools": ["shell"],
+    "category": "code_execution",
+    "severity": "critical",
+    "patterns": ["python.*-c\\s+['\"].*eval", "python.*-c\\s+['\"].*exec"],
+    "excludePatterns": [],
+    "description": "Python eval/exec via command line can execute arbitrary code",
+    "remediation": "Write code to files and execute them directly instead of using eval/exec inline."
+  },
+  {
+    "id": "code-exec-002",
+    "tools": ["shell"],
+    "category": "code_execution",
+    "severity": "critical",
+    "patterns": ["__import__\\s*\\(", "importlib\\.import_module\\s*\\("],
+    "excludePatterns": [],
+    "description": "Dynamic import can load and execute arbitrary modules",
+    "remediation": "Use static imports. If dynamic loading is needed, validate module names against an allowlist."
+  },
+  {
+    "id": "code-exec-003",
+    "tools": ["shell"],
+    "category": "code_execution",
+    "severity": "critical",
+    "patterns": ["compile\\s*\\([^)]*exec", "compile\\s*\\([^)]*eval"],
+    "excludePatterns": [],
+    "description": "compile() with exec/eval mode enables arbitrary code execution",
+    "remediation": "Avoid compile() with dynamic input. Use static code paths."
+  },
+  {
+    "id": "code-exec-004",
+    "tools": ["shell"],
+    "category": "code_execution",
+    "severity": "critical",
+    "patterns": ["node\\s+-e\\s+['\"]", "node\\s+--eval\\s+['\"]", "python.*-c\\s+['\"]"],
+    "excludePatterns": ["node\\s+-e\\s+['\"]console\\.log", "python.*-c\\s+['\"]import sys"],
+    "description": "Inline code execution via interpreter flags",
+    "remediation": "Write code to files and execute them. Avoid passing code as command-line strings."
+  },
+  {
+    "id": "net-abuse-001",
+    "tools": ["shell"],
+    "category": "network_abuse",
+    "severity": "critical",
+    "patterns": ["curl.*-X\\s*POST.*\\d+\\.\\d+\\.\\d+\\.\\d+", "curl.*--data.*https?://(?!localhost|127\\.0\\.0\\.1)", "wget.*--post"],
+    "excludePatterns": ["curl.*localhost", "curl.*127\\.0\\.0\\.1", "curl.*0\\.0\\.0\\.0"],
+    "description": "HTTP POST to external host may exfiltrate data",
+    "remediation": "Only send data to approved internal endpoints. Review all external HTTP POST requests."
+  },
+  {
+    "id": "net-abuse-002",
+    "tools": ["shell"],
+    "category": "network_abuse",
+    "severity": "critical",
+    "patterns": ["bash\\s+-i\\s+>\\s*&\\s*/dev/tcp", "nc\\s+-e\\s+/bin/(ba)?sh", "mkfifo.*nc.*sh", "socat.*exec.*sh"],
+    "excludePatterns": [],
+    "description": "Reverse shell pattern enables remote unauthorized access",
+    "remediation": "Never establish reverse shell connections. Use approved remote access tools."
+  },
+  {
+    "id": "net-abuse-003",
+    "tools": ["shell"],
+    "category": "network_abuse",
+    "severity": "major",
+    "patterns": ["nmap\\s+", "masscan\\s+", "nc\\s+-z", "netcat.*-z"],
+    "excludePatterns": ["nmap\\s+localhost", "nmap\\s+127\\.0\\.0\\.1"],
+    "description": "Port scanning can probe network infrastructure",
+    "remediation": "Only scan explicitly authorized hosts. Document the scope and purpose."
+  },
+  {
+    "id": "sens-file-001",
+    "tools": ["shell", "read_file"],
+    "category": "sensitive_file_access",
+    "severity": "major",
+    "patterns": ["/etc/passwd", "/etc/shadow", "/etc/sudoers"],
+    "excludePatterns": [],
+    "description": "Accessing system authentication files",
+    "remediation": "Do not read system authentication files. Use proper user management APIs."
+  },
+  {
+    "id": "sens-file-002",
+    "tools": ["shell", "read_file"],
+    "category": "sensitive_file_access",
+    "severity": "critical",
+    "patterns": ["\\.ssh/id_", "\\.ssh/authorized_keys", "\\.ssh/known_hosts", "\\.ssh/config"],
+    "excludePatterns": [],
+    "description": "Accessing SSH keys and configuration",
+    "remediation": "Never read or expose SSH keys. Use secure key management services."
+  },
+  {
+    "id": "sens-file-003",
+    "tools": ["shell", "read_file", "write_file"],
+    "category": "sensitive_file_access",
+    "severity": "critical",
+    "patterns": ["\\.env$", "\\.env\\.local", "\\.env\\.production", "\\.env\\.secret"],
+    "excludePatterns": ["\\.env\\.example", "\\.env\\.template", "\\.env\\.sample"],
+    "description": "Accessing environment files that may contain secrets",
+    "remediation": "Use .env.example for templates. Access secrets via secure secret management."
+  },
+  {
+    "id": "sens-file-004",
+    "tools": ["shell", "read_file"],
+    "category": "sensitive_file_access",
+    "severity": "critical",
+    "patterns": ["\\.pem$", "\\.key$", "\\.p12$", "\\.pfx$", "private.*key"],
+    "excludePatterns": ["\\.pub$", "public.*key"],
+    "description": "Accessing private key files",
+    "remediation": "Never read private key files directly. Use certificate management tools."
+  },
+  {
+    "id": "priv-esc-001",
+    "tools": ["shell"],
+    "category": "privilege_escalation",
+    "severity": "critical",
+    "patterns": ["\\bsudo\\s+", "\\bsu\\s+-\\s+", "\\bsu\\s+root"],
+    "excludePatterns": ["sudo\\s+-n\\s+true"],
+    "description": "Privilege escalation via sudo or su",
+    "remediation": "Operate within assigned permissions. Request elevated access through proper channels."
+  },
+  {
+    "id": "priv-esc-002",
+    "tools": ["shell"],
+    "category": "privilege_escalation",
+    "severity": "critical",
+    "patterns": ["chmod\\s+777", "chmod\\s+a\\+rwx", "chmod\\s+-R\\s+777"],
+    "excludePatterns": [],
+    "description": "Setting world-writable permissions is a security risk",
+    "remediation": "Use minimum required permissions. Typically 755 for directories, 644 for files."
+  },
+  {
+    "id": "priv-esc-003",
+    "tools": ["shell"],
+    "category": "privilege_escalation",
+    "severity": "critical",
+    "patterns": ["chmod\\s+[u+]*s\\s+", "chmod\\s+4\\d{3}\\s+", "chmod\\s+2\\d{3}\\s+"],
+    "excludePatterns": [],
+    "description": "Setting setuid/setgid bit enables privilege escalation",
+    "remediation": "Never set setuid/setgid bits. Use proper capability management."
+  },
+  {
+    "id": "sh-evade-001",
+    "tools": ["shell"],
+    "category": "shell_evasion",
+    "severity": "critical",
+    "patterns": ["base64\\s+(-d|--decode)\\s*\\|\\s*(bash|sh)", "echo.*\\|\\s*base64\\s+(-d|--decode)\\s*\\|"],
+    "excludePatterns": [],
+    "description": "Base64 decode piped to shell hides malicious commands",
+    "remediation": "Never pipe decoded content to a shell. Inspect decoded content before execution."
+  },
+  {
+    "id": "sh-evade-002",
+    "tools": ["shell"],
+    "category": "shell_evasion",
+    "severity": "major",
+    "patterns": ["history\\s+-c", "history\\s+-d", "unset\\s+HISTFILE", "HISTSIZE=0", "HISTFILESIZE=0"],
+    "excludePatterns": [],
+    "description": "Manipulating shell history to hide activity",
+    "remediation": "Preserve shell history for audit trails. Do not clear or disable history."
+  },
+  {
+    "id": "sh-evade-003",
+    "tools": ["shell"],
+    "category": "shell_evasion",
+    "severity": "major",
+    "patterns": ["alias\\s+sudo=", "alias\\s+rm=", "alias\\s+ls=", "alias\\s+cd="],
+    "excludePatterns": ["alias\\s+rm='rm\\s+-i'", "alias\\s+rm=\"rm\\s+-i\""],
+    "description": "Overriding common command aliases can mask malicious behavior",
+    "remediation": "Do not override standard command aliases. Use unique names for custom functions."
+  }
+]
