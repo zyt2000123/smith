@@ -1,0 +1,72 @@
+import SwiftUI
+
+struct EmployeeAutomationsView: View {
+    let employee: Employee
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("自动任务")
+                        .font(.system(size: 24, weight: .bold))
+                    Text("配置定时或事件触发的自动化任务")
+                        .font(.system(size: 14))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button {
+                    // new automation
+                } label: {
+                    Label("新建", systemImage: "plus")
+                        .font(.system(size: 13, weight: .medium))
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            // Info banner
+            HStack(spacing: 10) {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 16))
+                    .foregroundColor(.blue)
+                Text("自动任务支持 Cron 定时调度和 Webhook 事件触发两种模式，Agent将按照预设指令自动执行工作。")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.blue.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.blue.opacity(0.15), lineWidth: 1)
+            )
+
+            // Empty state
+            VStack(spacing: 16) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 48))
+                    .foregroundColor(.secondary.opacity(0.3))
+
+                Text("暂无自动任务")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundColor(.secondary)
+
+                Text("创建第一个自动任务，让Agent定时执行重复性工作")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary.opacity(0.7))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 60)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
+                    .foregroundColor(.secondary.opacity(0.2))
+            )
+        }
+    }
+}
