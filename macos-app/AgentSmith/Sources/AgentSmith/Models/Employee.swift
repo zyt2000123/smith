@@ -15,6 +15,15 @@ struct Employee: Identifiable, Hashable {
     var avatarColor: Color
     var joinDate: Date
 
+    var localizedRole: String {
+        switch role {
+        case "Product Manager": return "产品经理"
+        case "Frontend Engineer": return "前端工程师"
+        case "Backend Engineer": return "后端工程师"
+        default: return role
+        }
+    }
+
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }

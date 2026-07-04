@@ -9,6 +9,7 @@ struct WindowChromeConfigurator: NSViewRepresentable {
     private let buttonSpacing: CGFloat = 10
     private let toggleButtonGap: CGFloat = 16
     private let toggleButtonSize = NSSize(width: 28, height: 24)
+    private let verticalOffset: CGFloat = -4
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onToggleSidebar: onToggleSidebar)
@@ -37,7 +38,7 @@ struct WindowChromeConfigurator: NSViewRepresentable {
         window.isMovableByWindowBackground = true
         window.styleMask.insert(.fullSizeContentView)
         window.isOpaque = false
-        window.backgroundColor = NSColor(calibratedRed: 0.20, green: 0.20, blue: 0.21, alpha: 1)
+        window.backgroundColor = .windowBackgroundColor
 
         guard
             let closeButton = window.standardWindowButton(.closeButton),
@@ -59,7 +60,7 @@ struct WindowChromeConfigurator: NSViewRepresentable {
         }
 
         let titlebarHeight = titlebarView.frame.height
-        let targetButtonY = max(0, floor((titlebarHeight - buttonSize) / 2) - 1)
+        let targetButtonY = max(0, floor((titlebarHeight - buttonSize) / 2) - 1 + verticalOffset)
         let targetOrigin = NSPoint(x: sidebarInset + 12, y: targetButtonY)
         if buttonContainer.frame.origin != targetOrigin {
             buttonContainer.setFrameOrigin(targetOrigin)
@@ -77,13 +78,13 @@ struct WindowChromeConfigurator: NSViewRepresentable {
 
         let toggleOrigin = NSPoint(
             x: targetOrigin.x + targetWidth + toggleButtonGap,
-            y: max(0, floor((titlebarHeight - toggleButtonSize.height) / 2) - 1)
+            y: max(0, floor((titlebarHeight - toggleButtonSize.height) / 2) - 1 + verticalOffset)
         )
         toggleButton.setFrameOrigin(toggleOrigin)
     }
 
     private func makeToggleButton(coordinator: Coordinator) -> NSButton {
-        let button = NSButton(frame: NSRect(origin: .zero, size: toggleButtonSize))
+        let button = HoverChromeButton(frame: NSRect(origin: .zero, size: toggleButtonSize))
         button.identifier = NSUserInterfaceItemIdentifier("agent-smith-toggle-sidebar")
         button.image = NSImage(
             systemSymbolName: "sidebar.leading",
@@ -93,13 +94,12 @@ struct WindowChromeConfigurator: NSViewRepresentable {
         button.imagePosition = .imageOnly
         button.isBordered = false
         button.bezelStyle = .texturedRounded
-        button.contentTintColor = NSColor.white.withAlphaComponent(0.78)
         button.toolTip = "切换边栏"
         button.target = coordinator
         button.action = #selector(Coordinator.handleToggleSidebar)
         button.wantsLayer = true
         button.layer?.cornerRadius = 8
-        button.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.06).cgColor
+        button.refreshAppearance()
         coordinator.toggleButton = button
         return button
     }
@@ -115,5 +115,52 @@ struct WindowChromeConfigurator: NSViewRepresentable {
         @objc func handleToggleSidebar() {
             onToggleSidebar()
         }
+    }
+}
+
+private final class HoverChromeButton: NSButton {
+    private var trackingAreaRef: NSTrackingArea?
+    private var isHovered = false
+
+    override var isHighlighted: Bool {
+        didSet { refreshAppearance() }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(trackingArea)
+        trackingAreaRef = trackingArea
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        refreshAppearance()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        refreshAppearance()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshAppearance()
+    }
+
+    func refreshAppearance() {
+        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let chromeColor = isDark ? NSColor.white : NSColor.black
+        contentTintColor = chromeColor.withAlphaComponent(0.72)
+        layer?.backgroundColor = isHovered || isHighlighted
+            ? chromeColor.withAlphaComponent(0.08).cgColor
+            : NSColor.clear.cgColor
     }
 }

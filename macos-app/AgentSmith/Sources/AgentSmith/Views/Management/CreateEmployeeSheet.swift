@@ -20,13 +20,13 @@ struct CreateEmployeeSheet: View {
             // Header
             HStack {
                 Text("新建数字员工")
-                    .font(.system(size: 20, weight: .bold))
+                    .appFont(size: 20, weight: .bold)
                 Spacer()
                 Button {
                     isPresented = false
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 20))
+                        .appFont(size: 20)
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -34,7 +34,7 @@ struct CreateEmployeeSheet: View {
 
             // Template grid
             Text("选择模板")
-                .font(.system(size: 14, weight: .medium))
+                .appFont(size: 14, weight: .medium)
                 .foregroundColor(.secondary)
 
             LazyVGrid(columns: columns, spacing: 10) {
@@ -48,7 +48,7 @@ struct CreateEmployeeSheet: View {
             // Name
             VStack(alignment: .leading, spacing: 6) {
                 Text("名称")
-                    .font(.system(size: 13, weight: .medium))
+                    .appFont(size: 13, weight: .medium)
                 TextField("输入员工名称", text: $name)
                     .textFieldStyle(.roundedBorder)
             }
@@ -56,7 +56,7 @@ struct CreateEmployeeSheet: View {
             // Avatar color
             VStack(alignment: .leading, spacing: 6) {
                 Text("头像颜色")
-                    .font(.system(size: 13, weight: .medium))
+                    .appFont(size: 13, weight: .medium)
                 HStack(spacing: 8) {
                     ForEach(colorOptions, id: \.self) { color in
                         Circle()
@@ -77,9 +77,9 @@ struct CreateEmployeeSheet: View {
             // Description
             VStack(alignment: .leading, spacing: 6) {
                 Text("描述")
-                    .font(.system(size: 13, weight: .medium))
+                    .appFont(size: 13, weight: .medium)
                 TextEditor(text: $description)
-                    .font(.system(size: 13))
+                    .appFont(size: 13)
                     .frame(height: 80)
                     .padding(4)
                     .background(
@@ -136,16 +136,16 @@ struct CreateEmployeeSheet: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: template.icon)
-                    .font(.system(size: 20))
+                    .appFont(size: 20)
                     .foregroundColor(selectedTemplate == template.id ? .accentColor : .secondary)
                     .frame(width: 36)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(template.title)
-                        .font(.system(size: 13, weight: .medium))
+                        .appFont(size: 13, weight: .medium)
                         .foregroundColor(.primary)
                     Text(template.description)
-                        .font(.system(size: 11))
+                        .appFont(size: 11)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                 }

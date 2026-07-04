@@ -8,9 +8,9 @@ struct EmployeeAutomationsView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("自动任务")
-                        .font(.system(size: 24, weight: .bold))
+                        .appFont(size: 24, weight: .bold)
                     Text("配置定时或事件触发的自动化任务")
-                        .font(.system(size: 14))
+                        .appFont(size: 14)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -18,7 +18,7 @@ struct EmployeeAutomationsView: View {
                     // new automation
                 } label: {
                     Label("新建", systemImage: "plus")
-                        .font(.system(size: 13, weight: .medium))
+                        .appFont(size: 13, weight: .medium)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
@@ -27,10 +27,10 @@ struct EmployeeAutomationsView: View {
             // Info banner
             HStack(spacing: 10) {
                 Image(systemName: "info.circle")
-                    .font(.system(size: 16))
+                    .appFont(size: 16)
                     .foregroundStyle(.blue)
                 Text("自动任务支持 Cron 定时调度和 Webhook 事件触发两种模式，员工将按照预设指令自动执行工作。")
-                    .font(.system(size: 13))
+                    .appFont(size: 13)
                     .foregroundStyle(.secondary)
             }
             .padding(14)
@@ -46,15 +46,15 @@ struct EmployeeAutomationsView: View {
             // Empty state
             VStack(spacing: 16) {
                 Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 48))
+                    .appFont(size: 48)
                     .foregroundStyle(.secondary.opacity(0.3))
 
                 Text("暂无自动任务")
-                    .font(.system(size: 16, weight: .medium))
+                    .appFont(size: 16, weight: .medium)
                     .foregroundStyle(.secondary)
 
                 Text("创建第一个自动任务，让员工定时执行重复性工作")
-                    .font(.system(size: 13))
+                    .appFont(size: 13)
                     .foregroundStyle(.secondary.opacity(0.7))
             }
             .frame(maxWidth: .infinity)

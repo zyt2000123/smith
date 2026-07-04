@@ -22,9 +22,9 @@ struct EmployeeTasksView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("对话任务")
-                        .font(.system(size: 24, weight: .bold))
+                        .appFont(size: 24, weight: .bold)
                     Text("该员工执行的所有对话任务记录")
-                        .font(.system(size: 14))
+                        .appFont(size: 14)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -32,7 +32,7 @@ struct EmployeeTasksView: View {
                     // new task
                 } label: {
                     Label("新建", systemImage: "plus")
-                        .font(.system(size: 13, weight: .medium))
+                        .appFont(size: 13, weight: .medium)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
@@ -43,7 +43,7 @@ struct EmployeeTasksView: View {
                 Image(systemName: "calendar")
                     .foregroundStyle(.secondary)
                 Text("2024-01-01 ~ 2024-01-31")
-                    .font(.system(size: 13))
+                    .appFont(size: 13)
                     .foregroundStyle(.secondary)
             }
 
@@ -66,16 +66,16 @@ struct EmployeeTasksView: View {
                 ForEach(tasks) { task in
                     HStack(spacing: 0) {
                         Text(task.id)
-                            .font(.system(size: 12, design: .monospaced))
+                            .appFont(size: 12, design: .monospaced)
                             .foregroundStyle(.secondary)
                             .frame(width: 100, alignment: .leading)
 
                         Text(task.name)
-                            .font(.system(size: 13))
+                            .appFont(size: 13)
                             .frame(maxWidth: .infinity, alignment: .leading)
 
                         Text(task.source)
-                            .font(.system(size: 12))
+                            .appFont(size: 12)
                             .foregroundStyle(.secondary)
                             .frame(width: 80, alignment: .leading)
 
@@ -83,7 +83,7 @@ struct EmployeeTasksView: View {
                             .frame(width: 80, alignment: .leading)
 
                         Text(task.createdAt)
-                            .font(.system(size: 12))
+                            .appFont(size: 12)
                             .foregroundStyle(.secondary)
                             .frame(width: 160, alignment: .leading)
                     }
@@ -109,12 +109,12 @@ struct EmployeeTasksView: View {
         Group {
             if let width = width {
                 Text(title)
-                    .font(.system(size: 12, weight: .medium))
+                    .appFont(size: 12, weight: .medium)
                     .foregroundStyle(.secondary)
                     .frame(width: width, alignment: .leading)
             } else {
                 Text(title)
-                    .font(.system(size: 12, weight: .medium))
+                    .appFont(size: 12, weight: .medium)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -131,7 +131,7 @@ struct EmployeeTasksView: View {
             }
         }()
         return Text(status)
-            .font(.system(size: 11))
+            .appFont(size: 11)
             .foregroundStyle(color)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
