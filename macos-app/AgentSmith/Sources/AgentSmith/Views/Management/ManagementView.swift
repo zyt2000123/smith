@@ -1,15 +1,13 @@
 import SwiftUI
 
 struct ManagementView: View {
-    @Binding var selectedEmployee: Employee?
+    var onOpenEmployee: (Employee) -> Void
     @State private var employees = Employee.samples
     @State private var showCreateSheet = false
     @State private var selectedSegment = 0
     @State private var statusFilter = "全部"
     @State private var envFilter = "全部"
     @State private var searchText = ""
-    @State private var navigateToDetail = false
-    @State private var detailEmployee: Employee?
 
     private let columns = [
         GridItem(.flexible(), spacing: 16),
@@ -40,45 +38,39 @@ struct ManagementView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    header
-                    filterBar
-                    employeeGrid
-                }
-                .padding(24)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                header
+                filterBar
+                employeeGrid
             }
-            .background(Color(nsColor: .windowBackgroundColor))
-            .navigationDestination(item: $detailEmployee) { emp in
-                EmployeeDetailView(employee: emp)
-            }
+            .padding(24)
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $showCreateSheet) {
             CreateEmployeeSheet(employees: $employees, isPresented: $showCreateSheet)
         }
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("我的Agent")
-                        .font(.system(size: 28, weight: .bold))
-                    Text("跨云端与本地运行时，统一创建、管理和对话你的Agent。")
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                Button {
-                    showCreateSheet = true
-                } label: {
-                    Label("新建Agent", systemImage: "plus")
-                        .font(.system(size: 13, weight: .medium))
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("我的Agent")
+                    .font(.system(size: 26, weight: .bold))
+                Text("统一创建、管理和对话你的Agent")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
             }
+            Spacer()
+            Button {
+                showCreateSheet = true
+            } label: {
+                Label("新建Agent", systemImage: "plus")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .controlSize(.large)
         }
     }
 
@@ -91,43 +83,60 @@ struct ManagementView: View {
             .pickerStyle(.segmented)
             .frame(width: 200)
 
-            Picker("状态", selection: $statusFilter) {
-                Text("全部").tag("全部")
-                Text("在线").tag("在线")
-                Text("离线").tag("离线")
-            }
-            .frame(width: 100)
-
-            Picker("环境", selection: $envFilter) {
-                Text("全部").tag("全部")
-                Text("本地").tag("本地")
-                Text("云端").tag("云端")
-            }
-            .frame(width: 100)
+            filterPill("状态", selection: $statusFilter, options: ["全部", "在线", "离线"])
+            filterPill("环境", selection: $envFilter, options: ["全部", "本地", "云端"])
 
             Spacer()
 
-            HStack {
+            HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 12))
                 TextField("搜索Agent...", text: $searchText)
                     .textFieldStyle(.plain)
+                    .font(.system(size: 13))
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
-            .frame(width: 220)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .frame(width: 200)
         }
+    }
+
+    private func filterPill(_ label: String, selection: Binding<String>, options: [String]) -> some View {
+        Menu {
+            ForEach(options, id: \.self) { option in
+                Button {
+                    selection.wrappedValue = option
+                } label: {
+                    if selection.wrappedValue == option {
+                        Label(option, systemImage: "checkmark")
+                    } else {
+                        Text(option)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(label).foregroundStyle(.secondary)
+                Text(selection.wrappedValue)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .font(.system(size: 12))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.regularMaterial, in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     private var employeeGrid: some View {
         LazyVGrid(columns: columns, spacing: 16) {
             ForEach(filteredEmployees) { emp in
                 EmployeeCardView(employee: emp) {
-                    detailEmployee = emp
+                    onOpenEmployee(emp)
                 }
             }
         }

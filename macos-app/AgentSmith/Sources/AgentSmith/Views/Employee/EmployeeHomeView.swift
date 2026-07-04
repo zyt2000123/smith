@@ -31,7 +31,7 @@ struct EmployeeHomeView: View {
 
                 Text(String(employee.name.prefix(1)))
                     .font(.system(size: 36, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundStyle(.white)
             }
             .padding(.trailing, 4)
 
@@ -42,7 +42,7 @@ struct EmployeeHomeView: View {
 
                     Text(employee.role)
                         .font(.system(size: 12))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
                         .background(Capsule().fill(Color.secondary.opacity(0.1)))
@@ -53,13 +53,13 @@ struct EmployeeHomeView: View {
                             .frame(width: 8, height: 8)
                         Text(employee.isOnline ? "在线" : "离线")
                             .font(.system(size: 12))
-                            .foregroundColor(employee.isOnline ? .green : .secondary)
+                            .foregroundStyle(employee.isOnline ? .green : .secondary)
                     }
                 }
 
                 Text(employee.description)
                     .font(.system(size: 14))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(2)
 
                 Button {
@@ -70,13 +70,14 @@ struct EmployeeHomeView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .tint(.blue)
             }
         }
         .padding(20)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
+                .fill(.regularMaterial)
+                .shadow(color: .black.opacity(0.04), radius: 8, y: 2)
         )
     }
 
@@ -108,12 +109,12 @@ struct EmployeeHomeView: View {
                         ForEach(workStyles, id: \.self) { style in
                             Text(style)
                                 .font(.system(size: 12))
-                                .foregroundColor(.primary)
+                                .foregroundStyle(.primary)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
                                 .background(
                                     RoundedRectangle(cornerRadius: 6)
-                                        .fill(Color.secondary.opacity(0.08))
+                                        .fill(Color.blue.opacity(0.08))
                                 )
                         }
                     }
@@ -137,8 +138,8 @@ struct EmployeeHomeView: View {
         .padding(20)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
+                .fill(.regularMaterial)
+                .shadow(color: .black.opacity(0.04), radius: 8, y: 2)
         )
     }
 
@@ -146,11 +147,11 @@ struct EmployeeHomeView: View {
         HStack(spacing: 8) {
             Image(systemName: icon)
                 .font(.system(size: 12))
-                .foregroundColor(.accentColor)
+                .foregroundStyle(.blue)
                 .frame(width: 18)
             Text(text)
                 .font(.system(size: 13))
-                .foregroundColor(.primary)
+                .foregroundStyle(.primary)
         }
     }
 
@@ -160,7 +161,7 @@ struct EmployeeHomeView: View {
                 .font(.system(size: 13, weight: .medium))
             Text(desc)
                 .font(.system(size: 11))
-                .foregroundColor(.secondary)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -178,7 +179,7 @@ struct EmployeeHomeView: View {
                     Button("管理 >") {}
                         .buttonStyle(.plain)
                         .font(.system(size: 13))
-                        .foregroundColor(.accentColor)
+                        .foregroundStyle(.blue)
                 }
 
                 FlowLayout(spacing: 8) {
@@ -194,7 +195,7 @@ struct EmployeeHomeView: View {
                         .padding(.vertical, 5)
                         .background(
                             RoundedRectangle(cornerRadius: 6)
-                                .fill(Color.secondary.opacity(0.08))
+                                .fill(Color.blue.opacity(0.08))
                         )
                     }
                 }
@@ -208,21 +209,23 @@ struct EmployeeHomeView: View {
                     Button("+ 添加") {}
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .tint(.blue)
                     Button("{ } 导入 JSON") {}
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .tint(.blue)
                 }
 
                 Text("暂无连接器")
                     .font(.system(size: 13))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(20)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
+                .fill(.regularMaterial)
+                .shadow(color: .black.opacity(0.04), radius: 8, y: 2)
         )
     }
 
@@ -237,7 +240,7 @@ struct EmployeeHomeView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "doc.text")
                             .font(.system(size: 20))
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.blue)
                         Text(file)
                             .font(.system(size: 13, weight: .medium))
                     }
@@ -245,11 +248,11 @@ struct EmployeeHomeView: View {
                     .padding(14)
                     .background(
                         RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.secondary.opacity(0.06))
+                            .fill(Color.blue.opacity(0.04))
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+                            .stroke(Color.blue.opacity(0.1), lineWidth: 1)
                     )
                 }
             }
@@ -257,8 +260,8 @@ struct EmployeeHomeView: View {
         .padding(20)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
+                .fill(.regularMaterial)
+                .shadow(color: .black.opacity(0.04), radius: 8, y: 2)
         )
     }
 }

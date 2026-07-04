@@ -30,28 +30,46 @@ enum EmployeeDetailTab: String, CaseIterable {
         case .permissions: return "shield"
         }
     }
+
+    var selectedIcon: String {
+        switch self {
+        case .home: return "house.fill"
+        case .projects: return "folder.fill"
+        case .automations: return "clock.arrow.circlepath"
+        case .tasks: return "list.bullet.rectangle.portrait.fill"
+        case .memory: return "brain.head.profile.fill"
+        case .skills: return "puzzlepiece.fill"
+        case .connectors: return "link"
+        case .im: return "message.fill"
+        case .permissions: return "shield.fill"
+        }
+    }
 }
 
 struct EmployeeDetailView: View {
     let employee: Employee
+    var onBack: (() -> Void)? = nil
     @State private var selectedTab: EmployeeDetailTab = .home
+    @State private var hoveredTab: EmployeeDetailTab?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         HStack(spacing: 0) {
-            // Left sidebar
             VStack(alignment: .leading, spacing: 2) {
                 Button {
-                    dismiss()
+                    if let onBack {
+                        onBack()
+                    } else {
+                        dismiss()
+                    }
                 } label: {
                     Label("我的Agent", systemImage: "chevron.left")
                         .font(.system(size: 13))
-                        .foregroundColor(.accentColor)
+                        .foregroundStyle(.blue)
                 }
                 .buttonStyle(.plain)
                 .padding(.bottom, 16)
 
-                // Employee avatar + name
                 HStack(spacing: 10) {
                     ZStack {
                         Circle()
@@ -59,7 +77,7 @@ struct EmployeeDetailView: View {
                             .frame(width: 32, height: 32)
                         Text(String(employee.name.prefix(1)))
                             .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.white)
+                            .foregroundStyle(.white)
                     }
                     VStack(alignment: .leading, spacing: 1) {
                         Text(employee.name)
@@ -70,40 +88,55 @@ struct EmployeeDetailView: View {
                                 .frame(width: 6, height: 6)
                             Text(employee.isOnline ? "在线" : "离线")
                                 .font(.system(size: 11))
-                                .foregroundColor(.secondary)
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }
                 .padding(.bottom, 16)
 
-                // Tab list
                 ForEach(EmployeeDetailTab.allCases, id: \.self) { tab in
+                    let isSelected = selectedTab == tab
+                    let isHovered = hoveredTab == tab
+
                     Button {
                         selectedTab = tab
                     } label: {
-                        Label(tab.label, systemImage: tab.icon)
-                            .font(.system(size: 13))
-                            .foregroundColor(selectedTab == tab ? .accentColor : .primary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 6)
-                            .padding(.horizontal, 10)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(selectedTab == tab ? Color.accentColor.opacity(0.1) : Color.clear)
-                            )
+                        Label {
+                            Text(tab.label)
+                        } icon: {
+                            Image(systemName: isSelected ? tab.selectedIcon : tab.icon)
+                        }
+                        .font(.system(size: 13))
+                        .foregroundStyle(isSelected ? .blue : .primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(
+                                    isSelected
+                                        ? Color.blue.opacity(0.12)
+                                        : isHovered
+                                            ? Color.primary.opacity(0.06)
+                                            : Color.clear
+                                )
+                        )
                     }
                     .buttonStyle(.plain)
+                    .onHover { hovering in
+                        hoveredTab = hovering ? tab : nil
+                    }
+                    .animation(.easeInOut(duration: 0.15), value: isHovered)
                 }
 
                 Spacer()
             }
             .padding(16)
             .frame(width: 200)
-            .background(Color(nsColor: .controlBackgroundColor))
+            .background(.ultraThinMaterial)
 
             Divider()
 
-            // Content
             ScrollView {
                 Group {
                     switch selectedTab {
@@ -125,9 +158,9 @@ struct EmployeeDetailView: View {
                         VStack(spacing: 8) {
                             Image(systemName: "message")
                                 .font(.system(size: 40))
-                                .foregroundColor(.secondary.opacity(0.5))
+                                .foregroundStyle(.secondary.opacity(0.5))
                             Text("暂无 IM 连接")
-                                .foregroundColor(.secondary)
+                                .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .padding(.top, 120)
@@ -135,9 +168,9 @@ struct EmployeeDetailView: View {
                         VStack(spacing: 8) {
                             Image(systemName: "folder")
                                 .font(.system(size: 40))
-                                .foregroundColor(.secondary.opacity(0.5))
+                                .foregroundStyle(.secondary.opacity(0.5))
                             Text("暂无项目")
-                                .foregroundColor(.secondary)
+                                .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .padding(.top, 120)
@@ -146,7 +179,7 @@ struct EmployeeDetailView: View {
                 .padding(24)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(.regularMaterial)
         }
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden)

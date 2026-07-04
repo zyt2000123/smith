@@ -33,7 +33,7 @@ struct EmployeeSkillsView: View {
                         .font(.system(size: 24, weight: .bold))
                     Text("管理该Agent可使用的技能模块")
                         .font(.system(size: 14))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button {
@@ -43,6 +43,7 @@ struct EmployeeSkillsView: View {
                         .font(.system(size: 13, weight: .medium))
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.blue)
             }
 
             LazyVGrid(columns: columns, spacing: 16) {
@@ -58,14 +59,14 @@ struct EmployeeSkillsView: View {
                         }
                         Text(skill.description)
                             .font(.system(size: 12))
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.secondary)
                             .lineLimit(2)
                     }
                     .padding(14)
                     .background(
                         RoundedRectangle(cornerRadius: 10)
-                            .fill(Color(nsColor: .controlBackgroundColor))
-                            .shadow(color: .black.opacity(0.04), radius: 4, y: 1)
+                            .fill(.regularMaterial)
+                            .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)

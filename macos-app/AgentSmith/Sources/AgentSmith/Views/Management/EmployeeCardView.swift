@@ -3,121 +3,50 @@ import SwiftUI
 struct EmployeeCardView: View {
     let employee: Employee
     var onTap: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 12) {
-                // Top: avatar + info
+            VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .top, spacing: 12) {
-                    // Avatar
-                    ZStack {
-                        Circle()
-                            .fill(employee.avatarColor.gradient)
-                            .frame(width: 44, height: 44)
-                        Text(String(employee.name.prefix(1)))
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundColor(.white)
-                    }
+                    EmployeePortraitView(
+                        imageName: employee.avatarImageName,
+                        fallbackColor: employee.avatarColor,
+                        fallbackText: String(employee.name.prefix(1)),
+                        width: 108,
+                        height: 132,
+                        cornerRadius: 18
+                    )
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        // Name + role
+                    VStack(alignment: .leading, spacing: 5) {
                         HStack(spacing: 8) {
                             Text(employee.name)
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundColor(.primary)
-
+                                .font(.system(size: 18, weight: .semibold))
                             Text(employee.role)
                                 .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Capsule().fill(Color.secondary.opacity(0.1)))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Color.blue.opacity(0.08), in: Capsule())
+                        }
 
-                            Text(employee.environment)
+                        HStack(spacing: 8) {
+                            Label(employee.device, systemImage: "laptopcomputer")
                                 .font(.system(size: 11))
-                                .foregroundColor(.secondary)
+                                .foregroundStyle(.orange)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
-                                .background(Capsule().fill(Color.secondary.opacity(0.1)))
-                        }
+                                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
 
-                        // Device tag
-                        HStack(spacing: 4) {
-                            Label(employee.device, systemImage: "desktopcomputer")
-                                .font(.system(size: 11))
-                                .foregroundColor(.orange)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(
-                                    Capsule().fill(Color.orange.opacity(0.1))
-                                )
-                        }
+                            Circle()
+                                .fill(employee.isOnline ? Color.green : Color.gray.opacity(0.5))
+                                .frame(width: 8, height: 8)
 
-                        // Status + join date
-                        HStack(spacing: 10) {
-                            HStack(spacing: 4) {
-                                Circle()
-                                    .fill(employee.isOnline ? Color.green : Color.gray)
-                                    .frame(width: 7, height: 7)
-                                Text(employee.isOnline ? "在线" : "离线")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(employee.isOnline ? .green : .secondary)
-                            }
-                            HStack(spacing: 4) {
-                                Image(systemName: "calendar")
-                                    .font(.system(size: 10))
-                                    .foregroundColor(.secondary)
-                                Text("入职 \(employee.joinDate.formatted(.dateTime.month().day()))")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.secondary)
-                            }
+                            Text(employee.isOnline ? "Online" : "Offline")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(employee.isOnline ? .green : .secondary)
                         }
                     }
-                }
-
-                // Description
-                Text(employee.description)
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-
-                Divider()
-
-                // Knowledge tags
-                HStack(spacing: 6) {
-                    ForEach(employee.knowledge, id: \.self) { tag in
-                        Text(tag)
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color.secondary.opacity(0.08))
-                            )
-                    }
-                    Spacer()
-                }
-
-                // Action buttons
-                HStack(spacing: 8) {
-                    Button {
-                        // create conversation task
-                    } label: {
-                        Text("创建对话任务")
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-
-                    Button {
-                        // create automation task
-                    } label: {
-                        Text("创建自动任务")
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
 
                     Spacer()
 
@@ -128,25 +57,64 @@ struct EmployeeCardView: View {
                         Button("删除", role: .destructive) {}
                     } label: {
                         Image(systemName: "ellipsis")
-                            .font(.system(size: 14))
-                            .foregroundColor(.secondary)
-                            .frame(width: 28, height: 28)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 24, height: 24)
                     }
                     .menuStyle(.borderlessButton)
-                    .frame(width: 28)
+                    .frame(width: 24)
+                }
+
+                Text(employee.description)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .lineSpacing(2)
+
+                HStack(spacing: 5) {
+                    ForEach(employee.knowledge, id: \.self) { tag in
+                        Text(tag)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
+                    }
+                    Spacer()
+                }
+
+                HStack(spacing: 8) {
+                    Button {} label: {
+                        Label("创建对话任务", systemImage: "arrow.up.right.square")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button {} label: {
+                        Label("创建自动任务", systemImage: "clock.arrow.circlepath")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Spacer()
                 }
             }
             .padding(16)
             .background(
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-                    .shadow(color: .black.opacity(0.06), radius: 8, y: 2)
+                    .fill(.regularMaterial)
+                    .shadow(color: .black.opacity(isHovered ? 0.1 : 0.04), radius: isHovered ? 12 : 6, y: isHovered ? 4 : 2)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                    .stroke(Color.primary.opacity(0.05), lineWidth: 0.5)
             )
+            .scaleEffect(isHovered ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .animation(.easeOut(duration: 0.15), value: isHovered)
     }
 }

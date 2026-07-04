@@ -1,13 +1,17 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.1
 import PackageDescription
 
 let package = Package(
     name: "AgentSmith",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     targets: [
         .executableTarget(
             name: "AgentSmith",
-            path: "Sources/AgentSmith"
+            path: "Sources/AgentSmith",
+            resources: [
+                .copy("Resources/AppIcon.icns"),
+                .copy("Resources/Employees")
+            ]
         )
     ]
 )
