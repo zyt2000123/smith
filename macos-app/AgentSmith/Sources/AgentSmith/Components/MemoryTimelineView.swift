@@ -20,7 +20,7 @@ struct MemoryTimelineView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("记忆时间线")
-                .font(.system(size: 18, weight: .semibold))
+                .appFont(size: 18, weight: .semibold)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
@@ -36,10 +36,10 @@ struct MemoryTimelineView: View {
                                     )
 
                                 Text(node.label)
-                                    .font(.system(size: 11))
+                                    .appFont(size: 11)
                                     .foregroundStyle(.secondary)
                                 Text(node.skill)
-                                    .font(.system(size: 12, weight: .medium))
+                                    .appFont(size: 12, weight: .medium)
                                     .foregroundStyle(.primary)
                             }
 
@@ -57,7 +57,7 @@ struct MemoryTimelineView: View {
             }
         }
         .padding(20)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .appCardSurface()
     }
 }

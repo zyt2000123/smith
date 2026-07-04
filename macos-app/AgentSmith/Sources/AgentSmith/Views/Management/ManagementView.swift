@@ -44,7 +44,9 @@ struct ManagementView: View {
                 filterBar
                 employeeGrid
             }
-            .padding(24)
+            .padding(.horizontal, 24)
+            .padding(.bottom, 24)
+            .padding(.top, 40)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $showCreateSheet) {
@@ -56,9 +58,9 @@ struct ManagementView: View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("我的Agent")
-                    .font(.system(size: 26, weight: .bold))
+                    .appFont(size: 26, weight: .bold)
                 Text("统一创建、管理和对话你的Agent")
-                    .font(.system(size: 13))
+                    .appFont(size: 13)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -66,7 +68,7 @@ struct ManagementView: View {
                 showCreateSheet = true
             } label: {
                 Label("新建Agent", systemImage: "plus")
-                    .font(.system(size: 13, weight: .medium))
+                    .appFont(size: 13, weight: .medium)
             }
             .buttonStyle(.borderedProminent)
             .tint(.blue)
@@ -91,14 +93,14 @@ struct ManagementView: View {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.tertiary)
-                    .font(.system(size: 12))
+                    .appFont(size: 12)
                 TextField("搜索Agent...", text: $searchText)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .appFont(size: 13)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .background(AppPalette.mutedSurface, in: RoundedRectangle(cornerRadius: 8))
             .frame(width: 200)
         }
     }
@@ -121,13 +123,13 @@ struct ManagementView: View {
                 Text(label).foregroundStyle(.secondary)
                 Text(selection.wrappedValue)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
+                    .appFont(size: 9, weight: .semibold)
                     .foregroundStyle(.tertiary)
             }
-            .font(.system(size: 12))
+            .appFont(size: 12)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(.regularMaterial, in: Capsule())
+            .background(AppPalette.mutedSurface, in: Capsule())
         }
         .buttonStyle(.plain)
     }

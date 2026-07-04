@@ -30,9 +30,9 @@ struct EmployeeSkillsView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("技能")
-                        .font(.system(size: 24, weight: .bold))
+                        .appFont(size: 24, weight: .bold)
                     Text("管理该Agent可使用的技能模块")
-                        .font(.system(size: 14))
+                        .appFont(size: 14)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -40,7 +40,7 @@ struct EmployeeSkillsView: View {
                     // add skill
                 } label: {
                     Label("添加技能", systemImage: "plus")
-                        .font(.system(size: 13, weight: .medium))
+                        .appFont(size: 13, weight: .medium)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
@@ -51,14 +51,14 @@ struct EmployeeSkillsView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
                             Text(skill.name)
-                                .font(.system(size: 14, weight: .semibold))
+                                .appFont(size: 14, weight: .semibold)
                             Spacer()
                             Circle()
                                 .fill(skill.isActive ? Color.green : Color.gray.opacity(0.4))
                                 .frame(width: 8, height: 8)
                         }
                         Text(skill.description)
-                            .font(.system(size: 12))
+                            .appFont(size: 12)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                     }
