@@ -8,15 +8,37 @@ from .interface import MemoryEntry
 
 
 class FileMemoryStore:
-    """File-based memory store reading from an employee's memory/ directory.
+    """File-based memory store with scope-based subdirectories.
 
-    Each memory entry is a plain-text file: <id>.md with YAML-like header.
-    Search is simple keyword matching.
+    Directory layout:
+        memory/agent/<id>.md   — agent-scoped memories
+        memory/project/<id>.md — project-scoped memories
+
+    Project-scoped memories sort before agent-scoped in search results.
     """
 
     def __init__(self, memory_dir: Path) -> None:
         self._dir = memory_dir
-        self._dir.mkdir(parents=True, exist_ok=True)
+        self._agent_dir = memory_dir / "agent"
+        self._project_dir = memory_dir / "project"
+        self._agent_dir.mkdir(parents=True, exist_ok=True)
+        self._project_dir.mkdir(parents=True, exist_ok=True)
+
+    def _scope_dir(self, scope: str) -> Path:
+        return self._project_dir if scope == "project" else self._agent_dir
+
+    def _all_md_files(self) -> list[tuple[Path, str]]:
+        """Return (path, scope) for every memory file, project first."""
+        files: list[tuple[Path, str]] = []
+        for f in sorted(self._project_dir.glob("*.md")):
+            files.append((f, "project"))
+        for f in sorted(self._agent_dir.glob("*.md")):
+            files.append((f, "agent"))
+        # Backward compat: root-level .md files treated as agent scope
+        for f in sorted(self._dir.glob("*.md")):
+            if f.parent == self._dir:
+                files.append((f, "agent"))
+        return files
 
     async def search(self, query: str) -> list[MemoryEntry]:
         results: list[MemoryEntry] = []
@@ -24,11 +46,11 @@ class FileMemoryStore:
         if not keywords:
             return results
 
-        for f in sorted(self._dir.glob("*.md")):
-            content = f.read_text(encoding="utf-8")
+        for path, default_scope in self._all_md_files():
+            content = path.read_text(encoding="utf-8")
             lower_content = content.lower()
             if any(kw in lower_content for kw in keywords):
-                entry = self._parse_file(f, content)
+                entry = self._parse_file(path, content, default_scope)
                 if entry:
                     results.append(entry)
 
@@ -43,45 +65,99 @@ class FileMemoryStore:
             scope=scope,  # type: ignore[arg-type]
             evidence=evidence,
             created_at=now,
+            last_accessed=now,
         )
+        self._write_entry(entry)
+        return entry
 
+    async def update(
+        self, entry_id: str, content: str | None = None, evidence: str | None = None
+    ) -> bool:
+        """Update an existing memory entry's content and/or evidence."""
+        path, scope = self._find_entry_file(entry_id)
+        if path is None:
+            return False
+
+        raw = path.read_text(encoding="utf-8")
+        entry = self._parse_file(path, raw, scope or "agent")
+        if entry is None:
+            return False
+
+        if content is not None:
+            entry.content = content
+        if evidence is not None:
+            entry.evidence = evidence
+        entry.last_accessed = datetime.now(timezone.utc).isoformat()
+
+        self._write_entry(entry)
+        return True
+
+    async def remove(self, entry_id: str) -> bool:
+        path, _ = self._find_entry_file(entry_id)
+        if path is not None and path.is_file():
+            path.unlink()
+            return True
+        return False
+
+    async def list_all(self) -> list[MemoryEntry]:
+        """Return all memory entries, project-scoped first."""
+        entries: list[MemoryEntry] = []
+        for path, default_scope in self._all_md_files():
+            raw = path.read_text(encoding="utf-8")
+            entry = self._parse_file(path, raw, default_scope)
+            if entry:
+                entries.append(entry)
+        return entries
+
+    def _find_entry_file(self, entry_id: str) -> tuple[Path | None, str | None]:
+        """Locate an entry file across all scope directories."""
+        for scope_dir, scope in [
+            (self._project_dir, "project"),
+            (self._agent_dir, "agent"),
+            (self._dir, "agent"),
+        ]:
+            path = scope_dir / f"{entry_id}.md"
+            if path.is_file():
+                return path, scope
+        return None, None
+
+    def _write_entry(self, entry: MemoryEntry) -> None:
+        target_dir = self._scope_dir(entry.scope)
         text = (
             f"---\n"
             f"id: {entry.id}\n"
             f"scope: {entry.scope}\n"
             f"created_at: {entry.created_at}\n"
+            f"last_accessed: {entry.last_accessed}\n"
             f"---\n"
             f"{entry.content}\n\n"
             f"Evidence: {entry.evidence}\n"
         )
-        (self._dir / f"{entry.id}.md").write_text(text, encoding="utf-8")
-        return entry
-
-    async def remove(self, entry_id: str) -> bool:
-        path = self._dir / f"{entry_id}.md"
-        if path.is_file():
-            path.unlink()
-            return True
-        return False
+        (target_dir / f"{entry.id}.md").write_text(text, encoding="utf-8")
 
     @staticmethod
-    def _parse_file(path: Path, raw: str) -> MemoryEntry | None:
+    def _parse_file(path: Path, raw: str, default_scope: str = "agent") -> MemoryEntry | None:
         """Parse a memory file with YAML frontmatter."""
         entry_id = path.stem
-        scope = "agent"
+        scope = default_scope
         created_at = ""
+        last_accessed = ""
         body = raw
 
         if raw.startswith("---"):
             parts = raw.split("---", 2)
             if len(parts) >= 3:
                 for line in parts[1].strip().splitlines():
-                    if line.startswith("scope:"):
-                        scope = line.split(":", 1)[1].strip()
-                    elif line.startswith("created_at:"):
-                        created_at = line.split(":", 1)[1].strip()
-                    elif line.startswith("id:"):
-                        entry_id = line.split(":", 1)[1].strip()
+                    key, _, val = line.partition(":")
+                    val = val.strip()
+                    if key == "scope":
+                        scope = val
+                    elif key == "created_at":
+                        created_at = val
+                    elif key == "last_accessed":
+                        last_accessed = val
+                    elif key == "id":
+                        entry_id = val
                 body = parts[2].strip()
 
         # Split body from evidence
@@ -97,7 +173,15 @@ class FileMemoryStore:
             scope=scope,  # type: ignore[arg-type]
             evidence=evidence,
             created_at=created_at,
+            last_accessed=last_accessed or created_at,
         )
+
+
+# ---------------------------------------------------------------------------
+# Conversation-level memory persistence
+# ---------------------------------------------------------------------------
+
+_DREAM_INTERVAL = 5  # run dream every N conversations
 
 
 async def save_conversation_memory(
@@ -105,14 +189,15 @@ async def save_conversation_memory(
 ) -> None:
     """Save a memory entry after a conversation that involved tool usage."""
     if not had_tools:
-        return  # Simple Q&A doesn't need memory
+        return
 
     import json
 
-    memory_dir = employee_dir / "memory" / "conversations"
-    memory_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir = employee_dir / "memory"
+    conversations_dir = memory_dir / "conversations"
+    conversations_dir.mkdir(parents=True, exist_ok=True)
 
-    recent_file = employee_dir / "memory" / "recent.jsonl"
+    recent_file = memory_dir / "recent.jsonl"
     recent_file.parent.mkdir(parents=True, exist_ok=True)
 
     now = datetime.now(timezone.utc).isoformat()
@@ -122,14 +207,29 @@ async def save_conversation_memory(
         "timestamp": now,
     }
 
-    # Append to recent.jsonl
     with open(recent_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    # Also save as a memory entry via the store
-    store = FileMemoryStore(employee_dir / "memory")
+    store = FileMemoryStore(memory_dir)
     await store.add(
         content=f"Task: {user_msg[:100]}\nResult: {reply[:200]}",
         evidence=f"conversation at {now}",
         scope="agent",
     )
+
+    # Periodic dream consolidation
+    counter_file = memory_dir / ".dream_counter"
+    count = 0
+    if counter_file.is_file():
+        try:
+            count = int(counter_file.read_text().strip())
+        except (ValueError, OSError):
+            count = 0
+    count += 1
+    counter_file.write_text(str(count), encoding="utf-8")
+
+    if count >= _DREAM_INTERVAL:
+        counter_file.write_text("0", encoding="utf-8")
+        from .dream import DreamConsolidator
+        consolidator = DreamConsolidator(store)
+        await consolidator.apply()

@@ -98,23 +98,38 @@ class PromptAssembler:
                     except json.JSONDecodeError:
                         continue
 
-        # Read stored memory entries
+        # Read stored memory entries (project-scoped first, then agent-scoped)
         if memory_dir.is_dir():
-            md_files = sorted(memory_dir.glob("*.md"))
-            if md_files:
+            scoped_dirs = [
+                (memory_dir / "project", "## Project Memories"),
+                (memory_dir / "agent", "## Agent Memories"),
+            ]
+            # Backward compat: root-level .md files
+            fallback_files = [
+                f for f in sorted(memory_dir.glob("*.md"))
+                if f.parent == memory_dir
+            ]
+            total = 0
+            cap = 20
+            for scope_dir, header in scoped_dirs:
+                if not scope_dir.is_dir():
+                    continue
+                md_files = sorted(scope_dir.glob("*.md"))
+                if not md_files:
+                    continue
+                mem_parts.append(header)
+                for f in md_files:
+                    if total >= cap:
+                        break
+                    mem_parts.append(self._extract_memory_body(f))
+                    total += 1
+            if fallback_files and total < cap:
                 mem_parts.append("## Stored Memories")
-                for f in md_files[:20]:  # Cap at 20 entries
-                    content = f.read_text(encoding="utf-8").strip()
-                    # Extract body (skip YAML frontmatter)
-                    if content.startswith("---"):
-                        parts = content.split("---", 2)
-                        body = parts[2].strip() if len(parts) >= 3 else content
-                    else:
-                        body = content
-                    # Truncate long entries
-                    if len(body) > 150:
-                        body = body[:150] + "..."
-                    mem_parts.append(f"- {body}")
+                for f in fallback_files:
+                    if total >= cap:
+                        break
+                    mem_parts.append(self._extract_memory_body(f))
+                    total += 1
 
         if mem_parts:
             layers.append("\n".join(mem_parts))
@@ -132,6 +147,19 @@ class PromptAssembler:
 
         # Filter empty and join
         return _SEPARATOR.join(layer for layer in layers if layer.strip())
+
+    @staticmethod
+    def _extract_memory_body(f: Path) -> str:
+        """Read a memory .md file and return a truncated body line."""
+        content = f.read_text(encoding="utf-8").strip()
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            body = parts[2].strip() if len(parts) >= 3 else content
+        else:
+            body = content
+        if len(body) > 150:
+            body = body[:150] + "..."
+        return f"- {body}"
 
     @staticmethod
     def _read(path: Path) -> str:

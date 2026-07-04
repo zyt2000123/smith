@@ -4,11 +4,11 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .gate import (
+    DesignGate,
     Gate,
     PlanningGate,
     ReviewGate,
     RootCauseGate,
-    SkillRubricGate,
     TestGate,
     ValidationGate,
 )
@@ -45,7 +45,7 @@ class SkillChain:
         return SkillChain(
             nodes=[
                 SkillNode(skill_name="planning", gate=PlanningGate()),
-                SkillNode(skill_name="architecture", gate=SkillRubricGate(), condition=_needs_architecture),
+                SkillNode(skill_name="architecture", gate=DesignGate(), condition=_needs_architecture),
                 SkillNode(skill_name="testing-strategy", gate=TestGate()),
                 SkillNode(skill_name="change-validation", gate=ValidationGate()),
                 SkillNode(skill_name="code-review", gate=ReviewGate()),

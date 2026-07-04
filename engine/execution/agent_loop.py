@@ -17,8 +17,13 @@ from skill.registry import SkillRegistry
 from tool.interface import ToolCall
 from tool.registry import ToolRegistry
 from .backtrack import FailureLoopGuard, FailureSignature
+from .gate import SkillRubricGate
 from .skill_chain import SkillChain
 from .task_router import TaskType, route_task
+
+# Shared rubric gate instance — stateless, safe to reuse
+_rubric_gate = SkillRubricGate()
+_RUBRIC_MAX_RETRIES = 3
 
 
 async def _react_loop(
@@ -173,19 +178,52 @@ async def run_agent(
             node_idx += 1
             continue
 
-        # Load and execute skill
-        skill = skill_registry.get(node.skill_name)
-        if skill is None:
-            # Skill not found — run as direct ReAct with skill name as hint
-            messages = base_messages + [
-                {"role": "user", "content": f"[Skill: {node.skill_name}] {user_message}"},
-            ]
-            output = await _react_loop(llm, messages, tool_registry, tool_guard, max_react_iters)
-        else:
-            messages = [{"role": "user", "content": user_message}]
-            output = await execute_skill(skill, llm, tool_registry, messages, context, max_react_iters, tool_guard=tool_guard)
+        # --- Execute skill with rubric gate retry loop ---
+        rubric_attempt = 0
+        output = ""
+        rubric_passed = False
 
-        # Gate check
+        while rubric_attempt < _RUBRIC_MAX_RETRIES:
+            # Build messages — may include rubric retry hints
+            skill = skill_registry.get(node.skill_name)
+            if skill is None:
+                messages = base_messages + [
+                    {"role": "user", "content": f"[Skill: {node.skill_name}] {user_message}"},
+                ]
+                if rubric_attempt == 1 and context.get("_rubric_retry_hint"):
+                    messages.append({"role": "user", "content": context["_rubric_retry_hint"]})
+                elif rubric_attempt == 2:
+                    messages.append({"role": "user", "content": "Switch strategy: try a completely different approach to address the task."})
+                output = await _react_loop(llm, messages, tool_registry, tool_guard, max_react_iters)
+            else:
+                skill_context = dict(context)
+                if rubric_attempt == 1 and skill_context.get("_rubric_retry_hint"):
+                    skill_context["rubric_feedback"] = skill_context["_rubric_retry_hint"]
+                elif rubric_attempt == 2:
+                    skill_context["rubric_feedback"] = "Switch strategy: try a completely different approach to address the task."
+                messages = [{"role": "user", "content": user_message}]
+                output = await execute_skill(skill, llm, tool_registry, messages, skill_context, max_react_iters, tool_guard=tool_guard)
+
+            # Rubric gate check (before node's own gate)
+            rubric_result = await _rubric_gate.check(output, context)
+            if rubric_result.verdict == "pass":
+                rubric_passed = True
+                break
+
+            # Store hint for next retry
+            context["_rubric_retry_hint"] = rubric_result.retry_hint or ""
+            rubric_attempt += 1
+
+        # Clean up transient rubric keys
+        context.pop("_rubric_retry_hint", None)
+
+        if not rubric_passed:
+            return (
+                f"Blocked: skill '{node.skill_name}' failed rubric gate after "
+                f"{_RUBRIC_MAX_RETRIES} attempts. Last: {rubric_result.reason}"
+            )
+
+        # --- Node gate check (existing logic, unchanged) ---
         gate_result = await node.gate.check(output, context)
 
         if gate_result.verdict == "pass":
