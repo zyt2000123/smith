@@ -42,7 +42,7 @@ struct EmployeePermissionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("权限")
-                .font(.system(size: 24, weight: .bold))
+                .appFont(size: 24, weight: .bold)
 
             // Tool guard
             permissionSection(title: "工具守卫", icon: "hammer", rules: toolRules)
@@ -56,23 +56,23 @@ struct EmployeePermissionsView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 14))
+                    .appFont(size: 14)
                     .foregroundStyle(.blue)
                 Text(title)
-                    .font(.system(size: 16, weight: .semibold))
+                    .appFont(size: 16, weight: .semibold)
             }
 
             VStack(spacing: 0) {
                 ForEach(rules) { rule in
                     HStack {
                         Text(rule.pattern)
-                            .font(.system(size: 13, design: .monospaced))
+                            .appFont(size: 13, design: .monospaced)
                             .foregroundStyle(.primary)
 
                         Spacer()
 
                         Text(rule.action.rawValue)
-                            .font(.system(size: 11, weight: .medium))
+                            .appFont(size: 11, weight: .medium)
                             .foregroundStyle(rule.action.color)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)

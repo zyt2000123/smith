@@ -22,7 +22,7 @@ struct EmployeePortraitView: View {
                     .fill(fallbackColor.gradient)
                     .overlay(
                         Text(fallbackText)
-                            .font(.system(size: width * 0.28, weight: .bold))
+                            .appFont(size: width * 0.28, weight: .bold)
                             .foregroundStyle(.white)
                     )
             }

@@ -21,27 +21,25 @@ struct EmployeeHomeView: View {
     // MARK: - Identity
     private var identitySection: some View {
         HStack(alignment: .top, spacing: 20) {
-            // Tilted avatar
-            ZStack {
-                RoundedRectangle(cornerRadius: 20)
-                    .fill(employee.avatarColor.gradient)
-                    .frame(width: 80, height: 80)
-                    .rotationEffect(.degrees(-6))
-                    .shadow(color: employee.avatarColor.opacity(0.3), radius: 10, y: 4)
-
-                Text(String(employee.name.prefix(1)))
-                    .font(.system(size: 36, weight: .bold))
-                    .foregroundStyle(.white)
-            }
+            EmployeePortraitView(
+                imageName: employee.avatarImageName,
+                fallbackColor: employee.avatarColor,
+                fallbackText: String(employee.name.prefix(1)),
+                width: 96,
+                height: 118,
+                cornerRadius: 18
+            )
+            .rotationEffect(.degrees(-4))
+            .shadow(color: .black.opacity(0.10), radius: 10, y: 4)
             .padding(.trailing, 4)
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
                     Text(employee.name)
-                        .font(.system(size: 24, weight: .bold))
+                        .appFont(size: 24, weight: .bold)
 
-                    Text(employee.role)
-                        .font(.system(size: 12))
+                    Text(employee.localizedRole)
+                        .appFont(size: 12)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
@@ -52,13 +50,13 @@ struct EmployeeHomeView: View {
                             .fill(employee.isOnline ? Color.green : Color.gray)
                             .frame(width: 8, height: 8)
                         Text(employee.isOnline ? "在线" : "离线")
-                            .font(.system(size: 12))
+                            .appFont(size: 12)
                             .foregroundStyle(employee.isOnline ? .green : .secondary)
                     }
                 }
 
                 Text(employee.description)
-                    .font(.system(size: 14))
+                    .appFont(size: 14)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
 
@@ -66,7 +64,7 @@ struct EmployeeHomeView: View {
                     // edit action
                 } label: {
                     Label("编辑资料", systemImage: "pencil")
-                        .font(.system(size: 12))
+                        .appFont(size: 12)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -74,24 +72,21 @@ struct EmployeeHomeView: View {
             }
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.04), radius: 8, y: 2)
-        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .appCardSurface()
     }
 
     // MARK: - About Me
     private var aboutMeSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("关于我")
-                .font(.system(size: 18, weight: .semibold))
+                .appFont(size: 18, weight: .semibold)
 
             HStack(alignment: .top, spacing: 16) {
                 // Strengths
                 VStack(alignment: .leading, spacing: 10) {
                     Text("我最擅长")
-                        .font(.system(size: 14, weight: .medium))
+                        .appFont(size: 14, weight: .medium)
                     VStack(alignment: .leading, spacing: 8) {
                         strengthRow(icon: "paintbrush", text: "精准的视觉还原与界面设计")
                         strengthRow(icon: "square.grid.3x3", text: "组件化架构与设计系统构建")
@@ -104,11 +99,11 @@ struct EmployeeHomeView: View {
                 // Work style
                 VStack(alignment: .leading, spacing: 10) {
                     Text("工作风格")
-                        .font(.system(size: 14, weight: .medium))
+                        .appFont(size: 14, weight: .medium)
                     FlowLayout(spacing: 6) {
                         ForEach(workStyles, id: \.self) { style in
                             Text(style)
-                                .font(.system(size: 12))
+                                .appFont(size: 12)
                                 .foregroundStyle(.primary)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
@@ -124,7 +119,7 @@ struct EmployeeHomeView: View {
                 // Work modes
                 VStack(alignment: .leading, spacing: 10) {
                     Text("工作模式")
-                        .font(.system(size: 14, weight: .medium))
+                        .appFont(size: 14, weight: .medium)
                     VStack(alignment: .leading, spacing: 8) {
                         workModeRow(title: "构建新界面", desc: "从设计稿到可交互组件")
                         workModeRow(title: "修复交互问题", desc: "定位并修复用户交互缺陷")
@@ -136,21 +131,18 @@ struct EmployeeHomeView: View {
             }
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.04), radius: 8, y: 2)
-        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .appCardSurface()
     }
 
     private func strengthRow(icon: String, text: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
-                .font(.system(size: 12))
+                .appFont(size: 12)
                 .foregroundStyle(.blue)
                 .frame(width: 18)
             Text(text)
-                .font(.system(size: 13))
+                .appFont(size: 13)
                 .foregroundStyle(.primary)
         }
     }
@@ -158,9 +150,9 @@ struct EmployeeHomeView: View {
     private func workModeRow(title: String, desc: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
-                .font(.system(size: 13, weight: .medium))
+                .appFont(size: 13, weight: .medium)
             Text(desc)
-                .font(.system(size: 11))
+                .appFont(size: 11)
                 .foregroundStyle(.secondary)
         }
     }
@@ -169,16 +161,16 @@ struct EmployeeHomeView: View {
     private var skillsAndToolsSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("能力与工具")
-                .font(.system(size: 18, weight: .semibold))
+                .appFont(size: 18, weight: .semibold)
 
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("我的能力 (\(skillTags.count)/\(skillTags.count))")
-                        .font(.system(size: 14, weight: .medium))
+                        .appFont(size: 14, weight: .medium)
                     Spacer()
                     Button("管理 >") {}
                         .buttonStyle(.plain)
-                        .font(.system(size: 13))
+                        .appFont(size: 13)
                         .foregroundStyle(.blue)
                 }
 
@@ -189,7 +181,7 @@ struct EmployeeHomeView: View {
                                 .fill(Color.green)
                                 .frame(width: 6, height: 6)
                             Text(skill)
-                                .font(.system(size: 12))
+                                .appFont(size: 12)
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
@@ -204,7 +196,7 @@ struct EmployeeHomeView: View {
 
                 HStack {
                     Text("连接器")
-                        .font(.system(size: 14, weight: .medium))
+                        .appFont(size: 14, weight: .medium)
                     Spacer()
                     Button("+ 添加") {}
                         .buttonStyle(.bordered)
@@ -217,32 +209,29 @@ struct EmployeeHomeView: View {
                 }
 
                 Text("暂无连接器")
-                    .font(.system(size: 13))
+                    .appFont(size: 13)
                     .foregroundStyle(.secondary)
             }
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.04), radius: 8, y: 2)
-        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .appCardSurface()
     }
 
     // MARK: - Raw Files
     private var rawFilesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("原始档案")
-                .font(.system(size: 18, weight: .semibold))
+                .appFont(size: 18, weight: .semibold)
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                 ForEach(rawFiles, id: \.self) { file in
                     HStack(spacing: 8) {
                         Image(systemName: "doc.text")
-                            .font(.system(size: 20))
+                            .appFont(size: 20)
                             .foregroundStyle(.blue)
                         Text(file)
-                            .font(.system(size: 13, weight: .medium))
+                            .appFont(size: 13, weight: .medium)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(14)
@@ -258,11 +247,8 @@ struct EmployeeHomeView: View {
             }
         }
         .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.04), radius: 8, y: 2)
-        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .appCardSurface()
     }
 }
 

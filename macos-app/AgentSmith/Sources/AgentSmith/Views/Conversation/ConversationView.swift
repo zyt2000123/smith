@@ -60,12 +60,12 @@ struct ConversationView: View {
             VStack(spacing: 0) {
                 HStack {
                     Text("对话")
-                        .font(.system(size: 16, weight: .semibold))
+                        .appFont(size: 16, weight: .semibold)
                     Spacer()
                     Button {
                     } label: {
                         Image(systemName: "square.and.pencil")
-                            .font(.system(size: 14))
+                            .appFont(size: 14)
                     }
                     .buttonStyle(.plain)
                     .tint(.blue)
@@ -86,22 +86,22 @@ struct ConversationView: View {
                                             .fill(conv.avatarColor.gradient)
                                             .frame(width: 36, height: 36)
                                         Text(String(conv.employeeName.prefix(1)))
-                                            .font(.system(size: 14, weight: .semibold))
+                                            .appFont(size: 14, weight: .semibold)
                                             .foregroundStyle(.white)
                                     }
 
                                     VStack(alignment: .leading, spacing: 3) {
                                         HStack {
                                             Text(conv.employeeName)
-                                                .font(.system(size: 13, weight: .medium))
+                                                .appFont(size: 13, weight: .medium)
                                                 .foregroundStyle(.primary)
                                             Spacer()
                                             Text(conv.timestamp)
-                                                .font(.system(size: 11))
+                                                .appFont(size: 11)
                                                 .foregroundStyle(.secondary)
                                         }
                                         Text(conv.preview)
-                                            .font(.system(size: 12))
+                                            .appFont(size: 12)
                                             .foregroundStyle(.secondary)
                                             .lineLimit(1)
                                     }
@@ -131,7 +131,7 @@ struct ConversationView: View {
                     Spacer()
                     Button {} label: {
                         Label("创建对话任务", systemImage: "plus.bubble")
-                            .font(.system(size: 12))
+                            .appFont(size: 12)
                     }
                     .buttonStyle(.bordered)
                     .tint(.blue)
@@ -139,7 +139,7 @@ struct ConversationView: View {
 
                     Button {} label: {
                         Label("创建自动任务", systemImage: "clock.arrow.circlepath")
-                            .font(.system(size: 12))
+                            .appFont(size: 12)
                     }
                     .buttonStyle(.bordered)
                     .tint(.blue)
@@ -154,7 +154,7 @@ struct ConversationView: View {
                             Image(systemName: "sidebar.right")
                             Text("任务列表")
                         }
-                        .font(.system(size: 12))
+                        .appFont(size: 12)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                         .background(
@@ -183,12 +183,12 @@ struct ConversationView: View {
                             .fill(Color.blue.gradient)
                             .frame(width: 56, height: 56)
                         Text("丁")
-                            .font(.system(size: 24, weight: .semibold))
+                            .appFont(size: 24, weight: .semibold)
                             .foregroundStyle(.white)
                     }
 
                     Text("你好，今天我能帮你什么？")
-                        .font(.system(size: 20, weight: .medium))
+                        .appFont(size: 20, weight: .medium)
 
                     HStack(spacing: 12) {
                         ForEach(suggestions) { suggestion in
@@ -197,10 +197,10 @@ struct ConversationView: View {
                             } label: {
                                 HStack(spacing: 8) {
                                     Image(systemName: "sparkles")
-                                        .font(.system(size: 12))
+                                        .appFont(size: 12)
                                         .foregroundStyle(.blue)
                                     Text(suggestion.text)
-                                        .font(.system(size: 13))
+                                        .appFont(size: 13)
                                         .foregroundStyle(.primary)
                                         .lineLimit(2)
                                         .multilineTextAlignment(.leading)
@@ -229,7 +229,7 @@ struct ConversationView: View {
                         Button {
                         } label: {
                             Label("选择工作目录", systemImage: "folder")
-                                .font(.system(size: 12))
+                                .appFont(size: 12)
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
@@ -237,7 +237,7 @@ struct ConversationView: View {
                         Spacer()
 
                         Text("Auto")
-                            .font(.system(size: 12, weight: .medium))
+                            .appFont(size: 12, weight: .medium)
                             .foregroundStyle(.blue)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
@@ -249,7 +249,7 @@ struct ConversationView: View {
                     HStack(spacing: 10) {
                         TextField("输入消息...", text: $messageText)
                             .textFieldStyle(.plain)
-                            .font(.system(size: 14))
+                            .appFont(size: 14)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 10)
                             .background(
@@ -264,7 +264,7 @@ struct ConversationView: View {
                         Button {
                         } label: {
                             Image(systemName: "arrow.up.circle.fill")
-                                .font(.system(size: 28))
+                                .appFont(size: 28)
                                 .foregroundStyle(messageText.isEmpty ? Color.secondary : Color.blue)
                         }
                         .buttonStyle(.plain)
@@ -293,9 +293,9 @@ struct ConversationView: View {
                     } label: {
                         VStack(spacing: 4) {
                             Image(systemName: tab.icon)
-                                .font(.system(size: 14))
+                                .appFont(size: 14)
                             Text(tab.label)
-                                .font(.system(size: 10))
+                                .appFont(size: 10)
                         }
                         .foregroundStyle(selectedPanelTab == tab ? .blue : .secondary)
                         .frame(maxWidth: .infinity)
@@ -362,17 +362,17 @@ struct ConversationView: View {
     private func panelSection(title: String, items: [(String, String, Color)]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
-                .font(.system(size: 13, weight: .semibold))
+                .appFont(size: 13, weight: .semibold)
                 .foregroundStyle(.secondary)
 
             ForEach(items, id: \.0) { item in
                 HStack(spacing: 8) {
                     Image(systemName: item.1)
-                        .font(.system(size: 12))
+                        .appFont(size: 12)
                         .foregroundStyle(item.2)
                         .frame(width: 18)
                     Text(item.0)
-                        .font(.system(size: 13))
+                        .appFont(size: 13)
                 }
                 .padding(.vertical, 4)
                 .padding(.horizontal, 8)
