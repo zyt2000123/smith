@@ -1,88 +1,179 @@
-# agent-Smith
+# Agent-Smith
 
-> 本地Agent工作台 · 自研产品原型已落地
-> 前端复用 LLM-Wiki-Knowledge-Hub 方案（React + Vite + Tailwind + shadcn/Base UI）· Agent 运行时 AgentScope · 壳 Electron
-> 创建: 2026-07-03 · 状态: 产品形态收敛, 开发实现未启动
+> 本地Agent工作台 — 在你的电脑上雇佣、管理和调度 AI Agent
 
-## 一句话定位
+## 产品定位
 
-**agent-Smith 是跑在你电脑上的Agent管理与任务执行台。**
+Agent-Smith 把 AI Agent 产品化为可管理的「Agent」。每个Agent有角色、人设、记忆、技能、权限和工作记录，运行在本机环境中，替用户处理对话任务、自动任务和本地工具调用。
 
-它不是一个单纯聊天窗口，也不是云端知识库的前端壳；它把 Agent 产品化成一个个可管理的「Agent」。每个Agent都有角色、人设、头像、记忆、技能、MCP/连接器、权限、任务和工作记录，并运行在本机环境里，替用户处理对话任务、自动任务和本地工具调用。
+**不是聊天机器人，不是云端壳**——用户管理的是可长期存在的Agent，而不是一次性 prompt。
 
-## 当前产品形态
+## 架构总览
 
-当前原型以 QoderWake 的Agent产品形态为参考，但不复用其代码、品牌或素材；Agent-Smith 保留自己的技术栈和产品边界。
+五层分离，单向依赖：
 
 ```
-Agent管理
-  ├─ 我的Agent / 我的群组
-  ├─ 本地设备、在线状态、角色标签
-  ├─ 创建对话任务 / 创建自动任务
-  └─ 新建Agent
-
-Agent详情首页
-  ├─ 首页 / 项目 / 自动任务 / 任务 / 记忆 / 技能 / 连接器 / IM / 权限
-  ├─ Agent身份、入职时间、简介、编辑
-  ├─ 工作记录
-  └─ 记忆与积累
-
-对话任务
-  ├─ 群组和会话列表
-  ├─ 对话输入区、工作目录上下文
-  └─ 右侧任务/能力面板：计划 / MCP / 技能 / 权限 / 知识库
+app/  ── HTTP/SSE ──→  server/  ── import ──→  engine/  ── import ──→  common/
+                                │                        ↑
+                                └──── 读取 ────→  agents/ ┘
 ```
 
-## 产品原则
-
-1. **Agent 是Agent，不是模型聊天框**：用户管理的是可长期存在的Agent，而不是一次性 prompt。
-2. **本地优先**：人格、记忆、会话、本地工具、任务执行上下文都属于用户电脑；云端只提供团队知识和共享能力。
-3. **任务优先于闲聊**：入口围绕对话任务、自动任务、任务列表、工作记录组织，而不是做泛聊天社区。
-4. **能力显式可控**：技能、MCP、知识库、权限要在当前任务上下文里看得见、可切换、可关闭。
-5. **工作过程可追踪**：Agent首页必须有工作记录、入职信息、记忆与积累，避免 Agent 变成不可审计的黑箱。
-
-## 与 AI Knowledge Hub 的边界
-
-| | agent-Smith（本地） | AI Knowledge Hub（云端） |
+| 目录 | 职责 | 语言 |
 |---|---|---|
-| 定位 | Agent、任务、记忆、本地工具、权限 | 团队知识库、Wiki、权限、检索、MCP token |
-| 数据归属 | 个人电脑（`~/.agent-smith`） | 团队服务器 |
-| 核心对象 | Agent / 任务 / 技能 / 连接器 / 记忆 | 知识库 / 文档 / Wiki / 用户权限 |
-| 集成方式 | 调用 Hub MCP 或检索 API | 提供 MCP 工具和来源回链 |
-| 不做什么 | 不承载团队知识管理 | 不再扩多 Agent 雇佣层 |
+| `common/` | 公共基础设施（配置、SQLite、文件系统、日志） | Python |
+| `engine/` | 自研 Agent 框架（LLM 调用、DAG+ReAct 执行引擎、记忆、安全护栏） | Python |
+| `agents/` | Agent 内容定义（8 个角色模板、6 个内置技能、9 个工具、24 条安全规则） | .md/.yaml/.json + Python |
+| `server/` | 平台后端（FastAPI，Agent/会话/任务/团队管理，23+ API 端点） | Python |
+| `app/` | 原生前端（深蓝主题 Codex 风格） | Swift 6.1 / SwiftUI / macOS 15+ |
 
-## 技术方向
+## 快速开始
 
+### 后端
+
+```bash
+cd server && uv sync
+uv run uvicorn app.main:app --port 8140 --reload
 ```
-SwiftUI macOS 原生应用
-  │ HTTP + SSE（URLSession）
-  ▼
-Python 本地 server（FastAPI + AgentScope）
-  ├─ Agent运行时
-  ├─ 本地文件/SQLite 存储
-  ├─ 本地工具执行
-  └─ Hub MCP / 检索 API 连接
+
+带 LLM 配置启动：
+
+```bash
+AGENTSMITH_LLM_API_KEY="sk-xxx" \
+AGENTSMITH_LLM_BASE_URL="https://your-api.com/v1" \
+AGENTSMITH_LLM_MODEL="glm-4.7" \
+uv run uvicorn app.main:app --port 8140
 ```
+
+### macOS 前端
+
+需要 Xcode 16+，在 Xcode 中打开 `app/Package.swift` 并构建运行。
 
 ## 项目结构
 
-| 目录 | 内容 |
-|---|---|
-| `macos-app/AgentSmith/` | SwiftUI macOS 前端（Swift Package，19 个源文件） |
-| `prototype/` | 早期 React Web 原型（已归档，不再主力开发） |
-| `docs/` | 产品设计、架构、路线图、竞品调研 |
+```
+Agent-Smith/
+├── common/                  # 基础设施层
+│   ├── config.py            #   路径常量 (DATA_DIR, TEMPLATES_DIR, ...)
+│   ├── config_loader.py     #   四层 LLM 配置合并
+│   ├── database.py          #   SQLite WAL + 6 表 schema
+│   ├── filesystem.py        #   Agent目录操作
+│   ├── log.py               #   日志
+│   └── yaml_utils.py        #   YAML/JSON 读写
+│
+├── engine/                  # Agent 执行框架
+│   ├── execution/           #   四层执行引擎
+│   │   ├── task_router.py   #     第 1 层：任务路由（规则引擎）
+│   │   ├── skill_chain.py   #     第 2 层：技能链 DAG 编排
+│   │   ├── agent_loop.py    #     第 3 层：ReAct 循环
+│   │   ├── gate.py          #     12 个门禁
+│   │   └── backtrack.py     #     回退 + Failure Loop Guard
+│   ├── llm/                 #   LLM 调用（OpenAI 兼容 + 流式 + tool_call）
+│   ├── prompt/              #   12 层 System Prompt 组装
+│   ├── tool/                #   工具协议 + 注册 + JSON Schema
+│   ├── skill/               #   技能加载 + 注册 + 执行 + 版本管理
+│   ├── memory/              #   记忆存储 + Dream 整理 + 偏好学习
+│   ├── plugin/              #   插件系统（Webhook + Polling）
+│   └── safety/              #   工具调用安全拦截
+│
+├── agents/                  # Agent 内容定义
+│   ├── templates/           #   8 个角色模板（只读，Git 跟踪）
+│   ├── skills/              #   6 个内置技能 (SKILL.md)
+│   ├── tools/               #   9 个工具 provider
+│   ├── plugins/             #   插件（GitHub webhook）
+│   ├── safety/              #   24 条安全规则（7 大类）
+│   └── output_style.md      #   输出格式规范
+│
+├── server/                  # 平台后端
+│   └── app/
+│       ├── main.py          #   FastAPI 入口
+│       ├── domain/          #   领域模型
+│       ├── routers/         #   12 个路由模块
+│       ├── services/        #   11 个业务服务
+│       ├── infrastructure/  #   Repository 持久化
+│       └── utils/           #   工具（cron 解析等）
+│
+├── app/                     # macOS 原生前端
+│   ├── Package.swift        #   SPM 包定义
+│   └── Sources/AgentSmith/
+│       ├── ContentView.swift        # 主布局（侧栏 + 内容区）
+│       ├── Components/              # 设计系统（AppPalette, AppTypography）
+│       ├── Models/Employee.swift    # 数据模型
+│       ├── Services/APIClient.swift # HTTP 客户端
+│       └── Views/                   # 页面视图
+│
+└── docs/                    # 设计文档
+```
+
+## 核心概念
+
+### Agent
+
+从角色模板创建，拥有独立的人格、技能、记忆和权限。模板在 `agents/templates/` 中定义（只读），创建时复制到 `~/.agent-smith/employees/<id>/`（可读写），此后独立运行、独立积累。
+
+### 执行引擎
+
+混合 DAG + ReAct 四层架构：
+
+1. **任务路由**（规则引擎）— 分为 Bug Fix / Feature / Direct 三条路由
+2. **技能链 DAG**（代码控制）— 强制执行步骤顺序和门禁
+3. **ReAct 循环**（LLM 控制）— 每个技能节点内的思考-工具-观察循环
+4. **安全护栏**（正则拦截）— 24 条规则，7 大类危险命令拦截
+
+宏观流程由代码确定性控制，LLM 只在 ReAct 循环内获得自由度。
+
+### LLM 配置
+
+四层覆盖，优先级从低到高：环境变量/平台级 → 模板级 → Agent级 → 会话级。
+
+### 新加 Agent
+
+```bash
+mkdir agents/templates/<role-name>/
+# 填写 role.md, style.md, workflow.md, toolbox.md, config.yaml
+# 可选：expertise.json, traits.json, pipeline.json, context.md
+# server 自动扫描发现新模板，无需改任何代码
+```
+
+## 运行时数据
+
+```
+~/.agent-smith/
+├── config.yaml                    # 平台级配置
+├── employees/<id>/                # Agent实例
+│   ├── role.md / style.md / ...   # 从模板复制，可编辑
+│   ├── memory/                    # 运行时记忆积累
+│   ├── skills/                    # Agent自装技能
+│   └── sessions/                  # 会话数据
+├── plugins/                       # 用户安装的插件
+└── sqlite/agent-smith.sqlite      # 索引库（WAL 模式）
+```
 
 ## 文档索引
 
 | 文档 | 内容 |
 |---|---|
-| [docs/01-产品设计.md](docs/01-产品设计.md) | 产品定位、信息架构、核心场景、MVP 边界 |
-| [docs/02-架构与借鉴.md](docs/02-架构与借鉴.md) | 技术架构、参考对象、实现边界、风险 |
-| [docs/03-与知识库的拆分与集成.md](docs/03-与知识库的拆分与集成.md) | 与 AI Knowledge Hub 的职责拆分和集成契约 |
-| [docs/04-开发路线图.md](docs/04-开发路线图.md) | 分阶段研发路线和验证点 |
-| [docs/05-QoderWake技术调研.md](docs/05-QoderWake技术调研.md) | QoderWake 技术栈深度调研（网络 + 逆向工程） |
-| [docs/06-Agent文件与技能系统设计参考.md](docs/06-Agent文件与技能系统设计参考.md) | Agent身份文件、技能打包、安全护栏设计参考 |
-| [docs/07-QoderWake完整产品逆向.md](docs/07-QoderWake完整产品逆向.md) | 完整产品逆向（架构、Agent 执行模型、门禁、技能、安全、API 全景） |
-| [docs/08-QoderWake前端架构分析.md](docs/08-QoderWake前端架构分析.md) | 前端 JS bundle 反编译分析 |
-| [macos-app/AgentSmith](macos-app/AgentSmith) | SwiftUI macOS 前端原型 |
+| [docs/01-产品设计与定位](docs/01-产品设计与定位.md) | 产品定位、目标用户、核心场景、产品支柱、MVP 边界 |
+| [docs/02-系统架构](docs/02-系统架构.md) | 五层架构、依赖方向、分层职责、变更影响矩阵 |
+| [docs/03-Agent执行引擎](docs/03-Agent执行引擎.md) | 四层执行模型、门禁系统、回退机制、Prompt 组装 |
+| [docs/04-后端API参考](docs/04-后端API参考.md) | FastAPI 全部端点、领域模型、服务层设计 |
+| [docs/05-macOS前端架构](docs/05-macOS前端架构.md) | SwiftUI 视图层级、设计系统、状态管理、API 集成 |
+| [docs/06-Agent模板与技能规范](docs/06-Agent模板与技能规范.md) | 模板文件格式、SKILL.md 规范、工具 Provider 接口、安全规则 |
+| [docs/07-开发规范与约定](docs/07-开发规范与约定.md) | 分层规则、命名约定、代码风格、提交规范 |
+| [docs/08-开发路线图](docs/08-开发路线图.md) | 分阶段研发计划、当前进度、后续能力 |
+| [docs/09-TODO-待优化清单](docs/09-TODO-待优化清单.md) | 待实现功能、待检查项、技术债务 |
+| [docs/reference/](docs/reference/) | 竞品调研（QoderWake 逆向、OpenHanako 调研、前端分析） |
 
+## 技术栈
+
+| 层 | 技术 |
+|---|---|
+| 后端框架 | Python 3.11+ / FastAPI / uvicorn |
+| Agent 引擎 | 自研（DAG + ReAct，非 AgentScope/LangChain） |
+| 数据存储 | SQLite (WAL) + 文件系统 |
+| LLM 调用 | OpenAI 兼容 API（httpx，支持流式 + tool_call） |
+| 前端 | Swift 6.1 / SwiftUI / macOS 15+ |
+| 包管理 | uv (Python) / SPM (Swift) |
+
+## 许可证
+
+Private — 未开源。

@@ -223,11 +223,11 @@
 ### TD-1: macOS App 未提交改动
 
 - [ ] **待处理**
-- **详情**: `macos-app/` 的 UI 改动在 git stash 里，需要 Xcode 编译才能验证
+- **详情**: `app/` 的 UI 改动在 git stash 里，需要 Xcode 编译才能验证
 - **操作**:
   1. `git stash list` 检查 stash 内容
   2. `git stash pop` 恢复改动
-  3. 在 Xcode 中打开 `macos-app/AgentSmith.xcodeproj`，编译验证
+  3. 在 Xcode 中打开 `app/AgentSmith.xcodeproj`，编译验证
   4. 确认无误后提交
 
 ---
