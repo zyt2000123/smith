@@ -37,9 +37,9 @@ struct EmployeeMemoryView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("记忆")
-                        .font(.system(size: 24, weight: .bold))
+                        .appFont(size: 24, weight: .bold)
                     Text("该员工的长期记忆与学习记录")
-                        .font(.system(size: 14))
+                        .appFont(size: 14)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -47,7 +47,7 @@ struct EmployeeMemoryView: View {
                     // edit
                 } label: {
                     Label("编辑", systemImage: "pencil")
-                        .font(.system(size: 13))
+                        .appFont(size: 13)
                 }
                 .buttonStyle(.bordered)
                 .tint(.blue)
@@ -57,14 +57,14 @@ struct EmployeeMemoryView: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Text("MEMORY.md")
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .appFont(size: 12, weight: .medium, design: .monospaced)
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button {
                         // copy
                     } label: {
                         Image(systemName: "doc.on.doc")
-                            .font(.system(size: 12))
+                            .appFont(size: 12)
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
@@ -74,7 +74,7 @@ struct EmployeeMemoryView: View {
                 .background(.blue.opacity(0.06))
 
                 Text(memoryContent)
-                    .font(.system(size: 12, design: .monospaced))
+                    .appFont(size: 12, design: .monospaced)
                     .foregroundStyle(.primary)
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -88,7 +88,7 @@ struct EmployeeMemoryView: View {
             // Event timeline
             VStack(alignment: .leading, spacing: 16) {
                 Text("记忆事件")
-                    .font(.system(size: 16, weight: .semibold))
+                    .appFont(size: 16, weight: .semibold)
 
                 ForEach(events) { event in
                     HStack(alignment: .top, spacing: 12) {
@@ -100,14 +100,14 @@ struct EmployeeMemoryView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             HStack {
                                 Text(event.title)
-                                    .font(.system(size: 14, weight: .medium))
+                                    .appFont(size: 14, weight: .medium)
                                 Spacer()
                                 Text(event.timestamp)
-                                    .font(.system(size: 12))
+                                    .appFont(size: 12)
                                     .foregroundStyle(.secondary)
                             }
                             Text(event.detail)
-                                .font(.system(size: 13))
+                                .appFont(size: 13)
                                 .foregroundStyle(.secondary)
                         }
                     }

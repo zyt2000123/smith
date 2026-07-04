@@ -2,17 +2,19 @@ import SwiftUI
 
 struct ContentView: View {
     @AppStorage("isDarkMode") private var isDarkMode = true
+    @AppStorage("fontSizeOption") private var fontSizeOption = AppFontSizeOption.standard.rawValue
     @State private var selectedPage: String = "management"
     @State private var sidebarVisible = true
     @State private var conversationsExpanded = true
     @State private var channelsExpanded = true
+    @State private var hoveredSidebarSection: String?
     @StateObject private var apiClient = APIClient()
 
     private let employees = Employee.samples
 
     var body: some View {
         ZStack {
-            Color(red: 0.20, green: 0.20, blue: 0.21)
+            AppPalette.canvas
                 .ignoresSafeArea()
 
             if selectedPage == "settings" {
@@ -25,6 +27,10 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(isDarkMode ? .dark : .light)
+        .environment(
+            \.appFontScale,
+            AppFontSizeOption(rawValue: fontSizeOption)?.scale ?? AppFontSizeOption.standard.scale
+        )
         .environmentObject(apiClient)
         .background(
             WindowChromeConfigurator(sidebarInset: 14) {
@@ -38,25 +44,28 @@ struct ContentView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
-                sidebarAction("新对话", icon: "square.and.pencil", page: "new-conv")
                 sidebarAction("员工总览", icon: "square.grid.2x2", page: "management")
-                sidebarAction("自动化", icon: "clock.arrow.circlepath", page: "automation")
+                sidebarAction("定时任务", icon: "clock.arrow.circlepath", page: "automation")
             }
             .padding(.horizontal, 12)
-            .padding(.top, 48)
+            .padding(.top, 44)
             .padding(.bottom, 8)
 
             Divider().padding(.horizontal, 12)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
-                    sidebarSection("对话", expanded: $conversationsExpanded) {
+                    sidebarSection("对话", expanded: $conversationsExpanded, onCreate: {
+                        selectedPage = "new-conv"
+                    }, createHelp: "新建对话") {
                         sidebarRow("UI review", subtitle: "Luna · 刚刚", icon: "bubble.left", page: "conv-1")
                         sidebarRow("API deploy", subtitle: "Theo · 5 分钟前", icon: "bubble.left", page: "conv-2")
                         sidebarRow("Roadmap sync", subtitle: "Ivy · 1 小时前", icon: "bubble.left", page: "conv-3")
                     }
 
-                    sidebarSection("频道", expanded: $channelsExpanded) {
+                    sidebarSection("频道", expanded: $channelsExpanded, onCreate: {
+                        selectedPage = "new-channel"
+                    }, createHelp: "新建频道") {
                         channelRow("全体", isPublic: true, page: "ch-all")
                         channelRow("前端协作", isPublic: false, page: "ch-frontend")
                         channelRow("后端架构", isPublic: false, page: "ch-backend")
@@ -73,12 +82,14 @@ struct ContentView: View {
 
             Button { selectedPage = "settings" } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "gearshape").font(.system(size: 14))
-                    Text("设置").font(.system(size: 14))
+                    Image(systemName: "gearshape")
+                        .appFont(size: 14)
+                        .frame(width: 18)
+                    Text("设置").appFont(size: 14)
                 }
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 20)
                 .padding(.vertical, 10)
             }
             .buttonStyle(.plain)
@@ -87,48 +98,74 @@ struct ContentView: View {
 
     private var sidebarPanel: some View {
         sidebar
-            .frame(width: 248)
+            .frame(width: 180)
             .frame(maxHeight: .infinity)
-            .background(Color(red: 0.11, green: 0.11, blue: 0.12))
-            .clipShape(
-                UnevenRoundedRectangle(
-                    cornerRadii: .init(
-                        topLeading: 20,
-                        bottomLeading: 20,
-                        bottomTrailing: 0,
-                        topTrailing: 0
-                    ),
-                    style: .continuous
-                )
+            .background(SidebarMaterialView())
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(AppPalette.border.opacity(0.75), lineWidth: 0.5)
             )
+            .shadow(color: .black.opacity(0.08), radius: 14, y: 4)
+            .padding(12)
     }
 
     private func sidebarAction(_ title: String, icon: String, page: String) -> some View {
         Button { selectedPage = page } label: {
             HStack(spacing: 8) {
-                Image(systemName: icon).font(.system(size: 14)).foregroundStyle(.secondary).frame(width: 18)
-                Text(title).font(.system(size: 14)).foregroundStyle(selectedPage == page ? .primary : .secondary)
+                Image(systemName: icon).appFont(size: 14).foregroundStyle(.secondary).frame(width: 18)
+                Text(title).appFont(size: 14).foregroundStyle(selectedPage == page ? .primary : .secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 6).padding(.horizontal, 8)
-            .background(RoundedRectangle(cornerRadius: 6).fill(selectedPage == page ? Color.white.opacity(0.08) : .clear))
+            .background(RoundedRectangle(cornerRadius: 10).fill(selectedPage == page ? AppPalette.selectedSurface : .clear))
         }
         .buttonStyle(.plain)
     }
 
-    private func sidebarSection<Content: View>(_ title: String, expanded: Binding<Bool>, @ViewBuilder content: () -> Content) -> some View {
+    private func sidebarSection<Content: View>(
+        _ title: String,
+        expanded: Binding<Bool>,
+        onCreate: (() -> Void)? = nil,
+        createHelp: String = "新建",
+        @ViewBuilder content: () -> Content
+    ) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) { expanded.wrappedValue.toggle() }
-            } label: {
-                HStack {
-                    Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
-                    Image(systemName: expanded.wrappedValue ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8, weight: .semibold)).foregroundStyle(.tertiary)
+            HStack(spacing: 4) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { expanded.wrappedValue.toggle() }
+                } label: {
+                    HStack {
+                        Text(title).appFont(size: 13, weight: .medium).foregroundStyle(.tertiary)
+                        Image(systemName: expanded.wrappedValue ? "chevron.down" : "chevron.right")
+                            .appFont(size: 10, weight: .semibold).foregroundStyle(.tertiary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .padding(.top, 12).padding(.bottom, 4).padding(.horizontal, 8)
+                .buttonStyle(.plain)
+
+                if let onCreate {
+                    Button(action: onCreate) {
+                        Image(systemName: "plus")
+                            .appFont(size: 12, weight: .semibold)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .help(createHelp)
+                    .opacity(hoveredSidebarSection == title ? 1 : 0)
+                    .allowsHitTesting(hoveredSidebarSection == title)
+                    .animation(.easeOut(duration: 0.12), value: hoveredSidebarSection == title)
+                }
             }
-            .buttonStyle(.plain)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+            .padding(.leading, 8)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                hoveredSidebarSection = hovering ? title : nil
+            }
 
             if expanded.wrappedValue { content() }
         }
@@ -139,18 +176,18 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 ZStack(alignment: .bottomTrailing) {
                     Circle().fill(emp.avatarColor.gradient).frame(width: 22, height: 22)
-                        .overlay(Text(String(emp.name.prefix(1))).font(.system(size: 10, weight: .semibold)).foregroundStyle(.white))
+                        .overlay(Text(String(emp.name.prefix(1))).appFont(size: 10, weight: .semibold).foregroundStyle(.white))
                     if emp.isOnline {
                         Circle().fill(Color.green).frame(width: 7, height: 7)
                             .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
                     }
                 }
-                Text(emp.name).font(.system(size: 14))
+                Text(emp.name).appFont(size: 14)
                     .foregroundStyle(selectedPage == "employee-\(emp.id)" ? .primary : .secondary).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 5).padding(.horizontal, 8)
-            .background(RoundedRectangle(cornerRadius: 6).fill(selectedPage == "employee-\(emp.id)" ? Color.white.opacity(0.08) : .clear))
+            .background(RoundedRectangle(cornerRadius: 10).fill(selectedPage == "employee-\(emp.id)" ? AppPalette.selectedSurface : .clear))
         }
         .buttonStyle(.plain)
     }
@@ -158,12 +195,12 @@ struct ContentView: View {
     private func channelRow(_ name: String, isPublic: Bool, page: String) -> some View {
         Button { selectedPage = page } label: {
             HStack(spacing: 8) {
-                Text(isPublic ? "#" : "🔒").font(.system(size: 12)).frame(width: 18)
-                Text(name).font(.system(size: 14)).foregroundStyle(selectedPage == page ? .primary : .secondary).lineLimit(1)
+                Text(isPublic ? "#" : "🔒").appFont(size: 12).frame(width: 18)
+                Text(name).appFont(size: 14).foregroundStyle(selectedPage == page ? .primary : .secondary).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 5).padding(.horizontal, 8)
-            .background(RoundedRectangle(cornerRadius: 6).fill(selectedPage == page ? Color.white.opacity(0.08) : .clear))
+            .background(RoundedRectangle(cornerRadius: 10).fill(selectedPage == page ? AppPalette.selectedSurface : .clear))
         }
         .buttonStyle(.plain)
     }
@@ -171,15 +208,15 @@ struct ContentView: View {
     private func sidebarRow(_ title: String, subtitle: String, icon: String, page: String) -> some View {
         Button { selectedPage = page } label: {
             HStack(spacing: 8) {
-                Image(systemName: icon).font(.system(size: 12)).foregroundStyle(.tertiary).frame(width: 18)
+                Image(systemName: icon).appFont(size: 12).foregroundStyle(.tertiary).frame(width: 18)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(.system(size: 14)).foregroundStyle(selectedPage == page ? .primary : .secondary).lineLimit(1)
-                    Text(subtitle).font(.system(size: 10)).foregroundStyle(.tertiary)
+                    Text(title).appFont(size: 14).foregroundStyle(selectedPage == page ? .primary : .secondary).lineLimit(1)
+                    Text(subtitle).appFont(size: 10).foregroundStyle(.tertiary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 5).padding(.horizontal, 8)
-            .background(RoundedRectangle(cornerRadius: 6).fill(selectedPage == page ? Color.white.opacity(0.08) : .clear))
+            .background(RoundedRectangle(cornerRadius: 10).fill(selectedPage == page ? AppPalette.selectedSurface : .clear))
         }
         .buttonStyle(.plain)
     }
@@ -209,17 +246,13 @@ struct ContentView: View {
     private var mainPanel: some View {
         mainContent
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(red: 0.16, green: 0.16, blue: 0.17))
+            .background(AppPalette.canvas)
     }
 
     private var shellSplitView: some View {
         HStack(spacing: 0) {
-            if sidebarVisible {
+            if sidebarVisible && !selectedPage.hasPrefix("employee-") {
                 sidebarPanel
-
-                Rectangle()
-                    .fill(Color.white.opacity(0.07))
-                    .frame(width: 1)
             }
 
             mainPanel

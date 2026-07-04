@@ -13,7 +13,7 @@ struct WorkRecordView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("工作记录")
-                    .font(.system(size: 18, weight: .semibold))
+                    .appFont(size: 18, weight: .semibold)
 
                 Spacer()
 
@@ -23,7 +23,7 @@ struct WorkRecordView: View {
                             selectedRecordTab = tab
                         } label: {
                             Text(tab)
-                                .font(.system(size: 12))
+                                .appFont(size: 12)
                                 .foregroundStyle(selectedRecordTab == tab ? .primary : .secondary)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 5)
@@ -71,7 +71,7 @@ struct WorkRecordView: View {
                 HStack(spacing: 4) {
                     Spacer()
                     Text("少")
-                        .font(.system(size: 10))
+                        .appFont(size: 10)
                         .foregroundStyle(.secondary)
                     ForEach(0..<5, id: \.self) { level in
                         RoundedRectangle(cornerRadius: 2)
@@ -79,14 +79,14 @@ struct WorkRecordView: View {
                             .frame(width: 12, height: 12)
                     }
                     Text("多")
-                        .font(.system(size: 10))
+                        .appFont(size: 10)
                         .foregroundStyle(.secondary)
                 }
             }
         }
         .padding(20)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .appCardSurface()
     }
 
     private var daysSinceJoin: Int {
@@ -97,14 +97,14 @@ struct WorkRecordView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
                 Image(systemName: icon)
-                    .font(.system(size: 12))
+                    .appFont(size: 12)
                     .foregroundStyle(.secondary)
                 Text(title)
-                    .font(.system(size: 12))
+                    .appFont(size: 12)
                     .foregroundStyle(.secondary)
             }
             Text(value)
-                .font(.system(size: 22, weight: .bold))
+                .appFont(size: 22, weight: .bold)
                 .foregroundStyle(.primary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

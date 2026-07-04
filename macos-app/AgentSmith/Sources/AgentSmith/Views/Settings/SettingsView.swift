@@ -27,6 +27,7 @@ struct SettingsView: View {
     var onBack: (() -> Void)? = nil
     @State private var selected: SettingsSection = .general
     @AppStorage("isDarkMode") private var isDarkMode = true
+    @AppStorage("fontSizeOption") private var fontSizeOption = AppFontSizeOption.standard.rawValue
     @State private var autoReview = true
     @State private var shellRestricted = true
     @State private var networkAllowed = true
@@ -38,8 +39,8 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Button { onBack?() } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold))
-                        Text("返回应用").font(.system(size: 13))
+                        Image(systemName: "chevron.left").appFont(size: 11, weight: .semibold)
+                        Text("返回应用").appFont(size: 13)
                     }
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8).padding(.vertical, 6)
@@ -47,15 +48,12 @@ struct SettingsView: View {
                 .buttonStyle(.plain)
                 .padding(.bottom, 4)
 
-                Text("个人").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
-                    .padding(.horizontal, 8).padding(.top, 8).padding(.bottom, 4)
-
                 ForEach(SettingsSection.allCases) { sec in
                     Button { selected = sec } label: {
                         HStack(spacing: 8) {
-                            Image(systemName: sec.icon).font(.system(size: 13))
+                            Image(systemName: sec.icon).appFont(size: 13)
                                 .foregroundStyle(selected == sec ? .primary : .secondary).frame(width: 18)
-                            Text(sec.label).font(.system(size: 13))
+                            Text(sec.label).appFont(size: 13)
                                 .foregroundStyle(selected == sec ? .primary : .secondary)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -64,7 +62,7 @@ struct SettingsView: View {
                             Group {
                                 if selected == sec {
                                     RoundedRectangle(cornerRadius: 8)
-                                        .fill(.white.opacity(0.1))
+                                        .fill(AppPalette.selectedSurface)
                                 }
                             }
                         )
@@ -74,20 +72,14 @@ struct SettingsView: View {
                 Spacer()
             }
             .padding(.horizontal, 12).padding(.bottom, 12).padding(.top, 44).frame(width: 180)
-            .background(Color(red: 0.11, green: 0.11, blue: 0.12))
-            .clipShape(
-                UnevenRoundedRectangle(
-                    cornerRadii: .init(
-                        topLeading: 20,
-                        bottomLeading: 20,
-                        bottomTrailing: 0,
-                        topTrailing: 0
-                    ),
-                    style: .continuous
-                )
+            .background(SidebarMaterialView())
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(AppPalette.border.opacity(0.75), lineWidth: 0.5)
             )
-
-            Divider()
+            .shadow(color: .black.opacity(0.08), radius: 14, y: 4)
+            .padding(12)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
@@ -105,12 +97,21 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("常规").font(.system(size: 22, weight: .bold))
+            Text("常规").appFont(size: 22, weight: .bold)
             card {
                 tog("深色模式", sub: "关闭后使用浅色主题", on: $isDarkMode)
                 Divider()
                 row("语言", sub: "应用 UI 语言") {
                     Picker("", selection: $language) { Text("中文").tag("中文"); Text("English").tag("English") }.frame(width: 120)
+                }
+                Divider()
+                row("字体大小", sub: "调整应用文字显示大小") {
+                    Picker("", selection: $fontSizeOption) {
+                        ForEach(AppFontSizeOption.allCases) { option in
+                            Text(option.label).tag(option.rawValue)
+                        }
+                    }
+                    .frame(width: 120)
                 }
                 Divider()
                 row("数据目录", sub: "~/.agent-smith/") { Button("打开") {}.buttonStyle(.bordered).controlSize(.small) }
@@ -120,22 +121,22 @@ struct SettingsView: View {
 
     private var llmSection: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("模型").font(.system(size: 22, weight: .bold))
+            Text("模型").appFont(size: 22, weight: .bold)
             card {
                 row("默认模型", sub: "员工对话使用的 LLM") {
                     Picker("", selection: $llmModel) { Text("GLM-4.7").tag("GLM-4.7"); Text("GPT-4o").tag("GPT-4o"); Text("Claude Sonnet").tag("Claude Sonnet") }.frame(width: 150)
                 }
                 Divider()
-                row("API 地址", sub: "LLM 服务端点") { Text("已配置").font(.system(size: 12)).foregroundStyle(.green) }
+                row("API 地址", sub: "LLM 服务端点") { Text("已配置").appFont(size: 12).foregroundStyle(.green) }
                 Divider()
-                row("API Key", sub: "访问凭证") { Text("••••••").font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary) }
+                row("API Key", sub: "访问凭证") { Text("••••••").appFont(size: 12, design: .monospaced).foregroundStyle(.secondary) }
             }
         }
     }
 
     private var permissionsSection: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("权限").font(.system(size: 22, weight: .bold))
+            Text("权限").appFont(size: 22, weight: .bold)
             card {
                 tog("自动审核", sub: "自动审核额外访问权限请求", on: $autoReview)
                 Divider()
@@ -148,11 +149,11 @@ struct SettingsView: View {
 
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("关于").font(.system(size: 22, weight: .bold))
+            Text("关于").appFont(size: 22, weight: .bold)
             card {
-                row("版本", sub: "Agent Smith") { Text("1.0.0").font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary) }
+                row("版本", sub: "Agent Smith") { Text("1.0.0").appFont(size: 13, design: .monospaced).foregroundStyle(.secondary) }
                 Divider()
-                row("引擎", sub: "自研 Agent 框架") { Text("DAG + ReAct").font(.system(size: 12)).foregroundStyle(.secondary) }
+                row("引擎", sub: "自研 Agent 框架") { Text("DAG + ReAct").appFont(size: 12).foregroundStyle(.secondary) }
             }
         }
     }
@@ -160,20 +161,20 @@ struct SettingsView: View {
     private func card<C: View>(@ViewBuilder content: () -> C) -> some View {
         VStack(spacing: 0) { content() }
             .padding(.horizontal, 16).padding(.vertical, 4)
-            .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.04)))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.06), lineWidth: 0.5))
+            .background(RoundedRectangle(cornerRadius: 10).fill(AppPalette.card))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppPalette.border, lineWidth: 0.5))
     }
 
     private func row<T: View>(_ title: String, sub: String, @ViewBuilder trailing: () -> T) -> some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) { Text(title).font(.system(size: 14, weight: .medium)); Text(sub).font(.system(size: 12)).foregroundStyle(.secondary) }
+            VStack(alignment: .leading, spacing: 2) { Text(title).appFont(size: 14, weight: .medium); Text(sub).appFont(size: 12).foregroundStyle(.secondary) }
             Spacer(); trailing()
         }.padding(.vertical, 10)
     }
 
     private func tog(_ title: String, sub: String, on: Binding<Bool>) -> some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) { Text(title).font(.system(size: 14, weight: .medium)); Text(sub).font(.system(size: 12)).foregroundStyle(.secondary) }
+            VStack(alignment: .leading, spacing: 2) { Text(title).appFont(size: 14, weight: .medium); Text(sub).appFont(size: 12).foregroundStyle(.secondary) }
             Spacer(); Toggle("", isOn: on).toggleStyle(.switch).tint(.blue)
         }.padding(.vertical, 10)
     }

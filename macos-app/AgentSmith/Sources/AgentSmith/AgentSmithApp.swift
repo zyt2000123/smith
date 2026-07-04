@@ -6,7 +6,6 @@ struct AgentSmithApp: App {
         WindowGroup {
             ContentView()
                 .frame(minWidth: 1200, minHeight: 760)
-                .preferredColorScheme(.dark)
                 .onAppear { setAppIcon() }
         }
         .windowStyle(.hiddenTitleBar)

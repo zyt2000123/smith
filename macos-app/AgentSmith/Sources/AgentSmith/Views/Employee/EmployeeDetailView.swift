@@ -54,88 +54,8 @@ struct EmployeeDetailView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 2) {
-                Button {
-                    if let onBack {
-                        onBack()
-                    } else {
-                        dismiss()
-                    }
-                } label: {
-                    Label("我的员工", systemImage: "chevron.left")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.blue)
-                }
-                .buttonStyle(.plain)
-                .padding(.bottom, 16)
-
-                HStack(spacing: 10) {
-                    ZStack {
-                        Circle()
-                            .fill(employee.avatarColor.gradient)
-                            .frame(width: 32, height: 32)
-                        Text(String(employee.name.prefix(1)))
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white)
-                    }
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(employee.name)
-                            .font(.system(size: 14, weight: .semibold))
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(employee.isOnline ? Color.green : Color.gray)
-                                .frame(width: 6, height: 6)
-                            Text(employee.isOnline ? "在线" : "离线")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .padding(.bottom, 16)
-
-                ForEach(EmployeeDetailTab.allCases, id: \.self) { tab in
-                    let isSelected = selectedTab == tab
-                    let isHovered = hoveredTab == tab
-
-                    Button {
-                        selectedTab = tab
-                    } label: {
-                        Label {
-                            Text(tab.label)
-                        } icon: {
-                            Image(systemName: isSelected ? tab.selectedIcon : tab.icon)
-                        }
-                        .font(.system(size: 13))
-                        .foregroundStyle(isSelected ? .blue : .primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 6)
-                        .padding(.horizontal, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(
-                                    isSelected
-                                        ? Color.blue.opacity(0.12)
-                                        : isHovered
-                                            ? Color.primary.opacity(0.06)
-                                            : Color.clear
-                                )
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .onHover { hovering in
-                        hoveredTab = hovering ? tab : nil
-                    }
-                    .animation(.easeInOut(duration: 0.15), value: isHovered)
-                }
-
-                Spacer()
-            }
-            .padding(16)
-            .frame(width: 200)
-            .background(.ultraThinMaterial)
-
-            Divider()
+        HStack(spacing: 12) {
+            employeeSidebar
 
             ScrollView {
                 Group {
@@ -155,33 +75,123 @@ struct EmployeeDetailView: View {
                     case .permissions:
                         EmployeePermissionsView(employee: employee)
                     case .im:
-                        VStack(spacing: 8) {
-                            Image(systemName: "message")
-                                .font(.system(size: 40))
-                                .foregroundStyle(.secondary.opacity(0.5))
-                            Text("暂无 IM 连接")
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(.top, 120)
+                        emptyState(icon: "message", title: "暂无 IM 连接")
                     case .projects:
-                        VStack(spacing: 8) {
-                            Image(systemName: "folder")
-                                .font(.system(size: 40))
-                                .foregroundStyle(.secondary.opacity(0.5))
-                            Text("暂无项目")
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(.top, 120)
+                        emptyState(icon: "folder", title: "暂无项目")
                     }
                 }
                 .padding(24)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(.regularMaterial)
+            .background(AppPalette.canvas)
         }
+        .padding(12)
+        .background(AppPalette.canvas)
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden)
+    }
+
+    private var employeeSidebar: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 0) {
+                Button {
+                    if let onBack {
+                        onBack()
+                    } else {
+                        dismiss()
+                    }
+                } label: {
+                    Label("我的员工", systemImage: "chevron.left")
+                        .appFont(size: 13)
+                        .foregroundStyle(.blue)
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 12)
+
+                HStack(alignment: .center, spacing: 10) {
+                    EmployeePortraitView(
+                        imageName: employee.avatarImageName,
+                        fallbackColor: employee.avatarColor,
+                        fallbackText: String(employee.name.prefix(1)),
+                        width: 48,
+                        height: 58,
+                        cornerRadius: 10
+                    )
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(employee.name)
+                            .appFont(size: 15, weight: .semibold)
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(employee.isOnline ? AppPalette.online : Color.gray)
+                                .frame(width: 6, height: 6)
+                            Text(employee.isOnline ? "在线" : "离线")
+                                .appFont(size: 11)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .padding(.bottom, 14)
+            }
+
+            ForEach(EmployeeDetailTab.allCases, id: \.self) { tab in
+                let isSelected = selectedTab == tab
+                let isHovered = hoveredTab == tab
+
+                Button {
+                    selectedTab = tab
+                } label: {
+                    Label {
+                        Text(tab.label)
+                    } icon: {
+                        Image(systemName: isSelected ? tab.selectedIcon : tab.icon)
+                    }
+                    .appFont(size: 13)
+                    .foregroundStyle(isSelected ? .blue : .primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 7)
+                    .padding(.horizontal, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(
+                                isSelected
+                                    ? Color.blue.opacity(0.12)
+                                    : isHovered
+                                        ? AppPalette.mutedSurface
+                                        : Color.clear
+                            )
+                    )
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    hoveredTab = hovering ? tab : nil
+                }
+                .animation(.easeInOut(duration: 0.15), value: isHovered)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 14)
+        .padding(.top, 44)
+        .frame(width: 180)
+        .background(SidebarMaterialView())
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(AppPalette.border.opacity(0.75), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.08), radius: 14, y: 4)
+    }
+
+    private func emptyState(icon: String, title: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon)
+                .appFont(size: 40)
+                .foregroundStyle(.secondary.opacity(0.5))
+            Text(title)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.top, 120)
     }
 }

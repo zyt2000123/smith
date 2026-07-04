@@ -8,9 +8,9 @@ struct EmployeeConnectorsView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("连接器")
-                        .font(.system(size: 24, weight: .bold))
+                        .appFont(size: 24, weight: .bold)
                     Text("管理该员工可使用的外部服务连接")
-                        .font(.system(size: 14))
+                        .appFont(size: 14)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -18,7 +18,7 @@ struct EmployeeConnectorsView: View {
                     // add
                 } label: {
                     Label("添加", systemImage: "plus")
-                        .font(.system(size: 13, weight: .medium))
+                        .appFont(size: 13, weight: .medium)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
@@ -27,7 +27,7 @@ struct EmployeeConnectorsView: View {
                     // import JSON
                 } label: {
                     Label("导入 JSON", systemImage: "curlybraces")
-                        .font(.system(size: 13, weight: .medium))
+                        .appFont(size: 13, weight: .medium)
                 }
                 .buttonStyle(.bordered)
             }
@@ -35,15 +35,15 @@ struct EmployeeConnectorsView: View {
             // Empty state
             VStack(spacing: 16) {
                 Image(systemName: "link")
-                    .font(.system(size: 48))
+                    .appFont(size: 48)
                     .foregroundStyle(.secondary.opacity(0.3))
 
                 Text("暂无连接器")
-                    .font(.system(size: 16, weight: .medium))
+                    .appFont(size: 16, weight: .medium)
                     .foregroundStyle(.secondary)
 
                 Text("添加连接器让员工访问外部 API、数据库或第三方服务")
-                    .font(.system(size: 13))
+                    .appFont(size: 13)
                     .foregroundStyle(.secondary.opacity(0.7))
             }
             .frame(maxWidth: .infinity)
