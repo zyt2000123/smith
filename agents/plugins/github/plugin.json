@@ -1,0 +1,10 @@
+{
+  "schema": "agentsmith.plugin.v1",
+  "name": "github",
+  "version": "0.1.0",
+  "description": "GitHub webhook integration - responds to issues and pull requests",
+  "trigger_type": "webhook",
+  "skills": [
+    {"path": "skills/github-issue/SKILL.md"}
+  ]
+}

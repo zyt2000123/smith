@@ -13,15 +13,20 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from common.database import get_db, close_db
-from .routers import employees, sessions, templates, tasks, files, config, auth, stats, auto_tasks
+from .routers import employees, sessions, templates, tasks, files, config, auth, stats, auto_tasks, plugins, teams
 from .services.scheduler import run_scheduler
+from .services.plugin_service import PluginService
+
+_plugin_service = PluginService()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await get_db()
     scheduler_task = asyncio.create_task(run_scheduler())
+    await _plugin_service.startup()
     yield
+    await _plugin_service.shutdown()
     scheduler_task.cancel()
     try:
         await scheduler_task
@@ -48,6 +53,8 @@ app.include_router(config.router)
 app.include_router(auth.router)
 app.include_router(stats.router)
 app.include_router(auto_tasks.router)
+app.include_router(plugins.router)
+app.include_router(teams.router)
 
 
 @app.get("/api/health")
