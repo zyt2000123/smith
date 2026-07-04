@@ -53,17 +53,24 @@
 
 ## 技术方向
 
-桌面壳方案待 Phase 0 spike 后确定（daemon + 浏览器 或 Electron）。
+```
+SwiftUI macOS 原生应用
+  │ HTTP + SSE（URLSession）
+  ▼
+Python 本地 server（FastAPI + AgentScope）
+  ├─ 数字员工运行时
+  ├─ 本地文件/SQLite 存储
+  ├─ 本地工具执行
+  └─ Hub MCP / 检索 API 连接
+```
 
-```
-桌面壳（daemon + 浏览器 或 Electron，待定）
-  └─ React 前端（沿用 LLM-Wiki-Knowledge-Hub 的 Vite + Tailwind + shadcn/Base UI 方案）
-      └─ Python 本地 server（FastAPI + AgentScope）
-          ├─ 数字员工运行时
-          ├─ 本地文件/SQLite 存储
-          ├─ 本地工具执行
-          └─ Hub MCP / 检索 API 连接
-```
+## 项目结构
+
+| 目录 | 内容 |
+|---|---|
+| `macos-app/AgentSmith/` | SwiftUI macOS 前端（Swift Package，19 个源文件） |
+| `prototype/` | 早期 React Web 原型（已归档，不再主力开发） |
+| `docs/` | 产品设计、架构、路线图、竞品调研 |
 
 ## 文档索引
 
@@ -74,7 +81,8 @@
 | [docs/03-与知识库的拆分与集成.md](docs/03-与知识库的拆分与集成.md) | 与 AI Knowledge Hub 的职责拆分和集成契约 |
 | [docs/04-开发路线图.md](docs/04-开发路线图.md) | 分阶段研发路线和验证点 |
 | [docs/05-QoderWake技术调研.md](docs/05-QoderWake技术调研.md) | QoderWake 技术栈深度调研（网络 + 逆向工程） |
-| [docs/06-员工文件与技能系统设计参考.md](docs/06-员工文件与技能系统设计参考.md) | QoderWake 员工身份文件、技能打包、安全护栏设计参考 |
-| [docs/07-QoderWake完整产品逆向.md](docs/07-QoderWake完整产品逆向.md) | QoderWake 完整产品逆向（架构、Agent 执行模型、门禁、技能、安全、API 全景） |
-| [prototype](prototype) | 当前可运行前端原型 |
+| [docs/06-员工文件与技能系统设计参考.md](docs/06-员工文件与技能系统设计参考.md) | 员工身份文件、技能打包、安全护栏设计参考 |
+| [docs/07-QoderWake完整产品逆向.md](docs/07-QoderWake完整产品逆向.md) | 完整产品逆向（架构、Agent 执行模型、门禁、技能、安全、API 全景） |
+| [docs/08-QoderWake前端架构分析.md](docs/08-QoderWake前端架构分析.md) | 前端 JS bundle 反编译分析 |
+| [macos-app/AgentSmith](macos-app/AgentSmith) | SwiftUI macOS 前端原型 |
 

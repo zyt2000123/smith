@@ -1,0 +1,8 @@
+[
+  {"name": "technical-writing", "description": "技术文档撰写：API 文档、集成指南、架构说明"},
+  {"name": "content-strategy", "description": "内容策略：信息架构设计、内容分类、发布规划"},
+  {"name": "style-enforcement", "description": "风格执行：术语一致性检查、语气和格式规范"},
+  {"name": "content-localization", "description": "内容本地化：多语言内容管理、文化适配"},
+  {"name": "content-analytics", "description": "内容分析：阅读量追踪、搜索热词分析、内容健康评估"},
+  {"name": "changelog-management", "description": "变更日志管理：版本更新说明、功能发布文案"}
+]

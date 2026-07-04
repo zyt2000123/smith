@@ -13,9 +13,35 @@ struct SuggestionCard: Identifiable {
     let text: String
 }
 
+enum CapabilityPanelTab: String, CaseIterable {
+    case plan, mcp, skills, permissions, knowledge
+
+    var label: String {
+        switch self {
+        case .plan: return "计划"
+        case .mcp: return "MCP"
+        case .skills: return "技能"
+        case .permissions: return "权限"
+        case .knowledge: return "知识库"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .plan: return "list.bullet.clipboard"
+        case .mcp: return "puzzlepiece.extension"
+        case .skills: return "sparkles"
+        case .permissions: return "shield"
+        case .knowledge: return "book"
+        }
+    }
+}
+
 struct ConversationView: View {
     @State private var messageText = ""
     @State private var selectedConversation: UUID?
+    @State private var showCapabilityPanel = false
+    @State private var selectedPanelTab: CapabilityPanelTab = .plan
 
     private let conversations: [ConversationItem] = [
         ConversationItem(employeeName: "小丁", avatarColor: .green, preview: "好的，我来看看这个组件的实现...", timestamp: "刚刚"),
@@ -103,6 +129,48 @@ struct ConversationView: View {
 
             // Center: chat area
             VStack(spacing: 0) {
+                // Top bar
+                HStack(spacing: 10) {
+                    Spacer()
+                    Button {} label: {
+                        Label("创建对话任务", systemImage: "plus.bubble")
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button {} label: {
+                        Label("创建自动任务", systemImage: "clock.arrow.circlepath")
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showCapabilityPanel.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "sidebar.right")
+                            Text("任务列表")
+                        }
+                        .font(.system(size: 12))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(showCapabilityPanel ? Color.accentColor : Color.secondary.opacity(0.1))
+                        )
+                        .foregroundColor(showCapabilityPanel ? .white : .primary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+
+                Divider()
+
                 Spacer()
 
                 // Greeting
@@ -208,6 +276,116 @@ struct ConversationView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .windowBackgroundColor))
+
+            // Right: capability panel
+            if showCapabilityPanel {
+                Divider()
+                capabilityPanel
+            }
+        }
+    }
+
+    // MARK: - Capability Panel
+    private var capabilityPanel: some View {
+        VStack(spacing: 0) {
+            // Tab bar
+            HStack(spacing: 0) {
+                ForEach(CapabilityPanelTab.allCases, id: \.self) { tab in
+                    Button {
+                        selectedPanelTab = tab
+                    } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: tab.icon)
+                                .font(.system(size: 14))
+                            Text(tab.label)
+                                .font(.system(size: 10))
+                        }
+                        .foregroundColor(selectedPanelTab == tab ? .accentColor : .secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(
+                            selectedPanelTab == tab
+                                ? Color.accentColor.opacity(0.08)
+                                : Color.clear
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 4)
+            .padding(.top, 8)
+
+            Divider()
+                .padding(.top, 4)
+
+            // Panel content
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    switch selectedPanelTab {
+                    case .plan:
+                        panelSection(title: "执行计划", items: [
+                            ("1. 理解需求", "checkmark.circle", Color.green),
+                            ("2. 分析影响", "arrow.triangle.branch", Color.blue),
+                            ("3. 编写代码", "chevron.left.forwardslash.chevron.right", Color.orange),
+                            ("4. 验证测试", "flask", Color.purple),
+                        ])
+                    case .mcp:
+                        panelSection(title: "可用工具", items: [
+                            ("read_file", "doc.text", Color.blue),
+                            ("write_file", "doc.badge.plus", Color.green),
+                            ("shell", "terminal", Color.orange),
+                            ("search_knowledge", "magnifyingglass", Color.purple),
+                            ("web_fetch", "globe", Color.cyan),
+                        ])
+                    case .skills:
+                        panelSection(title: "已加载技能", items: [
+                            ("planning", "list.bullet.clipboard", Color.blue),
+                            ("code-review", "eye", Color.green),
+                            ("testing-strategy", "flask", Color.orange),
+                        ])
+                    case .permissions:
+                        panelSection(title: "权限边界", items: [
+                            ("工作目录: ~/Projects", "folder.badge.gear", Color.blue),
+                            ("Shell: 受限模式", "terminal", Color.orange),
+                            ("网络: 允许", "network", Color.green),
+                        ])
+                    case .knowledge:
+                        panelSection(title: "知识库连接", items: [
+                            ("Hub API 已连接", "link", Color.green),
+                            ("本地文档索引: 128 条", "doc.on.doc", Color.blue),
+                        ])
+                    }
+                }
+                .padding(14)
+            }
+        }
+        .frame(width: 240)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func panelSection(title: String, items: [(String, String, Color)]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.secondary)
+
+            ForEach(items, id: \.0) { item in
+                HStack(spacing: 8) {
+                    Image(systemName: item.1)
+                        .font(.system(size: 12))
+                        .foregroundColor(item.2)
+                        .frame(width: 18)
+                    Text(item.0)
+                        .font(.system(size: 13))
+                }
+                .padding(.vertical, 4)
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.secondary.opacity(0.04))
+                )
+            }
         }
     }
 }

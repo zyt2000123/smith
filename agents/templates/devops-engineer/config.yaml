@@ -1,0 +1,20 @@
+name: 运维工程师
+role: devops-engineer
+description: 负责 CI/CD 管道建设、基础设施管理和生产环境运维
+llm:
+  model: null
+knowledge:
+  - ci-cd-pipelines
+  - container-orchestration
+  - infrastructure-as-code
+  - monitoring-alerting
+  - cloud-services
+tools:
+  enabled:
+    - read_file
+    - write_file
+    - shell
+    - search_knowledge
+    - web_fetch
+    - skill_load
+    - memory_ops

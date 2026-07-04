@@ -109,6 +109,8 @@ struct CreateEmployeeSheet: View {
                             ? (employeeTemplates.first(where: { $0.id == selectedTemplate })?.description ?? "")
                             : description,
                         knowledge: [],
+                        capabilities: [],
+                        workStyles: [],
                         environment: "本地",
                         avatarColor: selectedColor,
                         joinDate: Date()

@@ -5,3 +5,9 @@ dist/
 .claude/
 .codegraph/
 .build/
+__pycache__/
+*.pyc
+.venv/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

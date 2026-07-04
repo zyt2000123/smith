@@ -1,0 +1,8 @@
+[
+  {"name": "ui-design", "description": "界面视觉设计：布局、配色、字体、图标系统"},
+  {"name": "interaction-design", "description": "交互设计：状态转换、动效规格、反馈机制"},
+  {"name": "design-system", "description": "设计系统：组件定义、设计 token、使用指南"},
+  {"name": "responsive-design", "description": "响应式设计：跨设备布局适配、断点策略"},
+  {"name": "accessibility-design", "description": "无障碍设计：对比度、焦点管理、屏幕阅读器适配"},
+  {"name": "prototyping", "description": "原型制作：可交互原型、用户流程演示"}
+]

@@ -1,0 +1,8 @@
+[
+  {"name": "test-strategy", "description": "测试策略设计：层级分配、覆盖目标、风险评估"},
+  {"name": "unit-testing", "description": "单元测试编写：隔离、mock、参数化、属性测试"},
+  {"name": "integration-testing", "description": "集成测试：数据库、API、消息队列的真实交互验证"},
+  {"name": "e2e-testing", "description": "端到端测试：用户场景模拟、浏览器自动化"},
+  {"name": "boundary-analysis", "description": "边界值分析：等价类划分、极端输入、并发场景"},
+  {"name": "test-infrastructure", "description": "测试基础设施：fixture 管理、数据工厂、CI 集成"}
+]

@@ -1,0 +1,19 @@
+name: UI 设计师
+role: ui-designer
+description: 负责用户界面设计、设计系统维护和交互规格定义
+llm:
+  model: null
+knowledge:
+  - design-systems
+  - interaction-patterns
+  - visual-hierarchy
+  - accessibility-standards
+  - responsive-design
+tools:
+  enabled:
+    - read_file
+    - write_file
+    - search_knowledge
+    - web_fetch
+    - skill_load
+    - memory_ops

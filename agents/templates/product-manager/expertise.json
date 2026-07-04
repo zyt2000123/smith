@@ -1,0 +1,8 @@
+[
+  {"name": "requirement-definition", "description": "结构化需求撰写：用户故事、验收标准、边界情况"},
+  {"name": "prioritization", "description": "需求优先级排序：RICE 评分、价值-复杂度矩阵"},
+  {"name": "user-research", "description": "用户调研设计和洞察提取：访谈、问卷、行为分析"},
+  {"name": "competitive-analysis", "description": "竞品分析：功能对标、差异化定位、市场机会"},
+  {"name": "roadmap-planning", "description": "产品路线图规划：里程碑、依赖管理、资源协调"},
+  {"name": "data-driven-decision", "description": "数据驱动决策：指标定义、实验设计、效果评估"}
+]

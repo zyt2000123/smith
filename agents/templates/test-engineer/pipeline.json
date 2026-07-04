@@ -1,0 +1,6 @@
+[
+  {"task_type": "feature", "pipeline": ["read-requirements", "design-test-matrix", "write-unit-tests", "write-integration-tests", "run-full-suite", "generate-coverage-report", "submit-test-report"]},
+  {"task_type": "bugfix", "pipeline": ["reproduce-bug", "write-failing-test", "verify-fix-passes", "add-regression-guard", "check-no-side-effects"]},
+  {"task_type": "review", "pipeline": ["check-test-coverage", "verify-assertions-meaningful", "check-isolation", "review-naming", "run-mutation-check"]},
+  {"task_type": "performance", "pipeline": ["define-benchmarks", "establish-baselines", "write-load-tests", "run-and-measure", "identify-bottlenecks", "report-findings"]}
+]

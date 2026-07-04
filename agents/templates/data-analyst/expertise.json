@@ -1,0 +1,8 @@
+[
+  {"name": "exploratory-analysis", "description": "探索性数据分析：分布检查、趋势识别、异常发现"},
+  {"name": "sql-analytics", "description": "SQL 数据分析：复杂查询、窗口函数、CTE、性能优化"},
+  {"name": "data-visualization", "description": "数据可视化：选择合适的图表类型、清晰的标注和配色"},
+  {"name": "statistical-testing", "description": "统计检验：A/B 测试分析、假设检验、置信区间"},
+  {"name": "metric-design", "description": "指标体系设计：北极星指标、漏斗分析、留存分析"},
+  {"name": "data-quality", "description": "数据质量保障：数据验证、清洗规则、一致性检查"}
+]

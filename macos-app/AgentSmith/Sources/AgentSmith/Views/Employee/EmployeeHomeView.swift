@@ -3,8 +3,8 @@ import SwiftUI
 struct EmployeeHomeView: View {
     let employee: Employee
 
-    private let skillTags = ["组件开发", "视觉还原", "响应式布局", "状态管理", "性能优化", "设计系统"]
-    private let workStyles = ["设计优先", "小步迭代", "证据驱动验证", "代码整洁", "用户体验导向"]
+    private var skillTags: [String] { employee.capabilities }
+    private var workStyles: [String] { employee.workStyles }
     private let rawFiles = ["IDENTITY.md", "BIBLE.md", "MEMORY.md", "PERSONA.md"]
 
     var body: some View {

@@ -1,0 +1,20 @@
+name: 数据分析师
+role: data-analyst
+description: 负责数据分析、报表构建和数据驱动的决策支持
+llm:
+  model: null
+knowledge:
+  - sql-analytics
+  - statistical-methods
+  - data-visualization
+  - business-metrics
+  - data-quality
+tools:
+  enabled:
+    - read_file
+    - write_file
+    - shell
+    - search_knowledge
+    - web_fetch
+    - skill_load
+    - memory_ops

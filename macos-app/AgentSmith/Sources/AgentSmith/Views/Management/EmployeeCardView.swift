@@ -53,14 +53,24 @@ struct EmployeeCardView: View {
                                 )
                         }
 
-                        // Status
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(employee.isOnline ? Color.green : Color.gray)
-                                .frame(width: 7, height: 7)
-                            Text(employee.isOnline ? "在线" : "离线")
-                                .font(.system(size: 12))
-                                .foregroundColor(employee.isOnline ? .green : .secondary)
+                        // Status + join date
+                        HStack(spacing: 10) {
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(employee.isOnline ? Color.green : Color.gray)
+                                    .frame(width: 7, height: 7)
+                                Text(employee.isOnline ? "在线" : "离线")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(employee.isOnline ? .green : .secondary)
+                            }
+                            HStack(spacing: 4) {
+                                Image(systemName: "calendar")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                                Text("入职 \(employee.joinDate.formatted(.dateTime.month().day()))")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
                 }
