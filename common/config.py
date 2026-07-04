@@ -9,6 +9,8 @@ TEMPLATES_DIR = _project_root / "agents" / "templates"
 BUILTIN_SKILLS_DIR = _project_root / "agents" / "skills"
 BUILTIN_TOOLS_DIR = _project_root / "agents" / "tools"
 SAFETY_RULES_PATH = _project_root / "agents" / "safety" / "dangerous_commands.json"
+BUILTIN_PLUGINS_DIR = _project_root / "agents" / "plugins"
+USER_PLUGINS_DIR = DATA_DIR / "plugins"
 
 
 def ensure_dirs() -> None:

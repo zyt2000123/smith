@@ -1,8 +1,11 @@
-# 用户信息
+# User Profile
 
-- 姓名: {{to_be_learned}}
-- 偏好语言: {{to_be_learned}}
-- 代码风格: {{to_be_learned}}
-- 沟通偏好: {{to_be_learned}}
-- 常用工具: {{to_be_learned}}
-- 工作时间: {{to_be_learned}}
+- Name: {{to_be_learned}}
+- Preferred Language: {{to_be_learned}}
+- Communication Style: {{to_be_learned}}
+- Technical Level: {{to_be_learned}}
+- Code Style: {{to_be_learned}}
+
+# Preferences
+
+(Auto-filled through interaction)

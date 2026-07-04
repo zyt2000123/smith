@@ -11,6 +11,25 @@ if TYPE_CHECKING:
 _SEPARATOR = "\n\n---\n\n"
 
 
+def build_team_context(
+    group_name: str,
+    members: list[str],
+    recent_messages: list[dict],
+) -> str:
+    """Build a context block for team conversations."""
+    lines: list[str] = [
+        "## Team Context",
+        f'You are in team group "{group_name}" with members: {", ".join(members)}.',
+        "",
+        "Recent conversation:",
+    ]
+    for msg in recent_messages:
+        name = msg.get("sender_name") or msg.get("sender_id", "?")
+        content = msg.get("content", "")
+        lines.append(f"[{name}]: {content}")
+    return "\n".join(lines)
+
+
 class PromptAssembler:
     """Assemble an 11-layer system prompt from an employee directory."""
 
@@ -76,7 +95,13 @@ class PromptAssembler:
         # Layer 9: user
         layers.append(self._read(employee_dir / "context.md"))
 
-        # Layer 10: memory
+        # Layer 10: output style
+        output_style_path = (
+            Path(__file__).resolve().parents[2] / "agents" / "output_style.md"
+        )
+        layers.append(self._read(output_style_path))
+
+        # Layer 11: memory
         memory_dir = employee_dir / "memory"
         mem_parts: list[str] = []
 

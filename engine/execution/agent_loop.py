@@ -325,6 +325,11 @@ async def reply(employee_id: str, name: str, user_message: str) -> str:
         from memory.store import save_conversation_memory
         await save_conversation_memory(employee_dir, user_message, result, had_tools)
 
+        # Learn user preferences from conversation
+        from memory.user_learner import UserPreferenceLearner
+        learner = UserPreferenceLearner(employee_dir)
+        await learner.observe(user_message, result)
+
         return result
     finally:
         await llm.close()
@@ -385,4 +390,7 @@ async def reply_stream(employee_id: str, name: str, user_message: str) -> AsyncG
             )
             yield result
     finally:
+        from memory.user_learner import UserPreferenceLearner
+        learner = UserPreferenceLearner(employee_dir)
+        await learner.observe(user_message, "")
         await llm.close()
