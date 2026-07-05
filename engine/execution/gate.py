@@ -390,6 +390,53 @@ class PRGate:
         )
 
 
+class LLMGate:
+    """LLM-based semantic verification layer on top of regex pre-filter."""
+
+    def __init__(self, inner: Gate, prompt_template: str):
+        self._inner = inner
+        self._prompt_template = prompt_template
+        self._llm = None  # set via set_llm()
+
+    def set_llm(self, llm):
+        self._llm = llm
+
+    async def check(self, output: str, context: dict) -> GateResult:
+        # First run regex pre-filter
+        result = await self._inner.check(output, context)
+        if result.verdict == "fail":
+            return result  # regex already caught it, no need for LLM
+
+        # Regex passed — now verify semantically with LLM
+        if not self._llm:
+            return result  # no LLM available, trust regex
+
+        try:
+            prompt = self._prompt_template.format(output=output[:2000])
+            resp = await self._llm.chat([
+                {"role": "system", "content": "You are a quality gate. Evaluate the output and respond with ONLY 'PASS' or 'FAIL: <reason>'. Be strict."},
+                {"role": "user", "content": prompt},
+            ])
+            text = resp.text.strip()
+            if text.startswith("FAIL"):
+                reason = text[5:].strip(": ")
+                return GateResult("fail", f"LLM verification: {reason}", retry_hint=reason)
+        except Exception:
+            pass  # LLM verification is best-effort
+
+        return result
+
+
+def planning_gate_with_llm() -> LLMGate:
+    return LLMGate(PlanningGate(),
+        "Verify this plan is substantive (not boilerplate). Does it have concrete, actionable steps specific to the task? Does each step have a real verification point?\n\nPlan output:\n{output}")
+
+
+def validation_gate_with_llm() -> LLMGate:
+    return LLMGate(ValidationGate(),
+        "Verify this validation report shows REAL evidence of execution (actual command outputs, test results, file changes). Not just claims of 'tests passed' without evidence.\n\nValidation output:\n{output}")
+
+
 class TestDeliveryGate:
     """Check that tests were actually run and results appear in the output."""
 

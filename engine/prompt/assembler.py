@@ -11,6 +11,11 @@ if TYPE_CHECKING:
 _SEPARATOR = "\n\n---\n\n"
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token for English, ~2 for CJK."""
+    return max(len(text) // 3, 1)
+
+
 def build_team_context(
     group_name: str,
     members: list[str],
@@ -39,6 +44,7 @@ class PromptAssembler:
         tool_registry: "ToolRegistry",
         skill_registry: "SkillRegistry",
         context: dict,
+        max_tokens: int = 100_000,
     ) -> str:
         layers: list[str] = []
 
@@ -101,19 +107,22 @@ class PromptAssembler:
         )
         layers.append(self._read(output_style_path))
 
-        # Layer 11: memory
+        # Layer 11: memory (prefer compiled memory, fallback to raw files)
         memory_dir = employee_dir / "memory"
-        mem_parts: list[str] = []
+        mem_text = ""
 
-        # Read recent conversation memory
-        recent_file = memory_dir / "recent.jsonl"
-        if recent_file.is_file():
-            import json
-            lines = recent_file.read_text(encoding="utf-8").strip().splitlines()
-            recent_entries = lines[-10:]  # Last 10 entries
-            if recent_entries:
-                mem_parts.append("## Recent Conversations")
-                for line in recent_entries:
+        from engine.memory.compile import assemble_memory
+        compiled = assemble_memory(memory_dir) if memory_dir.is_dir() else ""
+
+        if compiled:
+            mem_text = compiled
+        else:
+            mem_parts: list[str] = []
+            recent_file = memory_dir / "recent.jsonl"
+            if recent_file.is_file():
+                import json
+                lines = recent_file.read_text(encoding="utf-8").strip().splitlines()
+                for line in lines[-10:]:
                     try:
                         entry = json.loads(line)
                         mem_parts.append(
@@ -122,44 +131,19 @@ class PromptAssembler:
                         )
                     except json.JSONDecodeError:
                         continue
+            if memory_dir.is_dir():
+                total = 0
+                for scope_dir in (memory_dir / "project", memory_dir / "agent"):
+                    if not scope_dir.is_dir():
+                        continue
+                    for f in sorted(scope_dir.glob("*.md")):
+                        if total >= 20:
+                            break
+                        mem_parts.append(self._extract_memory_body(f))
+                        total += 1
+            mem_text = "\n".join(mem_parts) if mem_parts else ""
 
-        # Read stored memory entries (project-scoped first, then agent-scoped)
-        if memory_dir.is_dir():
-            scoped_dirs = [
-                (memory_dir / "project", "## Project Memories"),
-                (memory_dir / "agent", "## Agent Memories"),
-            ]
-            # Backward compat: root-level .md files
-            fallback_files = [
-                f for f in sorted(memory_dir.glob("*.md"))
-                if f.parent == memory_dir
-            ]
-            total = 0
-            cap = 20
-            for scope_dir, header in scoped_dirs:
-                if not scope_dir.is_dir():
-                    continue
-                md_files = sorted(scope_dir.glob("*.md"))
-                if not md_files:
-                    continue
-                mem_parts.append(header)
-                for f in md_files:
-                    if total >= cap:
-                        break
-                    mem_parts.append(self._extract_memory_body(f))
-                    total += 1
-            if fallback_files and total < cap:
-                mem_parts.append("## Stored Memories")
-                for f in fallback_files:
-                    if total >= cap:
-                        break
-                    mem_parts.append(self._extract_memory_body(f))
-                    total += 1
-
-        if mem_parts:
-            layers.append("\n".join(mem_parts))
-        else:
-            layers.append("")
+        layers.append(mem_text)
 
         # Layer 11: runtime context
         if context:
@@ -169,6 +153,21 @@ class PromptAssembler:
             layers.append("\n".join(ctx_lines))
         else:
             layers.append("")
+
+        # Token budget — trim lowest-priority layers if over budget
+        if max_tokens:
+            total = sum(_estimate_tokens(l) for l in layers if l.strip())
+            if total > max_tokens:
+                # Indices to cut, lowest priority first:
+                # 7=pipeline, 6=traits, 5=expertise, 9=output_style, 10=memory,
+                # 8=context_md, 4=skills, 3=tools, 1=style
+                cut_order = [7, 6, 5, 9, 10, 8, 4, 3, 1]
+                for idx in cut_order:
+                    if idx < len(layers) and layers[idx].strip():
+                        total -= _estimate_tokens(layers[idx])
+                        layers[idx] = ""
+                        if total <= max_tokens:
+                            break
 
         # Filter empty and join
         return _SEPARATOR.join(layer for layer in layers if layer.strip())

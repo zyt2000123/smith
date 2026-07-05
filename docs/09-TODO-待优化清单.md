@@ -4,7 +4,7 @@
 
 ### OH-1: 记忆编译管线 + 指纹缓存
 
-- [ ] **未开始**
+- [x] **已完成** (2026-07-05)
 - **优先级**: P0 — 直接影响 Agent 回复质量和 token 消耗
 - **预估工作量**: 3-4 天
 - **涉及文件**:
@@ -287,4 +287,35 @@
 - [ ] **待修复**
 - **详情**: `reply_stream()` 在技能链模式下退化为非流式 —— 先执行完整个链，最后 `yield result`
 - **涉及文件**: `engine/execution/agent_loop.py` — `reply_stream()` 的技能链分支
-- **修复方案**: 每个技能节点执行完后立即 yield 中间结果，或至少在最终回复阶段使用流式输出
+- **修复方案**: 使用 `engine/execution/events.py` 定义的结构化事件类型，将 `run_agent` 改为 async generator 输出 `ExecutionEvent`
+
+---
+
+## 四、后续功能规划
+
+### F-1: 技能市场
+
+- [ ] **规划中**
+- **优先级**: P2
+- **预估工作量**: 5-7 天
+- **设计思路**:
+  1. **v1**: GitHub 仓库存放社区技能，`skill install <url>` 下载到员工 skills 目录
+  2. **v2**: 独立市场服务，支持搜索/评分/版本管理
+  3. **v3**: 根据角色和任务类型自动推荐技能
+- **涉及文件**:
+  - 新增 `engine/skill/market.py` — 市场客户端
+  - 修改 `agents/tools/skill_manage.py` — 增加 `install_from_url`
+  - 修改 `server/app/routers/` — 市场代理 API
+
+### F-2: 多 Agent 编排引擎
+
+- [ ] **规划中**
+- **优先级**: P2
+- **设计思路**: Leader-Worker 模式 + 任务依赖图 + 并行执行 + 结果汇总
+- **涉及文件**: 新增 `engine/execution/orchestrator.py`
+
+### F-3: Worktree 强制工作流
+
+- [ ] **规划中**
+- **优先级**: P2
+- **设计思路**: 技能链第一步自动创建 worktree，禁止主分支直接修改，PR 后自动清理

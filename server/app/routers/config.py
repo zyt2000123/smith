@@ -9,7 +9,7 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 class LLMConfig(BaseModel):
     api_key: str
     base_url: str | None = None
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-5.2"
 
 
 def get_config_service() -> ConfigService:
