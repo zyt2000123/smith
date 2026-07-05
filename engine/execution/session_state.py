@@ -5,8 +5,11 @@ On restart, ``restore()`` returns the last checkpoint so execution can resume.
 """
 
 import json
+import re
 from pathlib import Path
 from dataclasses import dataclass, asdict
+
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 @dataclass
@@ -34,7 +37,12 @@ class SessionStateManager:
         self._state_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, session_id: str) -> Path:
-        return self._state_dir / f"{session_id}.json"
+        if not _SESSION_ID_RE.match(session_id):
+            raise ValueError(f"invalid session_id: {session_id!r}")
+        p = (self._state_dir / f"{session_id}.json").resolve()
+        if not p.is_relative_to(self._state_dir.resolve()):
+            raise ValueError("session_id escapes state dir")
+        return p
 
     def save(self, checkpoint: SessionCheckpoint) -> None:
         path = self._path(checkpoint.session_id)
