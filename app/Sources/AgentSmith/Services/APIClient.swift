@@ -20,6 +20,7 @@ struct APIEmployeeResponse: Decodable {
             id: id,
             name: name,
             role: role,
+            avatarImageName: Self.imageForRole(role),
             device: device,
             isOnline: online,
             description: description,
@@ -32,13 +33,25 @@ struct APIEmployeeResponse: Decodable {
         )
     }
 
+    private static func imageForRole(_ role: String) -> String? {
+        let r = role.lowercased()
+        if r.contains("backend") { return "backend-engineer" }
+        if r.contains("frontend") || r.contains("前端") { return "frontend-engineer" }
+        if r.contains("product") || r.contains("产品") { return "product-manager" }
+        return nil
+    }
+
     private static func colorForRole(_ role: String) -> Color {
-        switch role {
-        case "Product Manager": return .purple
-        case "Frontend Engineer": return .green
-        case "Backend Engineer": return .blue
-        default: return .cyan
-        }
+        let r = role.lowercased()
+        if r.contains("product") || r.contains("产品") { return .purple }
+        if r.contains("frontend") || r.contains("前端") { return .green }
+        if r.contains("backend") || r.contains("后端") { return .blue }
+        if r.contains("devops") || r.contains("运维") { return .orange }
+        if r.contains("test") || r.contains("测试") { return .red }
+        if r.contains("data") || r.contains("数据") { return .teal }
+        if r.contains("ui") || r.contains("设计") { return .pink }
+        if r.contains("content") || r.contains("运营") { return .mint }
+        return .cyan
     }
 
     private static func parseDate(_ string: String) -> Date? {
