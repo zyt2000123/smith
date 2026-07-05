@@ -17,7 +17,8 @@ from .routers import employees, sessions, templates, tasks, files, config, auth,
 from .services.scheduler import run_scheduler
 from .services.plugin_service import PluginService
 
-_plugin_service = PluginService()
+from common.config import BUILTIN_PLUGINS_DIR
+_plugin_service = PluginService(BUILTIN_PLUGINS_DIR)
 
 
 @asynccontextmanager
