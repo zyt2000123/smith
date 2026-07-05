@@ -238,5 +238,45 @@
     "excludePatterns": ["alias\\s+rm='rm\\s+-i'", "alias\\s+rm=\"rm\\s+-i\""],
     "description": "Overriding common command aliases can mask malicious behavior",
     "remediation": "Do not override standard command aliases. Use unique names for custom functions."
+  },
+  {
+    "id": "destruct-001",
+    "tools": ["shell"],
+    "category": "destructive_command",
+    "severity": "critical",
+    "patterns": ["\\brm\\s+(-[rRf]+\\s+|.*--no-preserve-root)", "\\brm\\s+-[^\\s]*r[^\\s]*f", "\\brm\\s+-[^\\s]*f[^\\s]*r"],
+    "excludePatterns": [],
+    "description": "Recursive force delete can destroy entire filesystems",
+    "remediation": "Use targeted rm on specific files. Never use rm -rf on broad paths."
+  },
+  {
+    "id": "destruct-002",
+    "tools": ["shell"],
+    "category": "destructive_command",
+    "severity": "critical",
+    "patterns": ["\\bmkfs\\b", "\\bdd\\s+if=.*of=/dev/", "\\bfdisk\\b"],
+    "excludePatterns": [],
+    "description": "Disk formatting or raw device write can destroy data",
+    "remediation": "Never format disks or write raw data to devices."
+  },
+  {
+    "id": "destruct-003",
+    "tools": ["shell"],
+    "category": "destructive_command",
+    "severity": "critical",
+    "patterns": ["\\bDROP\\s+(TABLE|DATABASE|INDEX)\\b", "\\bTRUNCATE\\s+TABLE\\b", "\\bDELETE\\s+FROM\\s+\\w+\\s*;\\s*$"],
+    "excludePatterns": [],
+    "description": "SQL destructive operations can cause irreversible data loss",
+    "remediation": "Use targeted DELETE with WHERE clause. Never DROP or TRUNCATE without backup."
+  },
+  {
+    "id": "destruct-004",
+    "tools": ["shell"],
+    "category": "destructive_command",
+    "severity": "critical",
+    "patterns": ["\\bgit\\s+push\\s+.*--force\\b", "\\bgit\\s+reset\\s+--hard\\b", "\\bgit\\s+clean\\s+-[dfx]+"],
+    "excludePatterns": [],
+    "description": "Destructive git operations can cause irreversible work loss",
+    "remediation": "Use git push --force-with-lease. Stash before reset."
   }
 ]
