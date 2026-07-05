@@ -1,12 +1,14 @@
 import SwiftUI
 
 struct CreateEmployeeSheet: View {
-    @Binding var employees: [Employee]
+    @EnvironmentObject private var apiClient: APIClient
     @Binding var isPresented: Bool
+    var onCreated: (Employee) -> Void
     @State private var selectedTemplate: String? = nil
     @State private var name = ""
     @State private var description = ""
     @State private var selectedColor: Color = .blue
+    @State private var isCreating = false
 
     private let colorOptions: [Color] = [.blue, .green, .orange, .purple, .red, .pink, .cyan, .mint]
 
@@ -99,28 +101,28 @@ struct CreateEmployeeSheet: View {
                 .keyboardShortcut(.cancelAction)
 
                 Button("保存并启用") {
-                    let newEmployee = Employee(
-                        id: UUID().uuidString,
-                        name: name.isEmpty ? "新员工" : name,
-                        role: employeeTemplates.first(where: { $0.id == selectedTemplate })?.title ?? "通用员工",
-                        device: "MacBook-Pro.local",
-                        isOnline: true,
-                        description: description.isEmpty
-                            ? (employeeTemplates.first(where: { $0.id == selectedTemplate })?.description ?? "")
-                            : description,
-                        knowledge: [],
-                        capabilities: [],
-                        workStyles: [],
-                        environment: "本地",
-                        avatarColor: selectedColor,
-                        joinDate: Date()
-                    )
-                    employees.append(newEmployee)
-                    isPresented = false
+                    isCreating = true
+                    let role = selectedTemplate ?? "backend-engineer"
+                    let empName = name.isEmpty ? "新员工" : name
+                    let empDesc = description.isEmpty
+                        ? (employeeTemplates.first(where: { $0.id == selectedTemplate })?.description ?? "")
+                        : description
+                    Task {
+                        do {
+                            let newEmp = try await apiClient.createEmployee(
+                                name: empName, role: role, description: empDesc
+                            )
+                            onCreated(newEmp)
+                        } catch {
+                            print("Create employee failed: \(error)")
+                        }
+                        isCreating = false
+                        isPresented = false
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(name.isEmpty && selectedTemplate == nil)
+                .disabled((name.isEmpty && selectedTemplate == nil) || isCreating)
             }
         }
         .padding(24)

@@ -10,7 +10,7 @@ struct ContentView: View {
     @State private var hoveredSidebarSection: String?
     @StateObject private var apiClient = APIClient()
 
-    private let employees = Employee.samples
+    @State private var employees: [Employee] = []
 
     var body: some View {
         ZStack {
@@ -32,6 +32,10 @@ struct ContentView: View {
             AppFontSizeOption(rawValue: fontSizeOption)?.scale ?? AppFontSizeOption.standard.scale
         )
         .environmentObject(apiClient)
+        .task {
+            do { employees = try await apiClient.fetchEmployees() }
+            catch { employees = Employee.samples }
+        }
         .background(
             WindowChromeConfigurator(sidebarInset: 14) {
                 withAnimation(.easeInOut(duration: 0.18)) {

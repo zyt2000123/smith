@@ -2,7 +2,8 @@ import SwiftUI
 
 struct ManagementView: View {
     var onOpenEmployee: (Employee) -> Void
-    @State private var employees = Employee.samples
+    @EnvironmentObject private var apiClient: APIClient
+    @State private var employees: [Employee] = []
     @State private var showCreateSheet = false
     @State private var selectedSegment = 0
     @State private var statusFilter = "全部"
@@ -49,8 +50,13 @@ struct ManagementView: View {
             .padding(.top, 40)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .task { await loadEmployees() }
         .sheet(isPresented: $showCreateSheet) {
-            CreateEmployeeSheet(employees: $employees, isPresented: $showCreateSheet)
+            CreateEmployeeSheet(
+                isPresented: $showCreateSheet,
+                onCreated: { newEmp in employees.append(newEmp) }
+            )
+            .environmentObject(apiClient)
         }
     }
 
@@ -141,6 +147,14 @@ struct ManagementView: View {
                     onOpenEmployee(emp)
                 }
             }
+        }
+    }
+
+    private func loadEmployees() async {
+        do {
+            employees = try await apiClient.fetchEmployees()
+        } catch {
+            employees = Employee.samples
         }
     }
 }
