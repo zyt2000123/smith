@@ -158,6 +158,7 @@ enum APIError: LocalizedError {
 
 // MARK: - APIClient
 
+@MainActor
 class APIClient: ObservableObject {
     let baseURL: String
 
