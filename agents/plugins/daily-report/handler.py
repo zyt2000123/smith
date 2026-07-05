@@ -62,13 +62,13 @@ async def handle(event: dict) -> None:
         *[f"- {t}" for t in tasks if t],
         "",
         "## Tools Used",
-        *[f"- {t}" for t in tools] if tools else ["- (none)"],
+        *([f"- {t}" for t in tools] if tools else ["- (none)"]),
         "",
         "## Decisions Made",
-        *[f"- {d}" for d in decisions] if decisions else ["- (none)"],
+        *([f"- {d}" for d in decisions] if decisions else ["- (none)"]),
         "",
         "## Blockers",
-        *[f"- {b}" for b in blockers] if blockers else ["- (none)"],
+        *([f"- {b}" for b in blockers] if blockers else ["- (none)"]),
     ]
 
     report_dir = employee_dir / "memory" / "agent"

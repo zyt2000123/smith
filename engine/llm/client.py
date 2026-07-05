@@ -40,7 +40,7 @@ class LLMClient:
         self._http = httpx.AsyncClient(
             base_url=self.base_url,
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=httpx.Timeout(120.0, connect=10.0),
+            timeout=httpx.Timeout(300.0, connect=10.0),
         )
 
     async def chat(
@@ -82,9 +82,9 @@ class LLMClient:
         if tools:
             body["tools"] = tools
 
-        async with self._http.stream(
-            "POST", "/chat/completions", json=body,
-        ) as resp:
+        req = self._http.build_request("POST", "/chat/completions", json=body)
+        resp = await self._http.send(req, stream=True)
+        try:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
@@ -99,6 +99,8 @@ class LLMClient:
                 delta = choices[0].get("delta", {})
                 if text := delta.get("content"):
                     yield text
+        finally:
+            await resp.aclose()
 
     async def _request(self, body: dict, _attempt: int = 0) -> dict:
         max_retries = 3

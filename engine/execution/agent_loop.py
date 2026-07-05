@@ -177,8 +177,7 @@ async def _react_event_loop(
         response = await llm.chat(conversation, tools=tools)
 
         if not response.has_tool_calls:
-            async for chunk in llm.chat_stream(conversation):
-                yield ExecutionEvent(EventType.TEXT_DELTA, {"text": chunk})
+            yield ExecutionEvent(EventType.TEXT_DELTA, {"text": response.text})
             return
 
         conversation.append({
@@ -565,10 +564,9 @@ async def reply(employee_id: str, name: str, user_message: str) -> str:
             tool_guard=tool_guard,
         )
 
-        # Save conversation memory for non-trivial tasks
-        had_tools = task_type != TaskType.DIRECT
+        # Save conversation memory for all tasks
         from memory.store import save_conversation_memory
-        await save_conversation_memory(employee_dir, user_message, result, had_tools)
+        await save_conversation_memory(employee_dir, user_message, result, True)
 
         # Learn user preferences from conversation
         from memory.user_learner import UserPreferenceLearner
