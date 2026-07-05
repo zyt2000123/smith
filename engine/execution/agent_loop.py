@@ -17,7 +17,7 @@ from skill.registry import SkillRegistry
 from tool.interface import ToolCall
 from tool.registry import ToolRegistry
 from .backtrack import FailureLoopGuard, FailureSignature
-from .gate import SkillRubricGate
+from .gate import LLMGate, SkillRubricGate
 from .skill_chain import SkillChain
 from .task_router import TaskType, route_task
 
@@ -36,8 +36,13 @@ async def _react_loop(
     """Simple ReAct loop: think -> act -> observe, until no tool calls."""
     tools = tool_registry.get_schemas() or None
     conversation = list(messages)
+    consecutive_errors = 0
 
     for _ in range(max_iters):
+        # Sliding window: keep system prompt + last 30 messages
+        if len(conversation) > 40:
+            conversation = [conversation[0]] + conversation[-30:]
+
         response = await llm.chat(conversation, tools=tools)
 
         if not response.has_tool_calls:
@@ -68,6 +73,11 @@ async def _react_loop(
                         "tool_call_id": call.id,
                         "content": f"[BLOCKED] {guard_result.reason}",
                     })
+                    consecutive_errors += 1
+                    if consecutive_errors >= 3:
+                        conversation.append({"role": "system", "content":
+                            "Multiple tool calls have failed consecutively. Change your approach — try a different tool, simplify the command, or explain what you need without using tools."})
+                        consecutive_errors = 0
                     continue
 
             result = await tool_registry.execute(call)
@@ -76,6 +86,14 @@ async def _react_loop(
                 "tool_call_id": result.call_id,
                 "content": result.content,
             })
+            if result.is_error:
+                consecutive_errors += 1
+                if consecutive_errors >= 3:
+                    conversation.append({"role": "system", "content":
+                        "Multiple tool calls have failed consecutively. Change your approach — try a different tool, simplify the command, or explain what you need without using tools."})
+                    consecutive_errors = 0
+            else:
+                consecutive_errors = 0
 
     return "Max ReAct iterations reached."
 
@@ -224,6 +242,8 @@ async def run_agent(
             )
 
         # --- Node gate check (existing logic, unchanged) ---
+        if isinstance(node.gate, LLMGate):
+            node.gate.set_llm(llm)
         gate_result = await node.gate.check(output, context)
 
         if gate_result.verdict == "pass":

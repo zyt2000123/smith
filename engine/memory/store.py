@@ -15,6 +15,7 @@ class FileMemoryStore:
         memory/project/<id>.md — project-scoped memories
 
     Project-scoped memories sort before agent-scoped in search results.
+    Optionally backed by a SearchIndex for FTS5 + vector hybrid search.
     """
 
     def __init__(self, memory_dir: Path) -> None:
@@ -23,6 +24,11 @@ class FileMemoryStore:
         self._project_dir = memory_dir / "project"
         self._agent_dir.mkdir(parents=True, exist_ok=True)
         self._project_dir.mkdir(parents=True, exist_ok=True)
+        self._search_index = None  # set via attach_search_index()
+
+    def attach_search_index(self, index) -> None:
+        """Attach a SearchIndex for hybrid search (FTS5 + vector)."""
+        self._search_index = index
 
     def _scope_dir(self, scope: str) -> Path:
         return self._project_dir if scope == "project" else self._agent_dir
@@ -41,19 +47,34 @@ class FileMemoryStore:
         return files
 
     async def search(self, query: str) -> list[MemoryEntry]:
+        # Hybrid search via SearchIndex if available
+        if self._search_index:
+            try:
+                hits = await self._search_index.search(query)
+                results: list[MemoryEntry] = []
+                for hit in hits:
+                    path, scope = self._find_entry_file(hit["id"])
+                    if path:
+                        raw = path.read_text(encoding="utf-8")
+                        entry = self._parse_file(path, raw, scope or "agent")
+                        if entry:
+                            results.append(entry)
+                if results:
+                    return results
+            except Exception:
+                pass  # ponytail: fall through to keyword search
+
+        # Fallback: keyword scan
         results: list[MemoryEntry] = []
         keywords = query.lower().split()
         if not keywords:
             return results
-
         for path, default_scope in self._all_md_files():
             content = path.read_text(encoding="utf-8")
-            lower_content = content.lower()
-            if any(kw in lower_content for kw in keywords):
+            if any(kw in content.lower() for kw in keywords):
                 entry = self._parse_file(path, content, default_scope)
                 if entry:
                     results.append(entry)
-
         return results
 
     async def add(self, content: str, evidence: str, scope: str) -> MemoryEntry:
@@ -68,6 +89,11 @@ class FileMemoryStore:
             last_accessed=now,
         )
         self._write_entry(entry)
+        if self._search_index:
+            try:
+                await self._search_index.index_entry(entry.id, entry.content, entry.scope)
+            except Exception:
+                pass
         return entry
 
     async def update(
@@ -90,12 +116,22 @@ class FileMemoryStore:
         entry.last_accessed = datetime.now(timezone.utc).isoformat()
 
         self._write_entry(entry)
+        if self._search_index:
+            try:
+                await self._search_index.index_entry(entry.id, entry.content, entry.scope)
+            except Exception:
+                pass
         return True
 
     async def remove(self, entry_id: str) -> bool:
         path, _ = self._find_entry_file(entry_id)
         if path is not None and path.is_file():
             path.unlink()
+            if self._search_index:
+                try:
+                    await self._search_index.remove_entry(entry_id)
+                except Exception:
+                    pass
             return True
         return False
 
@@ -211,6 +247,25 @@ async def save_conversation_memory(
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     store = FileMemoryStore(memory_dir)
+
+    # Attach search index for hybrid FTS5 + vector indexing
+    try:
+        from .search import SearchIndex, create_jina_embed_fn
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
+        from common.config_loader import resolve_llm_config
+        cfg = resolve_llm_config(employee_dir.name)
+        embed_fn = None
+        if cfg.get("api_key") and cfg.get("base_url"):
+            embed_fn = await create_jina_embed_fn(
+                cfg["api_key"], cfg["base_url"], cfg.get("embedding_model", "jina-embeddings-v3"),
+            )
+        idx = SearchIndex(memory_dir)
+        await idx.open(embed_fn)
+        store.attach_search_index(idx)
+    except Exception:
+        pass  # ponytail: search indexing is best-effort
+
     await store.add(
         content=f"Task: {user_msg[:100]}\nResult: {reply[:200]}",
         evidence=f"conversation at {now}",
@@ -233,3 +288,20 @@ async def save_conversation_memory(
         from .dream import DreamConsolidator
         consolidator = DreamConsolidator(store)
         await consolidator.apply()
+
+        # ponytail: compilation is best-effort after Dream cleaning
+        try:
+            from .compile import run_compilation
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
+            from common.config_loader import resolve_llm_config
+            from engine.llm.model_config import build_llm_client
+            llm_cfg = resolve_llm_config(employee_dir.name)
+            if llm_cfg.get("api_key"):
+                llm = build_llm_client(llm_cfg)
+                try:
+                    await run_compilation(memory_dir, llm)
+                finally:
+                    await llm.close()
+        except Exception:
+            pass

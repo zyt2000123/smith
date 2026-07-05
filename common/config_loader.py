@@ -71,4 +71,5 @@ def resolve_llm_config(
         "model": llm.get("model", ""),
         "provider": llm.get("provider", ""),
         "stream": llm.get("stream", True),
+        "embedding_model": llm.get("embedding_model", "jina-embeddings-v3"),
     }

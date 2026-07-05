@@ -1,0 +1,10 @@
+{
+  "schema": "agentsmith.plugin.v1",
+  "name": "daily-report",
+  "version": "0.1.0",
+  "description": "每日工作报告自动生成",
+  "trigger_type": "cron",
+  "polling_interval_seconds": 0,
+  "cron_expression": "0 18 * * *",
+  "skills": []
+}
