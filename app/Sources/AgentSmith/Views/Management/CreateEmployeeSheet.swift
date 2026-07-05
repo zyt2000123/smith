@@ -9,6 +9,7 @@ struct CreateEmployeeSheet: View {
     @State private var description = ""
     @State private var selectedColor: Color = .blue
     @State private var isCreating = false
+    @State private var hoveredTemplate: String?
 
     private let colorOptions: [Color] = [.blue, .green, .orange, .purple, .red, .pink, .cyan, .mint]
 
@@ -130,7 +131,10 @@ struct CreateEmployeeSheet: View {
     }
 
     private func templateCard(_ template: EmployeeTemplate) -> some View {
-        Button {
+        let isSelected = selectedTemplate == template.id
+        let isHovered = hoveredTemplate == template.id
+
+        return Button {
             selectedTemplate = template.id
             if name.isEmpty {
                 description = template.description
@@ -139,13 +143,13 @@ struct CreateEmployeeSheet: View {
             HStack(spacing: 10) {
                 Image(systemName: template.icon)
                     .appFont(size: 20)
-                    .foregroundColor(selectedTemplate == template.id ? .accentColor : .secondary)
+                    .foregroundStyle(isSelected ? .blue : .secondary)
                     .frame(width: 36)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(template.title)
                         .appFont(size: 13, weight: .medium)
-                        .foregroundColor(.primary)
+                        .foregroundStyle(isSelected ? .blue : .primary)
                     Text(template.description)
                         .appFont(size: 11)
                         .foregroundColor(.secondary)
@@ -154,18 +158,12 @@ struct CreateEmployeeSheet: View {
                 Spacer()
             }
             .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(
-                        selectedTemplate == template.id ? Color.accentColor : Color.clear,
-                        lineWidth: 2
-                    )
-            )
+            .appSelectionBackground(isSelected: isSelected, isHovered: isHovered)
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            hoveredTemplate = hovering ? template.id : nil
+        }
+        .accessibilityValue(isSelected ? "已选择" : "")
     }
 }

@@ -26,6 +26,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     var onBack: (() -> Void)? = nil
     @State private var selected: SettingsSection = .general
+    @State private var hoveredSection: SettingsSection?
     @AppStorage("isDarkMode") private var isDarkMode = true
     @AppStorage("fontSizeOption") private var fontSizeOption = AppFontSizeOption.standard.rawValue
     @State private var autoReview = true
@@ -49,37 +50,33 @@ struct SettingsView: View {
                 .padding(.bottom, 4)
 
                 ForEach(SettingsSection.allCases) { sec in
+                    let isSelected = selected == sec
+                    let isHovered = hoveredSection == sec
+
                     Button { selected = sec } label: {
                         HStack(spacing: 8) {
                             Image(systemName: sec.icon).appFont(size: 13)
-                                .foregroundStyle(selected == sec ? .primary : .secondary).frame(width: 18)
+                                .foregroundStyle(isSelected ? .blue : .secondary).frame(width: 18)
                             Text(sec.label).appFont(size: 13)
-                                .foregroundStyle(selected == sec ? .primary : .secondary)
+                                .foregroundStyle(isSelected ? .blue : .secondary)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 7).padding(.horizontal, 10)
-                        .background(
-                            Group {
-                                if selected == sec {
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .fill(AppPalette.selectedSurface)
-                                }
-                            }
-                        )
+                        .sidebarNavigationBackground(isSelected: isSelected, isHovered: isHovered)
                     }
                     .buttonStyle(.plain)
+                    .onHover { hovering in
+                        hoveredSection = hovering ? sec : nil
+                    }
                 }
                 Spacer()
             }
-            .padding(.horizontal, 12).padding(.bottom, 12).padding(.top, 44).frame(width: 180)
-            .background(SidebarMaterialView())
-            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(AppPalette.border.opacity(0.75), lineWidth: 0.5)
-            )
-            .shadow(color: .black.opacity(0.08), radius: 14, y: 4)
-            .padding(12)
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
+            .padding(.top, FloatingSidebarMetrics.topContentPadding)
+            .frame(width: FloatingSidebarMetrics.width)
+            .floatingSidebarSurface()
+            .padding(FloatingSidebarMetrics.inset)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
@@ -90,7 +87,10 @@ struct SettingsView: View {
                     case .about: aboutSection
                     }
                 }
-                .padding(32).frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 32)
+                .padding(.bottom, 32)
+                .padding(.top, FloatingSidebarMetrics.rightContentTopInset)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }

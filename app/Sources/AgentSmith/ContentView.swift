@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var conversationsExpanded = true
     @State private var channelsExpanded = true
     @State private var hoveredSidebarSection: String?
+    @State private var hoveredSidebarItem: String?
     @StateObject private var apiClient = APIClient()
 
     @State private var employees: [Employee] = []
@@ -62,9 +63,30 @@ struct ContentView: View {
                     sidebarSection("对话", expanded: $conversationsExpanded, onCreate: {
                         selectedPage = "new-conv"
                     }, createHelp: "新建对话") {
-                        sidebarRow("UI review", subtitle: "Luna · 刚刚", icon: "bubble.left", page: "conv-1")
-                        sidebarRow("API deploy", subtitle: "Theo · 5 分钟前", icon: "bubble.left", page: "conv-2")
-                        sidebarRow("Roadmap sync", subtitle: "Ivy · 1 小时前", icon: "bubble.left", page: "conv-3")
+                        conversationSidebarRow(
+                            name: "Ivy",
+                            preview: "版本范围已经同步到路线图里。",
+                            timestamp: "刚刚",
+                            imageName: "product-manager",
+                            color: .purple,
+                            page: "conv-3"
+                        )
+                        conversationSidebarRow(
+                            name: "Luna",
+                            preview: "好的，我来看看这个组件的实现…",
+                            timestamp: "5 分钟前",
+                            imageName: "frontend-engineer",
+                            color: .green,
+                            page: "conv-1"
+                        )
+                        conversationSidebarRow(
+                            name: "Theo",
+                            preview: "API 接口已经部署完成。",
+                            timestamp: "1 小时前",
+                            imageName: "backend-engineer",
+                            color: .blue,
+                            page: "conv-2"
+                        )
                     }
 
                     sidebarSection("频道", expanded: $channelsExpanded, onCreate: {
@@ -102,29 +124,35 @@ struct ContentView: View {
 
     private var sidebarPanel: some View {
         sidebar
-            .frame(width: 180)
+            .frame(width: FloatingSidebarMetrics.width)
             .frame(maxHeight: .infinity)
-            .background(SidebarMaterialView())
-            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(AppPalette.border.opacity(0.75), lineWidth: 0.5)
-            )
-            .shadow(color: .black.opacity(0.08), radius: 14, y: 4)
-            .padding(12)
+            .floatingSidebarSurface()
+            .padding(.leading, FloatingSidebarMetrics.inset)
+            .padding(.vertical, FloatingSidebarMetrics.inset)
     }
 
     private func sidebarAction(_ title: String, icon: String, page: String) -> some View {
-        Button { selectedPage = page } label: {
+        let isSelected = selectedPage == page
+        let isHovered = hoveredSidebarItem == page
+
+        return Button { selectedPage = page } label: {
             HStack(spacing: 8) {
-                Image(systemName: icon).appFont(size: 14).foregroundStyle(.secondary).frame(width: 18)
-                Text(title).appFont(size: 14).foregroundStyle(selectedPage == page ? .primary : .secondary)
+                Image(systemName: icon)
+                    .appFont(size: 14)
+                    .foregroundStyle(isSelected ? .blue : .secondary)
+                    .frame(width: 18)
+                Text(title)
+                    .appFont(size: 14)
+                    .foregroundStyle(isSelected ? .blue : .secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 6).padding(.horizontal, 8)
-            .background(RoundedRectangle(cornerRadius: 10).fill(selectedPage == page ? AppPalette.selectedSurface : .clear))
+            .sidebarNavigationBackground(isSelected: isSelected, isHovered: isHovered)
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            hoveredSidebarItem = hovering ? page : nil
+        }
     }
 
     private func sidebarSection<Content: View>(
@@ -176,7 +204,11 @@ struct ContentView: View {
     }
 
     private func sidebarEmployeeRow(_ emp: Employee) -> some View {
-        Button { selectedPage = "employee-\(emp.id)" } label: {
+        let page = "employee-\(emp.id)"
+        let isSelected = selectedPage == page
+        let isHovered = hoveredSidebarItem == page
+
+        return Button { selectedPage = page } label: {
             HStack(spacing: 8) {
                 ZStack(alignment: .bottomTrailing) {
                     Circle().fill(emp.avatarColor.gradient).frame(width: 22, height: 22)
@@ -187,42 +219,90 @@ struct ContentView: View {
                     }
                 }
                 Text(emp.name).appFont(size: 14)
-                    .foregroundStyle(selectedPage == "employee-\(emp.id)" ? .primary : .secondary).lineLimit(1)
+                    .foregroundStyle(isSelected ? .blue : .secondary).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 5).padding(.horizontal, 8)
-            .background(RoundedRectangle(cornerRadius: 10).fill(selectedPage == "employee-\(emp.id)" ? AppPalette.selectedSurface : .clear))
+            .sidebarNavigationBackground(isSelected: isSelected, isHovered: isHovered)
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            hoveredSidebarItem = hovering ? page : nil
+        }
     }
 
     private func channelRow(_ name: String, isPublic: Bool, page: String) -> some View {
-        Button { selectedPage = page } label: {
+        let isSelected = selectedPage == page
+        let isHovered = hoveredSidebarItem == page
+
+        return Button { selectedPage = page } label: {
             HStack(spacing: 8) {
-                Text(isPublic ? "#" : "🔒").appFont(size: 12).frame(width: 18)
-                Text(name).appFont(size: 14).foregroundStyle(selectedPage == page ? .primary : .secondary).lineLimit(1)
+                Text(isPublic ? "#" : "🔒")
+                    .appFont(size: 12)
+                    .foregroundStyle(isSelected ? .blue : .secondary)
+                    .frame(width: 18)
+                Text(name)
+                    .appFont(size: 14)
+                    .foregroundStyle(isSelected ? .blue : .secondary)
+                    .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 5).padding(.horizontal, 8)
-            .background(RoundedRectangle(cornerRadius: 10).fill(selectedPage == page ? AppPalette.selectedSurface : .clear))
+            .sidebarNavigationBackground(isSelected: isSelected, isHovered: isHovered)
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            hoveredSidebarItem = hovering ? page : nil
+        }
     }
 
-    private func sidebarRow(_ title: String, subtitle: String, icon: String, page: String) -> some View {
-        Button { selectedPage = page } label: {
-            HStack(spacing: 8) {
-                Image(systemName: icon).appFont(size: 12).foregroundStyle(.tertiary).frame(width: 18)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title).appFont(size: 14).foregroundStyle(selectedPage == page ? .primary : .secondary).lineLimit(1)
-                    Text(subtitle).appFont(size: 10).foregroundStyle(.tertiary)
+    private func conversationSidebarRow(
+        name: String,
+        preview: String,
+        timestamp: String,
+        imageName: String,
+        color: Color,
+        page: String
+    ) -> some View {
+        let isSelected = selectedPage == page
+        let isHovered = hoveredSidebarItem == page
+
+        return Button { selectedPage = page } label: {
+            HStack(spacing: 9) {
+                EmployeePortraitView(
+                    imageName: imageName,
+                    fallbackColor: color,
+                    fallbackText: String(name.prefix(1)),
+                    width: 36,
+                    height: 42,
+                    cornerRadius: 8
+                )
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 4) {
+                        Text(name)
+                            .appFont(size: 13, weight: .semibold)
+                            .foregroundStyle(.primary)
+                        Spacer(minLength: 2)
+                        Text(timestamp)
+                            .appFont(size: 9)
+                            .foregroundStyle(.tertiary)
+                    }
+                    Text(preview)
+                        .appFont(size: 11)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 5).padding(.horizontal, 8)
-            .background(RoundedRectangle(cornerRadius: 10).fill(selectedPage == page ? AppPalette.selectedSurface : .clear))
+            .padding(.vertical, 8)
+            .padding(.horizontal, 8)
+            .sidebarNavigationBackground(isSelected: isSelected, isHovered: isHovered)
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            hoveredSidebarItem = hovering ? page : nil
+        }
     }
 
     private var mainContent: some View {
@@ -232,7 +312,10 @@ struct ContentView: View {
                     selectedPage = "employee-\(employee.id)"
                 }
             } else if selectedPage.hasPrefix("conv-") || selectedPage == "new-conv" {
-                ConversationView()
+                ConversationView(
+                    initialConversationID: conversationID(for: selectedPage),
+                    onBack: { selectedPage = "management" }
+                )
             } else if selectedPage.hasPrefix("employee-"),
                       let emp = employees.first(where: { $0.id == String(selectedPage.dropFirst("employee-".count)) }) {
                 EmployeeDetailView(employee: emp, onBack: {
@@ -254,13 +337,35 @@ struct ContentView: View {
     }
 
     private var shellSplitView: some View {
-        HStack(spacing: 0) {
-            if sidebarVisible && !selectedPage.hasPrefix("employee-") {
+        ZStack(alignment: .leading) {
+            mainPanel
+                .padding(
+                    .leading,
+                    showsPrimarySidebar
+                        ? FloatingSidebarMetrics.width + FloatingSidebarMetrics.inset
+                        : 0
+                )
+
+            if showsPrimarySidebar {
                 sidebarPanel
             }
-
-            mainPanel
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var showsPrimarySidebar: Bool {
+        sidebarVisible
+            && !selectedPage.hasPrefix("employee-")
+            && !selectedPage.hasPrefix("conv-")
+            && selectedPage != "new-conv"
+    }
+
+    private func conversationID(for page: String) -> String {
+        switch page {
+        case "conv-1": return "luna"
+        case "conv-2": return "theo"
+        case "conv-3": return "ivy"
+        default: return "ivy"
+        }
     }
 }

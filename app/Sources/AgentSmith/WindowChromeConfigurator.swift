@@ -9,7 +9,7 @@ struct WindowChromeConfigurator: NSViewRepresentable {
     private let buttonSpacing: CGFloat = 10
     private let toggleButtonGap: CGFloat = 16
     private let toggleButtonSize = NSSize(width: 28, height: 24)
-    private let verticalOffset: CGFloat = -4
+    private let verticalOffset: CGFloat = -10
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onToggleSidebar: onToggleSidebar)
@@ -60,7 +60,7 @@ struct WindowChromeConfigurator: NSViewRepresentable {
         }
 
         let titlebarHeight = titlebarView.frame.height
-        let targetButtonY = max(0, floor((titlebarHeight - buttonSize) / 2) - 1 + verticalOffset)
+        let targetButtonY = floor((titlebarHeight - buttonSize) / 2) - 1 + verticalOffset
         let targetOrigin = NSPoint(x: sidebarInset + 12, y: targetButtonY)
         if buttonContainer.frame.origin != targetOrigin {
             buttonContainer.setFrameOrigin(targetOrigin)
@@ -76,9 +76,11 @@ struct WindowChromeConfigurator: NSViewRepresentable {
             titlebarView.addSubview(toggleButton)
         }
 
+        let closeFrameInTitlebar = closeButton.convert(closeButton.bounds, to: titlebarView)
+        let zoomFrameInTitlebar = zoomButton.convert(zoomButton.bounds, to: titlebarView)
         let toggleOrigin = NSPoint(
-            x: targetOrigin.x + targetWidth + toggleButtonGap,
-            y: max(0, floor((titlebarHeight - toggleButtonSize.height) / 2) - 1 + verticalOffset)
+            x: zoomFrameInTitlebar.maxX + toggleButtonGap,
+            y: floor(closeFrameInTitlebar.midY - toggleButtonSize.height / 2)
         )
         toggleButton.setFrameOrigin(toggleOrigin)
     }
