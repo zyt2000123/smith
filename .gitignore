@@ -4,6 +4,8 @@ dist/
 *.log
 .claude/
 .codegraph/
+.agents/
+_old_*/
 .build/
 __pycache__/
 *.pyc
