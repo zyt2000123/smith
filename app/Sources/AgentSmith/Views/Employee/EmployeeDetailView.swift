@@ -80,7 +80,12 @@ struct EmployeeDetailView: View {
                         emptyState(icon: "folder", title: "暂无项目")
                     }
                 }
-                .padding(24)
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
+                .padding(
+                    .top,
+                    FloatingSidebarMetrics.rightContentTopInset - FloatingSidebarMetrics.inset
+                )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(AppPalette.canvas)
@@ -103,7 +108,7 @@ struct EmployeeDetailView: View {
                 } label: {
                     Label("我的Agent", systemImage: "chevron.left")
                         .appFont(size: 13)
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
                 .padding(.bottom, 12)
@@ -140,47 +145,34 @@ struct EmployeeDetailView: View {
                 Button {
                     selectedTab = tab
                 } label: {
-                    Label {
-                        Text(tab.label)
-                    } icon: {
+                    HStack(spacing: 12) {
                         Image(systemName: isSelected ? tab.selectedIcon : tab.icon)
+                            .symbolRenderingMode(.monochrome)
+                            .frame(width: 20, alignment: .center)
+
+                        Text(tab.label)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .appFont(size: 13)
                     .foregroundStyle(isSelected ? .blue : .primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 7)
                     .padding(.horizontal, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(
-                                isSelected
-                                    ? Color.blue.opacity(0.12)
-                                    : isHovered
-                                        ? AppPalette.mutedSurface
-                                        : Color.clear
-                            )
-                    )
+                    .sidebarNavigationBackground(isSelected: isSelected, isHovered: isHovered)
                 }
                 .buttonStyle(.plain)
                 .onHover { hovering in
                     hoveredTab = hovering ? tab : nil
                 }
-                .animation(.easeInOut(duration: 0.15), value: isHovered)
             }
 
             Spacer()
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 14)
-        .padding(.top, 44)
-        .frame(width: 180)
-        .background(SidebarMaterialView())
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(AppPalette.border.opacity(0.75), lineWidth: 0.5)
-        )
-        .shadow(color: .black.opacity(0.08), radius: 14, y: 4)
+        .padding(.top, FloatingSidebarMetrics.topContentPadding)
+        .frame(width: FloatingSidebarMetrics.width)
+        .floatingSidebarSurface()
     }
 
     private func emptyState(icon: String, title: String) -> some View {

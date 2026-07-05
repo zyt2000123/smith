@@ -47,7 +47,7 @@ struct ManagementView: View {
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 24)
-            .padding(.top, 40)
+            .padding(.top, FloatingSidebarMetrics.rightContentTopInset)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .task { await loadEmployees() }
@@ -84,12 +84,7 @@ struct ManagementView: View {
 
     private var filterBar: some View {
         HStack(spacing: 12) {
-            Picker("", selection: $selectedSegment) {
-                Text("我的Agent").tag(0)
-                Text("我的群组").tag(1)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 200)
+            employeeSegmentedControl
 
             filterPill("状态", selection: $statusFilter, options: ["全部", "在线", "离线"])
             filterPill("环境", selection: $envFilter, options: ["全部", "本地", "云端"])
@@ -109,6 +104,36 @@ struct ManagementView: View {
             .background(AppPalette.mutedSurface, in: RoundedRectangle(cornerRadius: 8))
             .frame(width: 200)
         }
+    }
+
+    private var employeeSegmentedControl: some View {
+        HStack(spacing: 2) {
+            segmentButton("我的Agent", value: 0)
+            segmentButton("我的群组", value: 1)
+        }
+        .padding(2)
+        .frame(width: 200)
+        .background(AppPalette.mutedSurface, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func segmentButton(_ title: String, value: Int) -> some View {
+        let isSelected = selectedSegment == value
+
+        return Button {
+            selectedSegment = value
+        } label: {
+            Text(title)
+                .appFont(size: 13, weight: isSelected ? .semibold : .regular)
+                .foregroundStyle(isSelected ? .white : .primary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isSelected ? Color.blue : Color.clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func filterPill(_ label: String, selection: Binding<String>, options: [String]) -> some View {
