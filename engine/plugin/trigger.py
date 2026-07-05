@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Awaitable
 
 from .registry import PluginManifest
@@ -105,3 +106,49 @@ class WebhookTrigger(TriggerBase):
                 "plugin": self.plugin.name,
                 "error": str(exc),
             }
+
+
+class CronTrigger(TriggerBase):
+    """Cron-expression based trigger using server's cron parser."""
+
+    def __init__(self, plugin: PluginManifest, handler: Callable[[dict], Awaitable[None]], cron_expression: str) -> None:
+        super().__init__(plugin)
+        self._handler = handler
+        self._cron_expr = cron_expression
+        self._task: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    async def _loop(self) -> None:
+        while True:
+            now = datetime.now(timezone.utc)
+            next_run = self._next_cron_time(now)
+            delay = (next_run - now).total_seconds()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            try:
+                events = await self.poll()
+                for event in events:
+                    await self._handler(event)
+            except Exception:
+                pass
+
+    def _next_cron_time(self, now: datetime) -> datetime:
+        """Simple cron parser for 'M H * * *' format."""
+        parts = self._cron_expr.split()
+        if len(parts) < 5:
+            return now + timedelta(hours=1)  # fallback
+        minute, hour = int(parts[0]), int(parts[1])
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return target

@@ -1,5 +1,5 @@
 from .registry import PluginManifest, PluginRegistry
-from .trigger import TriggerBase, PollingTrigger, WebhookTrigger
+from .trigger import TriggerBase, PollingTrigger, WebhookTrigger, CronTrigger
 
 __all__ = [
     "PluginManifest",
@@ -7,4 +7,5 @@ __all__ = [
     "TriggerBase",
     "PollingTrigger",
     "WebhookTrigger",
+    "CronTrigger",
 ]

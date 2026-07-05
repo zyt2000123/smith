@@ -7,7 +7,7 @@ from pathlib import Path
 
 from engine.plugin.registry import PluginRegistry, PluginManifest
 from engine.plugin.loader import load_handler
-from engine.plugin.trigger import PollingTrigger, WebhookTrigger, TriggerBase
+from engine.plugin.trigger import PollingTrigger, WebhookTrigger, CronTrigger, TriggerBase
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +98,11 @@ class PluginService:
 
         if manifest.trigger_type == "polling":
             trigger = PollingTrigger(manifest, handler)
+            self._triggers[manifest.name] = trigger
+            await trigger.start()
+        elif manifest.trigger_type == "cron":
+            cron_expr = manifest.to_dict().get("cron_expression", "0 18 * * *")
+            trigger = CronTrigger(manifest, handler, cron_expr)
             self._triggers[manifest.name] = trigger
             await trigger.start()
         elif manifest.trigger_type == "webhook":
