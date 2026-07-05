@@ -17,6 +17,7 @@ from skill.registry import SkillRegistry
 from tool.interface import ToolCall
 from tool.registry import ToolRegistry
 from .backtrack import FailureLoopGuard, FailureSignature
+from .events import EventType, ExecutionEvent
 from .gate import LLMGate, SkillRubricGate
 from .skill_chain import SkillChain
 from .task_router import TaskType, route_task
@@ -154,6 +155,191 @@ async def _react_stream_loop(
             })
 
     yield "Max ReAct iterations reached."
+
+
+async def _react_event_loop(
+    llm: LLMClient,
+    messages: list[dict],
+    tool_registry: ToolRegistry,
+    tool_guard: ToolGuard | None = None,
+    max_iters: int = 20,
+) -> AsyncGenerator[ExecutionEvent, None]:
+    """ReAct loop that yields structured ExecutionEvents."""
+    tools = tool_registry.get_schemas() or None
+    conversation = list(messages)
+    consecutive_errors = 0
+
+    for _ in range(max_iters):
+        if len(conversation) > 40:
+            conversation = [conversation[0]] + conversation[-30:]
+
+        response = await llm.chat(conversation, tools=tools)
+
+        if not response.has_tool_calls:
+            async for chunk in llm.chat_stream(conversation):
+                yield ExecutionEvent(EventType.TEXT_DELTA, {"text": chunk})
+            return
+
+        conversation.append({
+            "role": "assistant",
+            "content": response.text,
+            "tool_calls": [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)}}
+                for tc in response.tool_calls
+            ],
+        })
+
+        for tc in response.tool_calls:
+            call = ToolCall(id=tc.id, name=tc.name, arguments=tc.arguments)
+            yield ExecutionEvent(EventType.TOOL_CALL_START, {"name": tc.name, "id": tc.id})
+
+            if tool_guard is not None:
+                guard_result = tool_guard.check(call)
+                if not guard_result.allowed:
+                    conversation.append({"role": "tool", "tool_call_id": call.id,
+                                         "content": f"[BLOCKED] {guard_result.reason}"})
+                    yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {"id": tc.id, "blocked": True, "reason": guard_result.reason})
+                    consecutive_errors += 1
+                    if consecutive_errors >= 3:
+                        conversation.append({"role": "system", "content": "Multiple tool calls failed. Change your approach."})
+                        consecutive_errors = 0
+                    continue
+
+            result = await tool_registry.execute(call)
+            conversation.append({"role": "tool", "tool_call_id": result.call_id, "content": result.content})
+            yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
+                "id": tc.id, "error": result.is_error, "content": result.content[:200],
+            })
+            if result.is_error:
+                consecutive_errors += 1
+                if consecutive_errors >= 3:
+                    conversation.append({"role": "system", "content": "Multiple tool calls failed. Change your approach."})
+                    consecutive_errors = 0
+            else:
+                consecutive_errors = 0
+
+    yield ExecutionEvent(EventType.TEXT_DELTA, {"text": "Max ReAct iterations reached."})
+
+
+async def run_agent_stream(
+    llm: LLMClient,
+    system_prompt: str,
+    user_message: str,
+    tool_registry: ToolRegistry,
+    skill_registry: SkillRegistry,
+    task_type: TaskType,
+    skill_chain: SkillChain | None,
+    guard: FailureLoopGuard,
+    tool_guard: ToolGuard | None = None,
+    max_react_iters: int = 20,
+) -> AsyncGenerator[ExecutionEvent, None]:
+    """Streaming version of run_agent — yields ExecutionEvents throughout execution."""
+    base_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+
+    yield ExecutionEvent(EventType.ROUTE_DECIDED, {"type": task_type.value})
+
+    if task_type == TaskType.DIRECT or skill_chain is None:
+        async for event in _react_event_loop(llm, base_messages, tool_registry, tool_guard, max_react_iters):
+            yield event
+        yield ExecutionEvent(EventType.DONE, {})
+        return
+
+    context: dict = {"user_message": user_message, "task_type": task_type.value}
+    node_idx = 0
+    max_backtracks = 5
+    backtrack_count = 0
+
+    while node_idx < len(skill_chain.nodes):
+        node = skill_chain.nodes[node_idx]
+
+        if node.condition is not None and not node.condition(context):
+            node_idx += 1
+            continue
+
+        yield ExecutionEvent(EventType.SKILL_START, {"skill": node.skill_name, "index": node_idx})
+
+        rubric_attempt = 0
+        output = ""
+        rubric_passed = False
+
+        while rubric_attempt < _RUBRIC_MAX_RETRIES:
+            skill = skill_registry.get(node.skill_name)
+            if skill is None:
+                messages = base_messages + [{"role": "user", "content": f"[Skill: {node.skill_name}] {user_message}"}]
+                if rubric_attempt == 1 and context.get("_rubric_retry_hint"):
+                    messages.append({"role": "user", "content": context["_rubric_retry_hint"]})
+                elif rubric_attempt == 2:
+                    messages.append({"role": "user", "content": "Switch strategy: try a completely different approach."})
+                output = await _react_loop(llm, messages, tool_registry, tool_guard, max_react_iters)
+            else:
+                skill_context = dict(context)
+                if rubric_attempt == 1 and skill_context.get("_rubric_retry_hint"):
+                    skill_context["rubric_feedback"] = skill_context["_rubric_retry_hint"]
+                elif rubric_attempt == 2:
+                    skill_context["rubric_feedback"] = "Switch strategy: try a completely different approach."
+                messages = [{"role": "user", "content": user_message}]
+                output = await execute_skill(skill, llm, tool_registry, messages, skill_context, max_react_iters, tool_guard=tool_guard)
+
+            rubric_result = await _rubric_gate.check(output, context)
+            if rubric_result.verdict == "pass":
+                rubric_passed = True
+                break
+            context["_rubric_retry_hint"] = rubric_result.retry_hint or ""
+            rubric_attempt += 1
+
+        context.pop("_rubric_retry_hint", None)
+
+        if not rubric_passed:
+            yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": rubric_result.reason})
+            yield ExecutionEvent(EventType.DONE, {})
+            return
+
+        if isinstance(node.gate, LLMGate):
+            node.gate.set_llm(llm)
+        gate_result = await node.gate.check(output, context)
+        yield ExecutionEvent(EventType.GATE_RESULT, {
+            "skill": node.skill_name, "verdict": gate_result.verdict, "reason": gate_result.reason,
+        })
+
+        if gate_result.verdict == "pass":
+            context[f"{node.skill_name}_output"] = output
+            yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "passed"})
+            node_idx += 1
+            continue
+
+        sig = FailureSignature(error_type=node.skill_name, context_hash=hashlib.md5(output.encode()).hexdigest()[:8])
+        action = guard.record(sig)
+
+        if action == "blocked":
+            yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": gate_result.reason})
+            yield ExecutionEvent(EventType.DONE, {})
+            return
+
+        if action == "switch" and node.skill_name in skill_chain.backtrack_map:
+            backtrack_count += 1
+            if backtrack_count > max_backtracks:
+                yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": "max backtracks"})
+                yield ExecutionEvent(EventType.DONE, {})
+                return
+            target = skill_chain.backtrack_map[node.skill_name]
+            yield ExecutionEvent(EventType.BACKTRACK, {"from": node.skill_name, "to": target})
+            node_idx = next((i for i, n in enumerate(skill_chain.nodes) if n.skill_name == target), 0)
+            continue
+
+        yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "retry"})
+
+    # Emit final output as text
+    for node in reversed(skill_chain.nodes):
+        key = f"{node.skill_name}_output"
+        if key in context:
+            yield ExecutionEvent(EventType.TEXT_DELTA, {"text": context[key]})
+            break
+
+    yield ExecutionEvent(EventType.DONE, {})
 
 
 async def run_agent(
@@ -386,31 +572,36 @@ async def reply_stream(employee_id: str, name: str, user_message: str) -> AsyncG
     task_type = route_task(user_message)
     tool_guard = ToolGuard(SAFETY_RULES_PATH)
 
+    chain: SkillChain | None = None
+    if task_type == TaskType.FEATURE:
+        chain = SkillChain.feature_chain()
+    elif task_type == TaskType.BUGFIX:
+        chain = SkillChain.bugfix_chain()
+    guard = FailureLoopGuard()
+
+    full_text = []
     try:
-        if task_type == TaskType.DIRECT:
-            base_messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ]
-            async for chunk in _react_stream_loop(llm, base_messages, tool_registry, tool_guard):
+        async for event in run_agent_stream(
+            llm, system_prompt, user_message,
+            tool_registry, skill_registry,
+            task_type, chain, guard,
+            tool_guard=tool_guard,
+        ):
+            if event.type == EventType.TEXT_DELTA:
+                chunk = event.data.get("text", "")
+                full_text.append(chunk)
                 yield chunk
-        else:
-            # Skill chain — fall back to non-streaming
-            chain: SkillChain | None = None
-            if task_type == TaskType.FEATURE:
-                chain = SkillChain.feature_chain()
-            elif task_type == TaskType.BUGFIX:
-                chain = SkillChain.bugfix_chain()
-            guard = FailureLoopGuard()
-            result = await run_agent(
-                llm, system_prompt, user_message,
-                tool_registry, skill_registry,
-                task_type, chain, guard,
-                tool_guard=tool_guard,
-            )
-            yield result
+            elif event.type == EventType.SKILL_START:
+                yield f"\n[⚙ {event.data.get('skill', '')}]\n"
+            elif event.type == EventType.GATE_RESULT:
+                v = event.data.get("verdict", "")
+                yield f"[门禁: {v}] "
+            elif event.type == EventType.BACKTRACK:
+                yield f"\n[↩ 回退: {event.data.get('from', '')} → {event.data.get('to', '')}]\n"
+            elif event.type == EventType.BLOCKED:
+                yield f"\n[⛔ 阻断: {event.data.get('reason', '')}]\n"
     finally:
         from memory.user_learner import UserPreferenceLearner
         learner = UserPreferenceLearner(employee_dir)
-        await learner.observe(user_message, "")
+        await learner.observe(user_message, "".join(full_text))
         await llm.close()
