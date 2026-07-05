@@ -47,10 +47,13 @@ class LLMClient:
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        prefix_cache_key: str | None = None,
     ) -> ChatResponse:
         body: dict = {"model": self.model, "messages": messages, "stream": False}
         if tools:
             body["tools"] = tools
+        if prefix_cache_key:
+            body["extra_body"] = {"prefix_cache_key": prefix_cache_key}
 
         data = await self._request(body)
         choice = data["choices"][0]["message"]

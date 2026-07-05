@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, AsyncGenerator
 
@@ -307,6 +308,20 @@ async def run_agent_stream(
 
         if gate_result.verdict == "pass":
             context[f"{node.skill_name}_output"] = output
+            # Checkpoint save after each successful skill node
+            try:
+                from .session_state import SessionStateManager, SessionCheckpoint
+                state_mgr = SessionStateManager(Path(context.get("_employee_dir", "")))
+                state_mgr.save(SessionCheckpoint(
+                    employee_id=context.get("employee_id", ""),
+                    session_id=context.get("session_id", ""),
+                    task_type=context.get("task_type", ""),
+                    skill_chain_index=node_idx,
+                    context={k: v for k, v in context.items() if not k.startswith("_")},
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                ))
+            except Exception:
+                pass
             yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "passed"})
             node_idx += 1
             continue
@@ -338,6 +353,14 @@ async def run_agent_stream(
         if key in context:
             yield ExecutionEvent(EventType.TEXT_DELTA, {"text": context[key]})
             break
+
+    # Clear checkpoint on successful completion
+    try:
+        from .session_state import SessionStateManager
+        state_mgr = SessionStateManager(Path(context.get("_employee_dir", "")))
+        state_mgr.clear(context.get("session_id", ""))
+    except Exception:
+        pass
 
     yield ExecutionEvent(EventType.DONE, {})
 
@@ -496,6 +519,22 @@ async def reply(employee_id: str, name: str, user_message: str) -> str:
     tools_dir = Path(__file__).resolve().parents[2] / "agents" / "tools"
     tool_registry.load_providers(tools_dir)
 
+    # Load MCP servers from employee config (if any)
+    try:
+        from common.yaml_utils import load_yaml
+        emp_config = load_yaml(employee_dir / "config.yaml")
+        mcp_servers = emp_config.get("mcp_servers", [])
+        if mcp_servers:
+            from tool.mcp_client import MCPClient, register_mcp_tools
+            for srv in mcp_servers:
+                cmd = srv.get("command", [])
+                if cmd:
+                    client = MCPClient(cmd, env=srv.get("env"))
+                    await client.connect()
+                    await register_mcp_tools(tool_registry, client)
+    except Exception:
+        pass  # MCP is best-effort
+
     skills_dir = Path(__file__).resolve().parents[2] / "agents" / "skills"
     skill_registry.load_builtin(skills_dir)
     emp_skills = employee_dir / "skills"
@@ -504,7 +543,7 @@ async def reply(employee_id: str, name: str, user_message: str) -> str:
 
     # Assemble prompt
     assembler = PromptAssembler()
-    context = {"employee_id": employee_id, "name": name}
+    context = {"employee_id": employee_id, "name": name, "_employee_dir": str(employee_dir)}
     system_prompt = assembler.assemble(employee_dir, tool_registry, skill_registry, context)
 
     # Route and run
@@ -559,6 +598,22 @@ async def reply_stream(employee_id: str, name: str, user_message: str) -> AsyncG
     tools_dir = Path(__file__).resolve().parents[2] / "agents" / "tools"
     tool_registry.load_providers(tools_dir)
 
+    # Load MCP servers from employee config (if any)
+    try:
+        from common.yaml_utils import load_yaml
+        emp_config = load_yaml(employee_dir / "config.yaml")
+        mcp_servers = emp_config.get("mcp_servers", [])
+        if mcp_servers:
+            from tool.mcp_client import MCPClient, register_mcp_tools
+            for srv in mcp_servers:
+                cmd = srv.get("command", [])
+                if cmd:
+                    client = MCPClient(cmd, env=srv.get("env"))
+                    await client.connect()
+                    await register_mcp_tools(tool_registry, client)
+    except Exception:
+        pass  # MCP is best-effort
+
     skills_dir = Path(__file__).resolve().parents[2] / "agents" / "skills"
     skill_registry.load_builtin(skills_dir)
     emp_skills = employee_dir / "skills"
@@ -566,7 +621,7 @@ async def reply_stream(employee_id: str, name: str, user_message: str) -> AsyncG
         skill_registry.load_employee_skills(emp_skills)
 
     assembler = PromptAssembler()
-    context = {"employee_id": employee_id, "name": name}
+    context = {"employee_id": employee_id, "name": name, "_employee_dir": str(employee_dir)}
     system_prompt = assembler.assemble(employee_dir, tool_registry, skill_registry, context)
 
     task_type = route_task(user_message)
