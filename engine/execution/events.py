@@ -18,6 +18,7 @@ from typing import Any
 class EventType(str, Enum):
     """All event types emitted during agent execution."""
 
+    THINKING = "thinking"                   # LLM 推理中（一轮 ReAct 决策开始）
     TEXT_DELTA = "text_delta"               # 增量文本输出
     TOOL_CALL_START = "tool_call_start"     # 工具执行开始
     TOOL_CALL_RESULT = "tool_call_result"   # 工具执行完成

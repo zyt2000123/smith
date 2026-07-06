@@ -174,10 +174,25 @@ async def _react_event_loop(
         if len(conversation) > 40:
             conversation = [conversation[0]] + conversation[-30:]
 
+        yield ExecutionEvent(EventType.THINKING, {})
         response = await llm.chat(conversation, tools=tools)
 
+        # 思考内容：优先思考模型的 reasoning_content；工具轮退回前导推理文本
+        thought = (response.reasoning or (response.text if response.has_tool_calls else "")).strip()
+        if thought:
+            yield ExecutionEvent(EventType.THINKING, {"text": thought, "done": True})
+
         if not response.has_tool_calls:
-            yield ExecutionEvent(EventType.TEXT_DELTA, {"text": response.text})
+            # 最终回答：重发为流式调用（不带 tools，避免再触发 tool_calls），逐块透出
+            streamed_any = False
+            try:
+                async for chunk in llm.chat_stream(conversation):
+                    streamed_any = True
+                    yield ExecutionEvent(EventType.TEXT_DELTA, {"text": chunk})
+            except Exception:
+                pass
+            if not streamed_any:
+                yield ExecutionEvent(EventType.TEXT_DELTA, {"text": response.text})
             return
 
         conversation.append({
@@ -233,10 +248,12 @@ async def run_agent_stream(
     guard: FailureLoopGuard,
     tool_guard: ToolGuard | None = None,
     max_react_iters: int = 20,
+    history: list[dict] | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Streaming version of run_agent — yields ExecutionEvents throughout execution."""
     base_messages = [
         {"role": "system", "content": system_prompt},
+        *(history or []),
         {"role": "user", "content": user_message},
     ]
 
@@ -375,6 +392,7 @@ async def run_agent(
     guard: FailureLoopGuard,
     tool_guard: ToolGuard | None = None,
     max_react_iters: int = 20,
+    history: list[dict] | None = None,
 ) -> str:
     """Orchestrate the full agent flow.
 
@@ -383,6 +401,7 @@ async def run_agent(
     """
     base_messages = [
         {"role": "system", "content": system_prompt},
+        *(history or []),
         {"role": "user", "content": user_message},
     ]
 
@@ -493,10 +512,11 @@ async def run_agent(
     return "Skill chain completed with no output."
 
 
-async def reply(employee_id: str, name: str, user_message: str) -> str:
+async def reply(employee_id: str, name: str, user_message: str, history: list[dict] | None = None) -> str:
     """High-level entry point for the server layer.
 
     Builds LLM client from config, assembles prompt, routes task, and runs.
+    *history*: recent session messages ({"role","content"}) for short-term context.
     """
     # Import here to avoid circular deps at module level
     import sys
@@ -540,10 +560,14 @@ async def reply(employee_id: str, name: str, user_message: str) -> str:
     if emp_skills.is_dir():
         skill_registry.load_employee_skills(emp_skills)
 
-    # Assemble prompt
+    # Assemble prompt (with query-time memory retrieval)
+    from memory.store import search_relevant_memories
+    retrieved = await search_relevant_memories(employee_dir, user_message)
     assembler = PromptAssembler()
     context = {"employee_id": employee_id, "name": name, "_employee_dir": str(employee_dir)}
-    system_prompt = assembler.assemble(employee_dir, tool_registry, skill_registry, context)
+    system_prompt = assembler.assemble(
+        employee_dir, tool_registry, skill_registry, context, retrieved_memory=retrieved,
+    )
 
     # Route and run
     task_type = route_task(user_message)
@@ -562,24 +586,30 @@ async def reply(employee_id: str, name: str, user_message: str) -> str:
             tool_registry, skill_registry,
             task_type, chain, guard,
             tool_guard=tool_guard,
+            history=history,
         )
 
-        # Save conversation memory for all tasks
-        from memory.store import save_conversation_memory
-        await save_conversation_memory(employee_dir, user_message, result, True)
+        # Save conversation memory + learn preferences (best-effort, never break the reply)
+        try:
+            from memory.store import save_conversation_memory
+            await save_conversation_memory(employee_dir, user_message, result, True)
 
-        # Learn user preferences from conversation
-        from memory.user_learner import UserPreferenceLearner
-        learner = UserPreferenceLearner(employee_dir)
-        await learner.observe(user_message, result)
+            from memory.user_learner import UserPreferenceLearner
+            learner = UserPreferenceLearner(employee_dir)
+            await learner.observe(user_message, result)
+        except Exception:
+            pass
 
         return result
     finally:
         await llm.close()
 
 
-async def reply_stream(employee_id: str, name: str, user_message: str) -> AsyncGenerator[str, None]:
-    """Streaming version of reply(). Yields text chunks as they arrive."""
+async def reply_events(
+    employee_id: str, name: str, user_message: str, history: list[dict] | None = None
+) -> AsyncGenerator[ExecutionEvent, None]:
+    """Event-streaming entry point: yields structured ExecutionEvents
+    (thinking / tool_call / text_delta / skill / done...) for Agent-style UIs."""
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from common.config_loader import resolve_llm_config
@@ -618,9 +648,13 @@ async def reply_stream(employee_id: str, name: str, user_message: str) -> AsyncG
     if emp_skills.is_dir():
         skill_registry.load_employee_skills(emp_skills)
 
+    from memory.store import search_relevant_memories
+    retrieved = await search_relevant_memories(employee_dir, user_message)
     assembler = PromptAssembler()
     context = {"employee_id": employee_id, "name": name, "_employee_dir": str(employee_dir)}
-    system_prompt = assembler.assemble(employee_dir, tool_registry, skill_registry, context)
+    system_prompt = assembler.assemble(
+        employee_dir, tool_registry, skill_registry, context, retrieved_memory=retrieved,
+    )
 
     task_type = route_task(user_message)
     tool_guard = ToolGuard(SAFETY_RULES_PATH)
@@ -633,28 +667,51 @@ async def reply_stream(employee_id: str, name: str, user_message: str) -> AsyncG
     guard = FailureLoopGuard()
 
     full_text = []
+    had_tools = False
     try:
         async for event in run_agent_stream(
             llm, system_prompt, user_message,
             tool_registry, skill_registry,
             task_type, chain, guard,
             tool_guard=tool_guard,
+            history=history,
         ):
             if event.type == EventType.TEXT_DELTA:
-                chunk = event.data.get("text", "")
-                full_text.append(chunk)
-                yield chunk
-            elif event.type == EventType.SKILL_START:
-                yield f"\n[⚙ {event.data.get('skill', '')}]\n"
-            elif event.type == EventType.GATE_RESULT:
-                v = event.data.get("verdict", "")
-                yield f"[门禁: {v}] "
-            elif event.type == EventType.BACKTRACK:
-                yield f"\n[↩ 回退: {event.data.get('from', '')} → {event.data.get('to', '')}]\n"
-            elif event.type == EventType.BLOCKED:
-                yield f"\n[⛔ 阻断: {event.data.get('reason', '')}]\n"
+                full_text.append(event.data.get("text", ""))
+            elif event.type in (EventType.TOOL_CALL_START, EventType.SKILL_START):
+                had_tools = True
+            yield event
     finally:
-        from memory.user_learner import UserPreferenceLearner
-        learner = UserPreferenceLearner(employee_dir)
-        await learner.observe(user_message, "".join(full_text))
+        full = "".join(full_text)
+        try:
+            from memory.store import save_conversation_memory
+            await save_conversation_memory(employee_dir, user_message, full, had_tools)
+        except Exception:
+            pass  # memory persistence must never break the stream teardown
+        try:
+            from memory.user_learner import UserPreferenceLearner
+            learner = UserPreferenceLearner(employee_dir)
+            await learner.observe(user_message, full)
+        except Exception:
+            pass  # learning must never break the stream teardown
         await llm.close()
+
+
+async def reply_stream(
+    employee_id: str, name: str, user_message: str, history: list[dict] | None = None
+) -> AsyncGenerator[str, None]:
+    """Streaming version of reply(). Yields text chunks as they arrive.
+
+    Thin adapter over reply_events() — kept for callers that only need text
+    (e.g. team_service group chat)."""
+    async for event in reply_events(employee_id, name, user_message, history=history):
+        if event.type == EventType.TEXT_DELTA:
+            yield event.data.get("text", "")
+        elif event.type == EventType.SKILL_START:
+            yield f"\n[⚙ {event.data.get('skill', '')}]\n"
+        elif event.type == EventType.GATE_RESULT:
+            yield f"[门禁: {event.data.get('verdict', '')}] "
+        elif event.type == EventType.BACKTRACK:
+            yield f"\n[↩ 回退: {event.data.get('from', '')} → {event.data.get('to', '')}]\n"
+        elif event.type == EventType.BLOCKED:
+            yield f"\n[⛔ 阻断: {event.data.get('reason', '')}]\n"

@@ -10,7 +10,8 @@ let package = Package(
             path: "Sources/AgentSmith",
             resources: [
                 .copy("Resources/AppIcon.icns"),
-                .copy("Resources/Employees")
+                .copy("Resources/Employees"),
+                .copy("Resources/mermaid.min.js")
             ]
         )
     ]

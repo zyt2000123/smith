@@ -15,6 +15,23 @@ struct SuggestionCard: Identifiable {
     let text: String
 }
 
+/// 对话转写项：普通消息 + Agent 过程事件（思考/工具/技能）
+enum TranscriptItem: Identifiable {
+    case message(Message)
+    case thinking(id: String, done: Bool, text: String)
+    case tool(id: String, name: String, running: Bool, error: Bool, summary: String)
+    case skill(id: String, name: String, status: String)
+
+    var id: String {
+        switch self {
+        case .message(let m): return "msg-\(m.id)"
+        case .thinking(let id, _, _): return "think-\(id)"
+        case .tool(let id, _, _, _, _): return "tool-\(id)"
+        case .skill(let id, _, _): return "skill-\(id)"
+        }
+    }
+}
+
 enum CapabilityPanelTab: String, CaseIterable {
     case plan, mcp, skills, permissions, knowledge
 
@@ -41,41 +58,18 @@ enum CapabilityPanelTab: String, CaseIterable {
 
 struct ConversationView: View {
     var onBack: (() -> Void)?
+    @EnvironmentObject private var apiClient: APIClient
     @State private var messageText = ""
-    @State private var searchText = ""
     @State private var selectedConversation: String
     @State private var showCapabilityPanel = false
     @State private var selectedPanelTab: CapabilityPanelTab = .plan
-
-    private let conversations: [ConversationItem] = [
-        ConversationItem(
-            id: "ivy",
-            employeeName: "Ivy",
-            role: "产品经理",
-            avatarImageName: "product-manager",
-            avatarColor: .purple,
-            preview: "版本范围已经同步到路线图里。",
-            timestamp: "刚刚"
-        ),
-        ConversationItem(
-            id: "luna",
-            employeeName: "Luna",
-            role: "前端工程师",
-            avatarImageName: "frontend-engineer",
-            avatarColor: .green,
-            preview: "好的，我来看看这个组件的实现…",
-            timestamp: "5 分钟前"
-        ),
-        ConversationItem(
-            id: "theo",
-            employeeName: "Theo",
-            role: "后端工程师",
-            avatarImageName: "backend-engineer",
-            avatarColor: .blue,
-            preview: "API 接口已经部署完成。",
-            timestamp: "1 小时前"
-        ),
-    ]
+    @State private var conversations: [ConversationItem] = []
+    @State private var transcript: [TranscriptItem] = []
+    @State private var streamingReply: String?
+    @State private var currentSession: Session?
+    @State private var isSending = false
+    @State private var expandedThinking: Set<String> = []
+    @State private var expandedToolGroups: Set<String> = []
 
     private let suggestions: [SuggestionCard] = [
         SuggestionCard(text: "帮我把这个想法整理成可执行的 PRD 和验收标准"),
@@ -89,155 +83,173 @@ struct ConversationView: View {
     }
 
     private var activeConversation: ConversationItem {
-        conversations.first(where: { $0.id == selectedConversation }) ?? conversations[0]
+        conversations.first(where: { $0.id == selectedConversation })
+            ?? conversations.first
+            ?? ConversationItem(
+                id: "", employeeName: "加载中", role: "",
+                avatarImageName: nil, avatarColor: .gray,
+                preview: "", timestamp: ""
+            )
     }
 
-    private var filteredConversations: [ConversationItem] {
-        guard !searchText.isEmpty else { return conversations }
-        return conversations.filter {
-            $0.employeeName.localizedCaseInsensitiveContains(searchText)
-                || $0.role.localizedCaseInsensitiveContains(searchText)
-                || $0.preview.localizedCaseInsensitiveContains(searchText)
-        }
-    }
-
+    // 主侧边栏由 ContentView 常驻提供，这里只渲染右侧内容区
     var body: some View {
-        ZStack(alignment: .leading) {
-            HStack(spacing: 0) {
-                Color.clear
-                    .frame(width: FloatingSidebarMetrics.width + FloatingSidebarMetrics.inset)
+        HStack(spacing: 0) {
+            conversationWorkspace
 
-                conversationWorkspace
-
-                if showCapabilityPanel {
-                    Divider()
-                    capabilityPanel
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
-                }
+            if showCapabilityPanel {
+                Divider()
+                capabilityPanel
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
-
-            conversationSidebar
-                .frame(width: FloatingSidebarMetrics.width)
-                .frame(maxHeight: .infinity)
-                .floatingSidebarSurface()
-                .padding(.leading, FloatingSidebarMetrics.inset)
-                .padding(.vertical, FloatingSidebarMetrics.inset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppPalette.canvas)
+        .task { await loadConversations() }
     }
 
-    private var conversationSidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Button { onBack?() } label: {
-                    Image(systemName: "chevron.left")
-                        .appFont(size: 11, weight: .semibold)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 20, height: 20)
-                }
-                .buttonStyle(.plain)
-                .help("返回Agent总览")
+    // MARK: - Data Loading
 
-                Text("对话")
-                    .appFont(size: 16, weight: .bold)
-                Spacer()
-                Button {} label: {
-                    Image(systemName: "square.and.pencil")
-                        .appFont(size: 14, weight: .medium)
-                }
-                .buttonStyle(.plain)
-                .help("新建对话")
-            }
-            .padding(.top, FloatingSidebarMetrics.topContentPadding)
-            .padding(.horizontal, 14)
-            .padding(.bottom, 12)
+    private func loadConversations() async {
+        guard let employees = try? await apiClient.fetchEmployees() else { return }
+        var items: [ConversationItem] = []
+        for emp in employees {
+            let sessions = (try? await apiClient.fetchSessions(employeeId: emp.id)) ?? []
+            let latest = Self.latestSession(sessions)
+            items.append(ConversationItem(
+                id: emp.id,
+                employeeName: emp.name,
+                role: emp.localizedRole,
+                avatarImageName: emp.avatarImageName,
+                avatarColor: emp.avatarColor,
+                preview: latest?.lastMessagePreview ?? emp.description,
+                timestamp: Self.relativeTime(latest?.lastMessageAt ?? latest?.createdAt)
+            ))
+        }
+        conversations = items
 
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass")
-                    .appFont(size: 11)
-                    .foregroundStyle(.tertiary)
-                TextField("搜索对话…", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .appFont(size: 12)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(AppPalette.mutedSurface, in: RoundedRectangle(cornerRadius: 8))
-            .padding(.horizontal, 12)
-            .padding(.bottom, 16)
+        // ContentView 传入的可能是遗留 id（如 "ivy"），按Agent名回退解析
+        if !items.contains(where: { $0.id == selectedConversation }) {
+            let key = selectedConversation.lowercased()
+            selectedConversation = items.first(where: { $0.employeeName.lowercased() == key })?.id
+                ?? items.first?.id ?? ""
+        }
+        await openConversation(selectedConversation)
+    }
 
-            Text("最近对话")
-                .appFont(size: 11, weight: .semibold)
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal, 14)
-                .padding(.bottom, 6)
+    private func openConversation(_ employeeId: String) async {
+        selectedConversation = employeeId
+        transcript = []
+        streamingReply = nil
+        currentSession = nil
+        guard !employeeId.isEmpty else { return }
+        let sessions = (try? await apiClient.fetchSessions(employeeId: employeeId)) ?? []
+        guard let latest = Self.latestSession(sessions) else { return }
+        currentSession = latest
+        let messages = (try? await apiClient.fetchMessages(employeeId: employeeId, sessionId: latest.id)) ?? []
+        transcript = messages.map { .message($0) }
+    }
 
-            ScrollView {
-                LazyVStack(spacing: 3) {
-                    ForEach(filteredConversations) { conversation in
-                        conversationRow(conversation)
-                    }
-                }
-                .padding(.horizontal, 8)
-            }
-
-            Divider()
-                .padding(.horizontal, 12)
-
-            Button {} label: {
-                Label("新建群组对话", systemImage: "person.2.badge.plus")
-                    .appFont(size: 12)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-            }
-            .buttonStyle(.plain)
+    /// 收尾未完成的"思考中"行：有内容则标记完成，无内容直接移除（避免空壳"思考完成"）
+    private func finishThinking(fill text: String = "") {
+        guard case .thinking(let id, false, let existing) = transcript.last else { return }
+        let content = text.isEmpty ? existing : text
+        if content.isEmpty {
+            transcript.removeLast()
+        } else {
+            transcript[transcript.count - 1] = .thinking(id: id, done: true, text: content)
         }
     }
 
-    private func conversationRow(_ conversation: ConversationItem) -> some View {
-        let isSelected = selectedConversation == conversation.id
+    private func send() {
+        let text = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let employeeId = activeConversation.id
+        guard !text.isEmpty, !isSending, !employeeId.isEmpty else { return }
+        messageText = ""
+        isSending = true
+        transcript.append(.message(Message(
+            id: UUID().uuidString, sessionId: currentSession?.id ?? "",
+            role: "user", content: text, createdAt: ""
+        )))
 
-        return Button {
-            selectedConversation = conversation.id
-        } label: {
-            HStack(spacing: 9) {
-                EmployeePortraitView(
-                    imageName: conversation.avatarImageName,
-                    fallbackColor: conversation.avatarColor,
-                    fallbackText: String(conversation.employeeName.prefix(1)),
-                    width: 36,
-                    height: 42,
-                    cornerRadius: 8
+        Task {
+            if currentSession == nil {
+                currentSession = try? await apiClient.createSession(
+                    employeeId: employeeId, title: String(text.prefix(20))
                 )
+            }
+            guard let session = currentSession else {
+                transcript.append(.message(Message(
+                    id: UUID().uuidString, sessionId: "",
+                    role: "assistant", content: "⚠️ 无法创建会话，请确认后端已启动（端口 8140）。", createdAt: ""
+                )))
+                isSending = false
+                return
+            }
 
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 4) {
-                        Text(conversation.employeeName)
-                            .appFont(size: 13, weight: .semibold)
-                            .foregroundStyle(.primary)
-                        Spacer(minLength: 2)
-                        Text(conversation.timestamp)
-                            .appFont(size: 9)
-                            .foregroundStyle(.tertiary)
+            transcript.append(.thinking(id: UUID().uuidString, done: false, text: ""))
+            for await event in apiClient.streamMessage(
+                employeeId: employeeId, sessionId: session.id, content: text
+            ) {
+                switch event {
+                case .thinking(let thought, let done):
+                    if done {
+                        finishThinking(fill: thought)
+                    } else {
+                        finishThinking()
+                        transcript.append(.thinking(id: UUID().uuidString, done: false, text: ""))
                     }
-                    Text(conversation.preview)
-                        .appFont(size: 11)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                case .toolCall(let id, let name):
+                    finishThinking()
+                    transcript.append(.tool(id: id, name: name, running: true, error: false, summary: ""))
+                case .toolResult(let id, let error, let summary):
+                    if let idx = transcript.lastIndex(where: { $0.id == "tool-\(id)" }),
+                       case .tool(_, let name, _, _, _) = transcript[idx] {
+                        transcript[idx] = .tool(id: id, name: name, running: false, error: error, summary: summary)
+                    }
+                case .skill(let name, let status):
+                    finishThinking()
+                    transcript.append(.skill(id: UUID().uuidString, name: name, status: status))
+                case .text(let chunk):
+                    finishThinking()
+                    streamingReply = (streamingReply ?? "") + chunk
+                case .done:
+                    break
                 }
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(isSelected ? AppPalette.selectedSurface : Color.clear)
-            )
-            .contentShape(Rectangle())
+            finishThinking()
+            let reply = streamingReply ?? ""
+            streamingReply = nil
+            transcript.append(.message(Message(
+                id: UUID().uuidString, sessionId: session.id,
+                role: "assistant",
+                content: reply.isEmpty ? "⚠️ 未收到回复，请检查后端日志。" : reply,
+                createdAt: ""
+            )))
+            isSending = false
         }
-        .buttonStyle(.plain)
+    }
+
+    private static func latestSession(_ sessions: [Session]) -> Session? {
+        sessions.max(by: {
+            ($0.lastMessageAt ?? $0.createdAt) < ($1.lastMessageAt ?? $1.createdAt)
+        })
+    }
+
+    private static func relativeTime(_ iso: String?) -> String {
+        guard let iso else { return "" }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var date = f.date(from: iso)
+        if date == nil {
+            f.formatOptions = [.withInternetDateTime]
+            date = f.date(from: iso)
+        }
+        guard let date else { return "" }
+        let rel = RelativeDateTimeFormatter()
+        rel.locale = Locale(identifier: "zh_CN")
+        rel.unitsStyle = .short
+        return rel.localizedString(for: date, relativeTo: Date())
     }
 
     private var conversationWorkspace: some View {
@@ -246,9 +258,13 @@ struct ConversationView: View {
             Divider()
 
             VStack(spacing: 0) {
-                Spacer(minLength: 36)
-                welcomeContent
-                Spacer(minLength: 28)
+                if transcript.isEmpty && streamingReply == nil {
+                    Spacer(minLength: 36)
+                    welcomeContent
+                    Spacer(minLength: 28)
+                } else {
+                    messageList
+                }
                 composer
             }
             .padding(.horizontal, 28)
@@ -370,12 +386,244 @@ struct ConversationView: View {
         }
     }
 
+    /// 渲染行：连续 ≥2 个已完成的工具卡片收拢成一个折叠组
+    private enum DisplayRow: Identifiable {
+        case item(TranscriptItem)
+        case toolGroup(id: String, tools: [TranscriptItem])
+
+        var id: String {
+            switch self {
+            case .item(let t): return t.id
+            case .toolGroup(let id, _): return "group-\(id)"
+            }
+        }
+    }
+
+    private var displayRows: [DisplayRow] {
+        var rows: [DisplayRow] = []
+        var buffer: [TranscriptItem] = []
+        func flush() {
+            if buffer.count >= 2 {
+                rows.append(.toolGroup(id: buffer[0].id, tools: buffer))
+            } else {
+                rows.append(contentsOf: buffer.map { .item($0) })
+            }
+            buffer = []
+        }
+        for item in transcript {
+            if case .tool(_, _, false, _, _) = item {
+                buffer.append(item)
+            } else {
+                flush()
+                rows.append(.item(item))
+            }
+        }
+        flush()
+        return rows
+    }
+
+    private var messageList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(displayRows) { row in
+                        displayRowView(row)
+                            .id(row.id)
+                    }
+                    if let streaming = streamingReply {
+                        messageBubble(role: "assistant", content: streaming)
+                            .id("streaming")
+                    }
+                }
+                .padding(.vertical, 20)
+                .frame(maxWidth: 760)
+                .frame(maxWidth: .infinity)
+            }
+            .onChange(of: transcript.count) {
+                if let last = displayRows.last {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
+            .onChange(of: streamingReply) {
+                if streamingReply != nil {
+                    proxy.scrollTo("streaming", anchor: .bottom)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func displayRowView(_ row: DisplayRow) -> some View {
+        switch row {
+        case .item(let item):
+            transcriptRow(item)
+        case .toolGroup(let gid, let tools):
+            VStack(alignment: .leading, spacing: 6) {
+                Button {
+                    if expandedToolGroups.contains(gid) {
+                        expandedToolGroups.remove(gid)
+                    } else {
+                        expandedToolGroups.insert(gid)
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(Color.blue.opacity(0.55))
+                            .frame(width: 3, height: 14)
+                        Text("\(tools.count) 个工具")
+                            .appFont(size: 12, weight: .medium)
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Image(systemName: expandedToolGroups.contains(gid) ? "chevron.down" : "chevron.right")
+                            .appFont(size: 10)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .frame(maxWidth: 560)
+                    .background(AppPalette.mutedSurface, in: RoundedRectangle(cornerRadius: 9))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if expandedToolGroups.contains(gid) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(tools) { tool in
+                            transcriptRow(tool)
+                        }
+                    }
+                    .padding(.leading, 12)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func transcriptRow(_ item: TranscriptItem) -> some View {
+        switch item {
+        case .message(let m):
+            messageBubble(role: m.role, content: m.content)
+        case .thinking(let id, let done, let text):
+            VStack(alignment: .leading, spacing: 6) {
+                if done {
+                    Button {
+                        if expandedThinking.contains(id) {
+                            expandedThinking.remove(id)
+                        } else {
+                            expandedThinking.insert(id)
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: expandedThinking.contains(id) ? "chevron.down" : "chevron.right")
+                                .appFont(size: 9)
+                            Text("思考完成")
+                        }
+                        .appFont(size: 11)
+                        .foregroundStyle(.secondary)
+                        .italic()
+                    }
+                    .buttonStyle(.plain)
+
+                    if expandedThinking.contains(id) {
+                        Text(text)
+                            .appFont(size: 12)
+                            .foregroundStyle(.secondary)
+                            .italic()
+                            .textSelection(.enabled)
+                            .padding(.leading, 10)
+                            .overlay(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 1)
+                                    .fill(AppPalette.border)
+                                    .frame(width: 2)
+                            }
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Text("思考中…")
+                    }
+                    .appFont(size: 11)
+                    .foregroundStyle(.secondary)
+                    .italic()
+                }
+            }
+            .padding(.leading, 4)
+        case .tool(_, let name, let running, let error, let summary):
+            HStack(spacing: 8) {
+                Image(systemName: "wrench.and.screwdriver")
+                    .appFont(size: 11)
+                    .foregroundStyle(.blue)
+                Text(name)
+                    .font(.system(size: 12, design: .monospaced))
+                if running {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: error ? "xmark.circle.fill" : "checkmark.circle.fill")
+                        .appFont(size: 11)
+                        .foregroundStyle(error ? .red : .green)
+                }
+                if !running && !summary.isEmpty {
+                    Text(summary)
+                        .appFont(size: 11)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: 560, alignment: .leading)
+            .background(AppPalette.mutedSurface, in: RoundedRectangle(cornerRadius: 9))
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(AppPalette.border.opacity(0.6), lineWidth: 0.5)
+            )
+        case .skill(_, let name, let status):
+            HStack(spacing: 6) {
+                Image(systemName: status == "start" ? "sparkles" : "checkmark.seal")
+                    .appFont(size: 11)
+                    .foregroundStyle(.purple)
+                Text(status == "start" ? "技能 · \(name)" : "已完成 \(name)")
+                    .appFont(size: 11, weight: .medium)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.leading, 4)
+        }
+    }
+
+    private func messageBubble(role: String, content: String) -> some View {
+        let isUser = role == "user"
+        return HStack {
+            if isUser { Spacer(minLength: 80) }
+            Group {
+                if isUser {
+                    Text(content).appFont(size: 13)
+                } else {
+                    MarkdownText(content: content)
+                }
+            }
+                .textSelection(.enabled)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(
+                    isUser ? Color.blue.opacity(0.13) : AppPalette.card,
+                    in: RoundedRectangle(cornerRadius: 12)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(AppPalette.border.opacity(0.6), lineWidth: 0.5)
+                )
+            if !isUser { Spacer(minLength: 80) }
+        }
+    }
+
     private var composer: some View {
         VStack(alignment: .leading, spacing: 10) {
             TextField("输入消息，@ 选择当前工作区上下文…", text: $messageText, axis: .vertical)
                 .textFieldStyle(.plain)
                 .appFont(size: 13)
                 .lineLimit(1...4)
+                .onSubmit { send() }
 
             HStack(spacing: 12) {
                 Button {} label: {
@@ -404,18 +652,21 @@ struct ConversationView: View {
                 .appFont(size: 12)
 
                 Button {
-                    messageText = ""
+                    send()
                 } label: {
-                    Image(systemName: "arrow.up")
+                    Image(systemName: isSending ? "hourglass" : "arrow.up")
                         .appFont(size: 13, weight: .bold)
                         .foregroundStyle(.white)
                         .frame(width: 30, height: 30)
                         .background(
-                            Circle().fill(messageText.isEmpty ? Color.secondary.opacity(0.45) : Color.blue)
+                            Circle().fill(
+                                messageText.isEmpty || isSending
+                                    ? Color.secondary.opacity(0.45) : Color.blue
+                            )
                         )
                 }
                 .buttonStyle(.plain)
-                .disabled(messageText.isEmpty)
+                .disabled(messageText.isEmpty || isSending)
                 .keyboardShortcut(.return, modifiers: .command)
             }
         }

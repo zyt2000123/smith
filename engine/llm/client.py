@@ -17,6 +17,7 @@ class ToolCallData:
 @dataclass
 class ChatResponse:
     text: str = ""
+    reasoning: str = ""  # 思考模型的 reasoning_content（如 GLM/DeepSeek）
     tool_calls: list[ToolCallData] = field(default_factory=list)
     usage: dict | None = None
 
@@ -69,6 +70,7 @@ class LLMClient:
 
         return ChatResponse(
             text=choice.get("content") or "",
+            reasoning=choice.get("reasoning_content") or "",
             tool_calls=tc_list,
             usage=data.get("usage"),
         )

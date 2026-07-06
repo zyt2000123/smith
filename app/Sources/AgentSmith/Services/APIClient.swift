@@ -150,6 +150,18 @@ struct APITemplateResponse: Decodable {
     }
 }
 
+// MARK: - Agent Stream Events
+
+/// SSE 事件的类型化表示：对齐后端 thinking/tool_call/tool_result/skill/message/done
+enum AgentStreamEvent {
+    case thinking(text: String, done: Bool)
+    case toolCall(id: String, name: String)
+    case toolResult(id: String, error: Bool, summary: String)
+    case skill(name: String, status: String)
+    case text(String)
+    case done
+}
+
 // MARK: - API Errors
 
 enum APIError: LocalizedError {
@@ -277,6 +289,10 @@ class APIClient: ObservableObject {
 
     // MARK: - Messages
 
+    func fetchMessages(employeeId: String, sessionId: String) async throws -> [Message] {
+        return try await request("GET", "/api/employees/\(employeeId)/sessions/\(sessionId)/messages")
+    }
+
     func sendMessage(employeeId: String, sessionId: String, content: String) async throws -> Message {
         let body = ["content": content]
         return try await request(
@@ -286,7 +302,7 @@ class APIClient: ObservableObject {
         )
     }
 
-    func streamMessage(employeeId: String, sessionId: String, content: String) -> AsyncStream<String> {
+    func streamMessage(employeeId: String, sessionId: String, content: String) -> AsyncStream<AgentStreamEvent> {
         AsyncStream { continuation in
             Task {
                 do {
@@ -311,20 +327,50 @@ class APIClient: ObservableObject {
                         return
                     }
 
+                    var currentEvent = "message"
                     for try await line in bytes.lines {
+                        if line.hasPrefix("event: ") {
+                            currentEvent = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+                            continue
+                        }
                         guard line.hasPrefix("data: ") else { continue }
                         let json = String(line.dropFirst(6))
                         guard let data = json.data(using: .utf8),
                               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                         else { continue }
 
-                        if let text = obj["text"] as? String {
-                            continuation.yield(text)
-                        }
-                        // event: done sends {"id": "msg_id"} -- we just finish
-                        if obj["id"] != nil && obj["text"] == nil {
+                        switch currentEvent {
+                        case "message":
+                            if let text = obj["text"] as? String {
+                                continuation.yield(.text(text))
+                            }
+                        case "thinking":
+                            continuation.yield(.thinking(
+                                text: obj["text"] as? String ?? "",
+                                done: obj["done"] as? Bool ?? false
+                            ))
+                        case "tool_call":
+                            continuation.yield(.toolCall(
+                                id: obj["id"] as? String ?? UUID().uuidString,
+                                name: obj["name"] as? String ?? "tool"
+                            ))
+                        case "tool_result":
+                            continuation.yield(.toolResult(
+                                id: obj["id"] as? String ?? "",
+                                error: obj["error"] as? Bool ?? false,
+                                summary: obj["summary"] as? String ?? ""
+                            ))
+                        case "skill":
+                            continuation.yield(.skill(
+                                name: obj["name"] as? String ?? "",
+                                status: obj["status"] as? String ?? ""
+                            ))
+                        case "done":
+                            continuation.yield(.done)
+                        default:
                             break
                         }
+                        if currentEvent == "done" { break }
                     }
                     continuation.finish()
                 } catch {

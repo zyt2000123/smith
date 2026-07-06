@@ -316,6 +316,7 @@ struct ContentView: View {
                     initialConversationID: conversationID(for: selectedPage),
                     onBack: { selectedPage = "management" }
                 )
+                .id(selectedPage)
             } else if selectedPage.hasPrefix("employee-"),
                       let emp = employees.first(where: { $0.id == String(selectedPage.dropFirst("employee-".count)) }) {
                 EmployeeDetailView(employee: emp, onBack: {
@@ -354,10 +355,7 @@ struct ContentView: View {
     }
 
     private var showsPrimarySidebar: Bool {
-        sidebarVisible
-            && !selectedPage.hasPrefix("employee-")
-            && !selectedPage.hasPrefix("conv-")
-            && selectedPage != "new-conv"
+        sidebarVisible && !selectedPage.hasPrefix("employee-")
     }
 
     private func conversationID(for page: String) -> String {
