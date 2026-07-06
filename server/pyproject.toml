@@ -8,9 +8,24 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     "aiosqlite>=0.21",
     "pyyaml>=6.0",
-    "pydantic>=2.10",
+    "pydantic[email]>=2.10",
     "sse-starlette>=2.2",
+    "crawl4ai>=0.9.0",
+    "packaging>=26.2",
+    "tiktoken>=0.13.0",
 ]
 
 [project.optional-dependencies]
 dev = ["httpx>=0.28", "pytest>=8.0", "pytest-asyncio>=0.25"]
+
+[tool.uv]
+# crawl4ai 依赖瘦身：我们只用 arun→markdown 抓取路径，以下传递依赖经逐一
+# 删除+功能测试验证为懒加载（LLM 提取链 / 几何聚类链 / patchright 隐身分支），
+# 用不可能标记从解析中排除，共省约 390MB。恢复：删掉对应行再 uv sync。
+override-dependencies = [
+    "unclecode-litellm; sys_platform == 'never'",
+    "patchright; sys_platform == 'never'",
+    "nltk; sys_platform == 'never'",
+    "alphashape; sys_platform == 'never'",
+    "shapely; sys_platform == 'never'",
+]
