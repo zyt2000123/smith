@@ -46,7 +46,7 @@ class SessionService:
         return [MessageOut(**r) for r in rows]
 
     async def send_message(
-        self, employee_id: str, session_id: str, content: str
+        self, employee_id: str, session_id: str, content: str, context: str | None = None
     ) -> MessageOut:
         if not await self.session_repo.exists(session_id, employee_id):
             raise HTTPException(404, "Session not found")
@@ -61,14 +61,17 @@ class SessionService:
         await self.session_repo.add_message(session_id, "user", content)
 
         # Call engine
-        reply_text = await engine_reply(employee_id, emp_name, content, history=history)
+        # context（工作目录/附件路径）由引擎侧拼接：LLM 可见，路由/记忆/落库均只用原文
+        reply_text = await engine_reply(
+            employee_id, emp_name, content, history=history, context=context
+        )
 
         # Save assistant message
         msg = await self.session_repo.add_message(session_id, "assistant", reply_text)
         return MessageOut(**msg)
 
     async def stream_message(
-        self, employee_id: str, session_id: str, content: str
+        self, employee_id: str, session_id: str, content: str, context: str | None = None
     ) -> AsyncGenerator[dict, None]:
         """Yield SSE event dicts. Streams text chunks as they arrive from the engine."""
         if not await self.session_repo.exists(session_id, employee_id):
@@ -88,7 +91,9 @@ class SessionService:
             return {"event": event, "data": json.dumps(data, ensure_ascii=False)}
 
         full_reply = []
-        async for ev in engine_reply_events(employee_id, emp_name, content, history=history):
+        async for ev in engine_reply_events(
+            employee_id, emp_name, content, history=history, context=context
+        ):
             t = ev.type.value
             if t == "text_delta":
                 chunk = ev.data.get("text", "")

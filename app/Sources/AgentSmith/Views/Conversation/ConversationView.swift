@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct ConversationItem: Identifiable {
     let id: String
@@ -64,12 +65,7 @@ struct ConversationView: View {
     @State private var showCapabilityPanel = false
     @State private var selectedPanelTab: CapabilityPanelTab = .plan
     @State private var conversations: [ConversationItem] = []
-    @State private var transcript: [TranscriptItem] = []
-    @State private var streamingReply: String?
-    @State private var currentSession: Session?
-    @State private var isSending = false
-    @State private var expandedThinking: Set<String> = []
-    @State private var expandedToolGroups: Set<String> = []
+    @State private var isDropTargeted = false
 
     private let suggestions: [SuggestionCard] = [
         SuggestionCard(text: "帮我把这个想法整理成可执行的 PRD 和验收标准"),
@@ -90,6 +86,11 @@ struct ConversationView: View {
                 avatarImageName: nil, avatarColor: .gray,
                 preview: "", timestamp: ""
             )
+    }
+
+    /// 会话状态常驻 ChatModel（按Agent缓存），视图随页面切换重建也不丢进行中的流
+    private var chat: ChatModel {
+        ChatModel.shared(for: activeConversation.id, api: apiClient)
     }
 
     // 主侧边栏由 ContentView 常驻提供，这里只渲染右侧内容区
@@ -115,7 +116,7 @@ struct ConversationView: View {
         var items: [ConversationItem] = []
         for emp in employees {
             let sessions = (try? await apiClient.fetchSessions(employeeId: emp.id)) ?? []
-            let latest = Self.latestSession(sessions)
+            let latest = ChatModel.latestSession(sessions)
             items.append(ConversationItem(
                 id: emp.id,
                 employeeName: emp.name,
@@ -134,106 +135,14 @@ struct ConversationView: View {
             selectedConversation = items.first(where: { $0.employeeName.lowercased() == key })?.id
                 ?? items.first?.id ?? ""
         }
-        await openConversation(selectedConversation)
-    }
-
-    private func openConversation(_ employeeId: String) async {
-        selectedConversation = employeeId
-        transcript = []
-        streamingReply = nil
-        currentSession = nil
-        guard !employeeId.isEmpty else { return }
-        let sessions = (try? await apiClient.fetchSessions(employeeId: employeeId)) ?? []
-        guard let latest = Self.latestSession(sessions) else { return }
-        currentSession = latest
-        let messages = (try? await apiClient.fetchMessages(employeeId: employeeId, sessionId: latest.id)) ?? []
-        transcript = messages.map { .message($0) }
-    }
-
-    /// 收尾未完成的"思考中"行：有内容则标记完成，无内容直接移除（避免空壳"思考完成"）
-    private func finishThinking(fill text: String = "") {
-        guard case .thinking(let id, false, let existing) = transcript.last else { return }
-        let content = text.isEmpty ? existing : text
-        if content.isEmpty {
-            transcript.removeLast()
-        } else {
-            transcript[transcript.count - 1] = .thinking(id: id, done: true, text: content)
-        }
+        await chat.openIfNeeded()
     }
 
     private func send() {
         let text = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let employeeId = activeConversation.id
-        guard !text.isEmpty, !isSending, !employeeId.isEmpty else { return }
+        guard !text.isEmpty, !chat.isSending else { return }
         messageText = ""
-        isSending = true
-        transcript.append(.message(Message(
-            id: UUID().uuidString, sessionId: currentSession?.id ?? "",
-            role: "user", content: text, createdAt: ""
-        )))
-
-        Task {
-            if currentSession == nil {
-                currentSession = try? await apiClient.createSession(
-                    employeeId: employeeId, title: String(text.prefix(20))
-                )
-            }
-            guard let session = currentSession else {
-                transcript.append(.message(Message(
-                    id: UUID().uuidString, sessionId: "",
-                    role: "assistant", content: "⚠️ 无法创建会话，请确认后端已启动（端口 8140）。", createdAt: ""
-                )))
-                isSending = false
-                return
-            }
-
-            transcript.append(.thinking(id: UUID().uuidString, done: false, text: ""))
-            for await event in apiClient.streamMessage(
-                employeeId: employeeId, sessionId: session.id, content: text
-            ) {
-                switch event {
-                case .thinking(let thought, let done):
-                    if done {
-                        finishThinking(fill: thought)
-                    } else {
-                        finishThinking()
-                        transcript.append(.thinking(id: UUID().uuidString, done: false, text: ""))
-                    }
-                case .toolCall(let id, let name):
-                    finishThinking()
-                    transcript.append(.tool(id: id, name: name, running: true, error: false, summary: ""))
-                case .toolResult(let id, let error, let summary):
-                    if let idx = transcript.lastIndex(where: { $0.id == "tool-\(id)" }),
-                       case .tool(_, let name, _, _, _) = transcript[idx] {
-                        transcript[idx] = .tool(id: id, name: name, running: false, error: error, summary: summary)
-                    }
-                case .skill(let name, let status):
-                    finishThinking()
-                    transcript.append(.skill(id: UUID().uuidString, name: name, status: status))
-                case .text(let chunk):
-                    finishThinking()
-                    streamingReply = (streamingReply ?? "") + chunk
-                case .done:
-                    break
-                }
-            }
-            finishThinking()
-            let reply = streamingReply ?? ""
-            streamingReply = nil
-            transcript.append(.message(Message(
-                id: UUID().uuidString, sessionId: session.id,
-                role: "assistant",
-                content: reply.isEmpty ? "⚠️ 未收到回复，请检查后端日志。" : reply,
-                createdAt: ""
-            )))
-            isSending = false
-        }
-    }
-
-    private static func latestSession(_ sessions: [Session]) -> Session? {
-        sessions.max(by: {
-            ($0.lastMessageAt ?? $0.createdAt) < ($1.lastMessageAt ?? $1.createdAt)
-        })
+        chat.send(text)
     }
 
     private static func relativeTime(_ iso: String?) -> String {
@@ -258,7 +167,7 @@ struct ConversationView: View {
             Divider()
 
             VStack(spacing: 0) {
-                if transcript.isEmpty && streamingReply == nil {
+                if chat.transcript.isEmpty && chat.streamingReply == nil {
                     Spacer(minLength: 36)
                     welcomeContent
                     Spacer(minLength: 28)
@@ -410,7 +319,7 @@ struct ConversationView: View {
             }
             buffer = []
         }
-        for item in transcript {
+        for item in chat.transcript {
             if case .tool(_, _, false, _, _) = item {
                 buffer.append(item)
             } else {
@@ -430,7 +339,7 @@ struct ConversationView: View {
                         displayRowView(row)
                             .id(row.id)
                     }
-                    if let streaming = streamingReply {
+                    if let streaming = chat.streamingReply {
                         messageBubble(role: "assistant", content: streaming)
                             .id("streaming")
                     }
@@ -439,13 +348,13 @@ struct ConversationView: View {
                 .frame(maxWidth: 760)
                 .frame(maxWidth: .infinity)
             }
-            .onChange(of: transcript.count) {
+            .onChange(of: chat.transcript.count) {
                 if let last = displayRows.last {
                     proxy.scrollTo(last.id, anchor: .bottom)
                 }
             }
-            .onChange(of: streamingReply) {
-                if streamingReply != nil {
+            .onChange(of: chat.streamingReply) {
+                if chat.streamingReply != nil {
                     proxy.scrollTo("streaming", anchor: .bottom)
                 }
             }
@@ -460,10 +369,10 @@ struct ConversationView: View {
         case .toolGroup(let gid, let tools):
             VStack(alignment: .leading, spacing: 6) {
                 Button {
-                    if expandedToolGroups.contains(gid) {
-                        expandedToolGroups.remove(gid)
+                    if chat.expandedToolGroups.contains(gid) {
+                        chat.expandedToolGroups.remove(gid)
                     } else {
-                        expandedToolGroups.insert(gid)
+                        chat.expandedToolGroups.insert(gid)
                     }
                 } label: {
                     HStack(spacing: 8) {
@@ -474,7 +383,7 @@ struct ConversationView: View {
                             .appFont(size: 12, weight: .medium)
                             .foregroundStyle(.primary)
                         Spacer()
-                        Image(systemName: expandedToolGroups.contains(gid) ? "chevron.down" : "chevron.right")
+                        Image(systemName: chat.expandedToolGroups.contains(gid) ? "chevron.down" : "chevron.right")
                             .appFont(size: 10)
                             .foregroundStyle(.tertiary)
                     }
@@ -486,7 +395,7 @@ struct ConversationView: View {
                 }
                 .buttonStyle(.plain)
 
-                if expandedToolGroups.contains(gid) {
+                if chat.expandedToolGroups.contains(gid) {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(tools) { tool in
                             transcriptRow(tool)
@@ -507,14 +416,14 @@ struct ConversationView: View {
             VStack(alignment: .leading, spacing: 6) {
                 if done {
                     Button {
-                        if expandedThinking.contains(id) {
-                            expandedThinking.remove(id)
+                        if chat.expandedThinking.contains(id) {
+                            chat.expandedThinking.remove(id)
                         } else {
-                            expandedThinking.insert(id)
+                            chat.expandedThinking.insert(id)
                         }
                     } label: {
                         HStack(spacing: 4) {
-                            Image(systemName: expandedThinking.contains(id) ? "chevron.down" : "chevron.right")
+                            Image(systemName: chat.expandedThinking.contains(id) ? "chevron.down" : "chevron.right")
                                 .appFont(size: 9)
                             Text("思考完成")
                         }
@@ -524,7 +433,7 @@ struct ConversationView: View {
                     }
                     .buttonStyle(.plain)
 
-                    if expandedThinking.contains(id) {
+                    if chat.expandedThinking.contains(id) {
                         Text(text)
                             .appFont(size: 12)
                             .foregroundStyle(.secondary)
@@ -619,6 +528,35 @@ struct ConversationView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if !chat.attachedFiles.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(chat.attachedFiles, id: \.self) { url in
+                            HStack(spacing: 4) {
+                                Image(systemName: "doc")
+                                    .appFont(size: 10)
+                                    .foregroundStyle(.secondary)
+                                Text(url.lastPathComponent)
+                                    .appFont(size: 11)
+                                    .lineLimit(1)
+                                Button {
+                                    chat.attachedFiles.removeAll { $0 == url }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .appFont(size: 10)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(AppPalette.mutedSurface, in: Capsule())
+                            .help(url.path)
+                        }
+                    }
+                }
+            }
+
             TextField("输入消息，@ 选择当前工作区上下文…", text: $messageText, axis: .vertical)
                 .textFieldStyle(.plain)
                 .appFont(size: 13)
@@ -626,19 +564,41 @@ struct ConversationView: View {
                 .onSubmit { send() }
 
             HStack(spacing: 12) {
-                Button {} label: {
-                    Label("选择工作目录", systemImage: "folder.badge.plus")
-                        .appFont(size: 12)
-                        .foregroundStyle(.secondary)
+                Button {
+                    pickWorkDirectory()
+                } label: {
+                    Label(
+                        chat.workDirectory?.lastPathComponent ?? "选择工作目录",
+                        systemImage: chat.workDirectory == nil ? "folder.badge.plus" : "folder.fill"
+                    )
+                    .appFont(size: 12)
+                    .foregroundStyle(chat.workDirectory == nil ? Color.secondary : Color.blue)
+                    .lineLimit(1)
                 }
                 .buttonStyle(.plain)
+                .help(chat.workDirectory?.path ?? "选择工作目录")
 
-                Button {} label: {
+                if chat.workDirectory != nil {
+                    Button {
+                        chat.workDirectory = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .appFont(size: 11)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("清除工作目录")
+                }
+
+                Button {
+                    pickFiles()
+                } label: {
                     Image(systemName: "plus")
                         .appFont(size: 12, weight: .medium)
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .help("添加文件")
 
                 Spacer()
 
@@ -654,19 +614,19 @@ struct ConversationView: View {
                 Button {
                     send()
                 } label: {
-                    Image(systemName: isSending ? "hourglass" : "arrow.up")
+                    Image(systemName: chat.isSending ? "hourglass" : "arrow.up")
                         .appFont(size: 13, weight: .bold)
                         .foregroundStyle(.white)
                         .frame(width: 30, height: 30)
                         .background(
                             Circle().fill(
-                                messageText.isEmpty || isSending
+                                messageText.isEmpty || chat.isSending
                                     ? Color.secondary.opacity(0.45) : Color.blue
                             )
                         )
                 }
                 .buttonStyle(.plain)
-                .disabled(messageText.isEmpty || isSending)
+                .disabled(messageText.isEmpty || chat.isSending)
                 .keyboardShortcut(.return, modifiers: .command)
             }
         }
@@ -675,9 +635,37 @@ struct ConversationView: View {
         .background(AppPalette.card, in: RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .stroke(AppPalette.border, lineWidth: 0.7)
+                .stroke(
+                    isDropTargeted ? Color.blue : AppPalette.border,
+                    lineWidth: isDropTargeted ? 1.5 : 0.7
+                )
         )
         .shadow(color: .black.opacity(0.07), radius: 16, y: 7)
+        .dropDestination(for: URL.self) { urls, _ in
+            chat.addDropped(urls)
+            return true
+        } isTargeted: {
+            isDropTargeted = $0
+        }
+    }
+
+    // MARK: - 工作目录 / 附件
+
+    private func pickWorkDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "选择"
+        panel.message = "选择工作目录"
+        if panel.runModal() == .OK { chat.workDirectory = panel.url }
+    }
+
+    private func pickFiles() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.message = "添加文件"
+        if panel.runModal() == .OK { chat.addDropped(panel.urls) }
     }
 
     private var capabilityPanel: some View {

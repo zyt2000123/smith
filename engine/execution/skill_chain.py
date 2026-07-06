@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from .gate import (
+    ContractAlignmentGate,
     DesignGate,
     Gate,
     PlanningGate,
@@ -13,21 +14,25 @@ from .gate import (
     RootCauseGate,
     SkillRubricGate,
     TestGate,
+    UnderstandingGate,
     ValidationGate,
     planning_gate_with_llm,
     validation_gate_with_llm,
 )
 
 _GATE_MAP: dict[str, Callable[[], Gate]] = {
+    "understand": UnderstandingGate,
     "planning": planning_gate_with_llm,
     "architecture": DesignGate,
     "testing-strategy": TestGate,
+    "contract-alignment": ContractAlignmentGate,
     "change-validation": validation_gate_with_llm,
     "code-review": ReviewGate,
     "sde-debug": RootCauseGate,
 }
 
 _DEFAULT_BACKTRACK: dict[str, str] = {
+    "contract-alignment": "planning",
     "change-validation": "planning",
     "code-review": "change-validation",
     "testing-strategy": "planning",
@@ -64,17 +69,15 @@ class SkillChain:
 
         return SkillChain(
             nodes=[
+                SkillNode(skill_name="understand", gate=UnderstandingGate()),
                 SkillNode(skill_name="planning", gate=planning_gate_with_llm()),
                 SkillNode(skill_name="architecture", gate=DesignGate(), condition=_needs_architecture),
                 SkillNode(skill_name="testing-strategy", gate=TestGate()),
+                SkillNode(skill_name="contract-alignment", gate=ContractAlignmentGate()),
                 SkillNode(skill_name="change-validation", gate=validation_gate_with_llm()),
                 SkillNode(skill_name="code-review", gate=ReviewGate()),
             ],
-            backtrack_map={
-                "change-validation": "planning",
-                "code-review": "change-validation",
-                "testing-strategy": "planning",
-            },
+            backtrack_map=_DEFAULT_BACKTRACK,
         )
 
     @staticmethod
@@ -136,15 +139,13 @@ class SkillChain:
         """Predefined skill chain for bug fixing (QoderWake order)."""
         return SkillChain(
             nodes=[
+                SkillNode(skill_name="understand", gate=UnderstandingGate()),
                 SkillNode(skill_name="sde-debug", gate=RootCauseGate()),
                 SkillNode(skill_name="planning", gate=planning_gate_with_llm()),
                 SkillNode(skill_name="testing-strategy", gate=TestGate()),
+                SkillNode(skill_name="contract-alignment", gate=ContractAlignmentGate()),
                 SkillNode(skill_name="change-validation", gate=validation_gate_with_llm()),
                 SkillNode(skill_name="code-review", gate=ReviewGate()),
             ],
-            backtrack_map={
-                "change-validation": "planning",
-                "code-review": "change-validation",
-                "testing-strategy": "planning",
-            },
+            backtrack_map=_DEFAULT_BACKTRACK,
         )

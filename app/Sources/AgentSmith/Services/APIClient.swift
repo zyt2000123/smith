@@ -302,7 +302,9 @@ class APIClient: ObservableObject {
         )
     }
 
-    func streamMessage(employeeId: String, sessionId: String, content: String) -> AsyncStream<AgentStreamEvent> {
+    func streamMessage(
+        employeeId: String, sessionId: String, content: String, context: String? = nil
+    ) -> AsyncStream<AgentStreamEvent> {
         AsyncStream { continuation in
             Task {
                 do {
@@ -316,7 +318,9 @@ class APIClient: ObservableObject {
                     var req = URLRequest(url: url)
                     req.httpMethod = "POST"
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    req.httpBody = try JSONEncoder().encode(["content": content])
+                    var payload = ["content": content]
+                    if let context { payload["context"] = context }
+                    req.httpBody = try JSONEncoder().encode(payload)
 
                     let (bytes, response) = try await URLSession.shared.bytes(for: req)
 

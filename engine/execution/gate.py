@@ -496,3 +496,85 @@ class TestDeliveryGate:
             f"Test delivery missing: {', '.join(missing)}.",
             retry_hint="Run the test suite and include the full output showing pass/fail counts. Do not just claim tests passed — show the actual output.",
         )
+
+
+class UnderstandingGate:
+    """Check that understanding output restates the requirement and identifies boundaries.
+
+    QoderWake: Understand 阶段末 — 能准确复述需求 + 识别边界条件；失败回退重新理解。
+    """
+
+    _RESTATEMENT = re.compile(
+        r"需求|目标|任务是|要求|用户(想|希望|需要)|goal|requirement|objective|"
+        r"the task is|user wants?|needs? to",
+        re.IGNORECASE,
+    )
+
+    _BOUNDARIES = re.compile(
+        r"边界|约束|前提|假设|范围|不包括|不涉及|限制|风险|"
+        r"boundar|constraint|assumption|edge case|out of scope|scope|limitation|risk",
+        re.IGNORECASE,
+    )
+
+    async def check(self, output: str, context: dict) -> GateResult:
+        stripped = output.strip()
+        missing: list[str] = []
+
+        # 与 SkillRubricGate 一致用 50：中文信息密度高，80 会误伤正常输出
+        if len(stripped) <= 50:
+            missing.append(f"substantive understanding (only {len(stripped)} chars)")
+        if not self._RESTATEMENT.search(stripped):
+            missing.append("restatement of the requirement")
+        if not self._BOUNDARIES.search(stripped):
+            missing.append("boundary conditions / constraints / assumptions")
+
+        if not missing:
+            return GateResult("pass", "Understanding restates the requirement and identifies boundaries.")
+
+        return GateResult(
+            "fail",
+            f"Understanding output missing: {', '.join(missing)}.",
+            retry_hint=(
+                "Restate the requirement in your own words, then explicitly list boundary "
+                "conditions, constraints, and assumptions (至少 2 条边界/约束)."
+            ),
+        )
+
+
+class ContractAlignmentGate:
+    """Check that the implementation approach is verified against the plan/contract.
+
+    QoderWake: 实现前 — 实现方案与契约一致；失败回退 Planning。
+    """
+
+    _ALIGNMENT_VERDICT = re.compile(
+        r"一致|对齐|符合|无偏差|偏差|不一致|aligned|consistent|match(es)?|deviation|conform",
+        re.IGNORECASE,
+    )
+
+    _CONCRETE_REF = re.compile(
+        r"```|[\w./-]+\.\w{1,5}|第\s*\d+\s*步|step\s*\d+|\d+\.\s",
+    )
+
+    async def check(self, output: str, context: dict) -> GateResult:
+        stripped = output.strip()
+        missing: list[str] = []
+
+        if not self._ALIGNMENT_VERDICT.search(stripped):
+            missing.append("explicit alignment verdict (一致/偏差/aligned/deviation)")
+        if not self._CONCRETE_REF.search(stripped):
+            missing.append("concrete references to plan items or files")
+        if not context.get("planning_output") and "计划" not in stripped and "plan" not in stripped.lower():
+            missing.append("reference to the plan being aligned against")
+
+        if not missing:
+            return GateResult("pass", "Implementation approach is checked against the plan/contract.")
+
+        return GateResult(
+            "fail",
+            f"Contract alignment missing: {', '.join(missing)}.",
+            retry_hint=(
+                "Compare the implementation approach item-by-item against the plan: cite each "
+                "plan step or file, state 一致/偏差 per item, and give an overall verdict."
+            ),
+        )

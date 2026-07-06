@@ -278,5 +278,15 @@
     "excludePatterns": [],
     "description": "Destructive git operations can cause irreversible work loss",
     "remediation": "Use git push --force-with-lease. Stash before reset."
+  },
+  {
+    "id": "platform-protect-001",
+    "tools": ["shell"],
+    "category": "platform_integrity",
+    "severity": "high",
+    "patterns": ["(?=.*(Agent-Smith|\\.agent-smith)).*\\bpip3?\\s+install\\b", "(?=.*(Agent-Smith|\\.agent-smith)).*\\buv\\s+(pip\\s+install|add)\\b", "\\b(rm|mv|chmod|chown|truncate|tee)\\b.*(Agent-Smith|\\.agent-smith)", "(>|>>)\\s*[^\\s\"]*(Agent-Smith|\\.agent-smith)"],
+    "excludePatterns": [],
+    "description": "Command would install packages into or modify the Agent-Smith platform runtime (source tree, venv, or ~/.agent-smith data). Agents must not mutate the platform that runs them.",
+    "remediation": "Work inside the user-provided working directory. Install packages only into the project's own environment, never into the Agent-Smith platform tree."
   }
 ]

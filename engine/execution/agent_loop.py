@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncGenerator
+from typing import TYPE_CHECKING, AsyncGenerator, NamedTuple
 
 if TYPE_CHECKING:
     pass
@@ -21,11 +22,18 @@ from .backtrack import FailureLoopGuard, FailureSignature
 from .events import EventType, ExecutionEvent
 from .gate import LLMGate, SkillRubricGate
 from .skill_chain import SkillChain
-from .task_router import TaskType, route_task
+from .task_router import (
+    EVAL_SENSITIVE_GUIDANCE,
+    TaskType,
+    detect_eval_sensitive,
+    route_task,
+)
 
 # Shared rubric gate instance — stateless, safe to reuse
 _rubric_gate = SkillRubricGate()
 _RUBRIC_MAX_RETRIES = 3
+
+logger = logging.getLogger(__name__)
 
 
 async def _react_loop(
@@ -512,31 +520,39 @@ async def run_agent(
     return "Skill chain completed with no output."
 
 
-async def reply(employee_id: str, name: str, user_message: str, history: list[dict] | None = None) -> str:
-    """High-level entry point for the server layer.
+class _AgentSetup(NamedTuple):
+    """reply()/reply_events() 的公共装配结果。"""
+    llm: LLMClient
+    tool_registry: ToolRegistry
+    skill_registry: SkillRegistry
+    employee_dir: Path
+    system_prompt: str
+    task_type: TaskType
+    chain: SkillChain | None
+    tool_guard: ToolGuard
 
-    Builds LLM client from config, assembles prompt, routes task, and runs.
-    *history*: recent session messages ({"role","content"}) for short-term context.
-    """
+
+def _merge_context(user_message: str, context: str | None) -> str:
+    """引擎输入 = 用户原文 + 隐式环境上下文；路由和记忆只基于用户原文。"""
+    return f"{user_message}\n\n{context}" if context else user_message
+
+
+async def _prepare(employee_id: str, name: str, user_message: str) -> _AgentSetup:
+    """Shared setup: build LLM, registries, MCP tools, prompt, and route the task."""
     # Import here to avoid circular deps at module level
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from common.config_loader import resolve_llm_config
     from common.config import DATA_DIR, SAFETY_RULES_PATH
 
-    # Build LLM
-    llm_cfg = resolve_llm_config(employee_id)
-    llm = build_llm_client(llm_cfg)
+    llm = build_llm_client(resolve_llm_config(employee_id))
 
-    # Set up registries
     tool_registry = ToolRegistry()
     skill_registry = SkillRegistry()
-
     employee_dir = DATA_DIR / "employees" / employee_id
 
-    # Load tools + skills
-    tools_dir = Path(__file__).resolve().parents[2] / "agents" / "tools"
-    tool_registry.load_providers(tools_dir)
+    agents_dir = Path(__file__).resolve().parents[2] / "agents"
+    tool_registry.load_providers(agents_dir / "tools")
 
     # Load MCP servers from employee config (if any)
     try:
@@ -554,8 +570,7 @@ async def reply(employee_id: str, name: str, user_message: str, history: list[di
     except Exception:
         pass  # MCP is best-effort
 
-    skills_dir = Path(__file__).resolve().parents[2] / "agents" / "skills"
-    skill_registry.load_builtin(skills_dir)
+    skill_registry.load_builtin(agents_dir / "skills")
     emp_skills = employee_dir / "skills"
     if emp_skills.is_dir():
         skill_registry.load_employee_skills(emp_skills)
@@ -569,132 +584,107 @@ async def reply(employee_id: str, name: str, user_message: str, history: list[di
         employee_dir, tool_registry, skill_registry, context, retrieved_memory=retrieved,
     )
 
-    # Route and run
     task_type = route_task(user_message)
+    if detect_eval_sensitive(user_message):
+        system_prompt += "\n\n" + EVAL_SENSITIVE_GUIDANCE
+
     chain: SkillChain | None = None
     if task_type == TaskType.FEATURE:
         chain = SkillChain.feature_chain()
     elif task_type == TaskType.BUGFIX:
         chain = SkillChain.bugfix_chain()
 
+    return _AgentSetup(
+        llm, tool_registry, skill_registry, employee_dir,
+        system_prompt, task_type, chain, ToolGuard(SAFETY_RULES_PATH),
+    )
+
+
+async def reply(
+    employee_id: str, name: str, user_message: str,
+    history: list[dict] | None = None, context: str | None = None,
+) -> str:
+    """High-level entry point for the server layer.
+
+    *history*: recent session messages ({"role","content"}) for short-term context.
+    *context*: implicit environment context (workdir/attachments) — visible to the
+    LLM only; routing and memory persistence use the raw user message.
+    """
+    s = await _prepare(employee_id, name, user_message)
     guard = FailureLoopGuard()
-    tool_guard = ToolGuard(SAFETY_RULES_PATH)
 
     try:
         result = await run_agent(
-            llm, system_prompt, user_message,
-            tool_registry, skill_registry,
-            task_type, chain, guard,
-            tool_guard=tool_guard,
+            s.llm, s.system_prompt, _merge_context(user_message, context),
+            s.tool_registry, s.skill_registry,
+            s.task_type, s.chain, guard,
+            tool_guard=s.tool_guard,
             history=history,
         )
 
         # Save conversation memory + learn preferences (best-effort, never break the reply)
         try:
             from memory.store import save_conversation_memory
-            await save_conversation_memory(employee_dir, user_message, result, True)
+            await save_conversation_memory(s.employee_dir, user_message, result, True)
 
             from memory.user_learner import UserPreferenceLearner
-            learner = UserPreferenceLearner(employee_dir)
+            learner = UserPreferenceLearner(s.employee_dir)
             await learner.observe(user_message, result)
         except Exception:
             pass
 
         return result
     finally:
-        await llm.close()
+        await s.llm.close()
 
 
 async def reply_events(
-    employee_id: str, name: str, user_message: str, history: list[dict] | None = None
+    employee_id: str, name: str, user_message: str,
+    history: list[dict] | None = None, context: str | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Event-streaming entry point: yields structured ExecutionEvents
     (thinking / tool_call / text_delta / skill / done...) for Agent-style UIs."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from common.config_loader import resolve_llm_config
-    from common.config import DATA_DIR, SAFETY_RULES_PATH
-
-    llm_cfg = resolve_llm_config(employee_id)
-    llm = build_llm_client(llm_cfg)
-
-    tool_registry = ToolRegistry()
-    skill_registry = SkillRegistry()
-
-    employee_dir = DATA_DIR / "employees" / employee_id
-
-    tools_dir = Path(__file__).resolve().parents[2] / "agents" / "tools"
-    tool_registry.load_providers(tools_dir)
-
-    # Load MCP servers from employee config (if any)
-    try:
-        from common.yaml_utils import load_yaml
-        emp_config = load_yaml(employee_dir / "config.yaml")
-        mcp_servers = emp_config.get("mcp_servers", [])
-        if mcp_servers:
-            from tool.mcp_client import MCPClient, register_mcp_tools
-            for srv in mcp_servers:
-                cmd = srv.get("command", [])
-                if cmd:
-                    client = MCPClient(cmd, env=srv.get("env"))
-                    await client.connect()
-                    await register_mcp_tools(tool_registry, client)
-    except Exception:
-        pass  # MCP is best-effort
-
-    skills_dir = Path(__file__).resolve().parents[2] / "agents" / "skills"
-    skill_registry.load_builtin(skills_dir)
-    emp_skills = employee_dir / "skills"
-    if emp_skills.is_dir():
-        skill_registry.load_employee_skills(emp_skills)
-
-    from memory.store import search_relevant_memories
-    retrieved = await search_relevant_memories(employee_dir, user_message)
-    assembler = PromptAssembler()
-    context = {"employee_id": employee_id, "name": name, "_employee_dir": str(employee_dir)}
-    system_prompt = assembler.assemble(
-        employee_dir, tool_registry, skill_registry, context, retrieved_memory=retrieved,
-    )
-
-    task_type = route_task(user_message)
-    tool_guard = ToolGuard(SAFETY_RULES_PATH)
-
-    chain: SkillChain | None = None
-    if task_type == TaskType.FEATURE:
-        chain = SkillChain.feature_chain()
-    elif task_type == TaskType.BUGFIX:
-        chain = SkillChain.bugfix_chain()
+    s = await _prepare(employee_id, name, user_message)
     guard = FailureLoopGuard()
 
     full_text = []
     had_tools = False
     try:
-        async for event in run_agent_stream(
-            llm, system_prompt, user_message,
-            tool_registry, skill_registry,
-            task_type, chain, guard,
-            tool_guard=tool_guard,
-            history=history,
-        ):
-            if event.type == EventType.TEXT_DELTA:
-                full_text.append(event.data.get("text", ""))
-            elif event.type in (EventType.TOOL_CALL_START, EventType.SKILL_START):
-                had_tools = True
-            yield event
+        try:
+            async for event in run_agent_stream(
+                s.llm, s.system_prompt, _merge_context(user_message, context),
+                s.tool_registry, s.skill_registry,
+                s.task_type, s.chain, guard,
+                tool_guard=s.tool_guard,
+                history=history,
+            ):
+                if event.type == EventType.TEXT_DELTA:
+                    full_text.append(event.data.get("text", ""))
+                elif event.type in (EventType.TOOL_CALL_START, EventType.SKILL_START):
+                    had_tools = True
+                yield event
+        except Exception as e:
+            # 任一环节失败（LLM 超长上下文/网络/工具崩溃）：优雅收尾，SSE 流不裸断。
+            # 异常详情只进服务端日志，不透给前端（可能含 base_url / 请求细节）。
+            logger.exception("agent execution failed (employee=%s)", employee_id)
+            yield ExecutionEvent(EventType.TEXT_DELTA, {
+                "text": f"⚠️ 执行失败：{type(e).__name__}（详情见服务端日志）",
+            })
+            yield ExecutionEvent(EventType.DONE, {})
     finally:
         full = "".join(full_text)
         try:
             from memory.store import save_conversation_memory
-            await save_conversation_memory(employee_dir, user_message, full, had_tools)
+            await save_conversation_memory(s.employee_dir, user_message, full, had_tools)
         except Exception:
             pass  # memory persistence must never break the stream teardown
         try:
             from memory.user_learner import UserPreferenceLearner
-            learner = UserPreferenceLearner(employee_dir)
+            learner = UserPreferenceLearner(s.employee_dir)
             await learner.observe(user_message, full)
         except Exception:
             pass  # learning must never break the stream teardown
-        await llm.close()
+        await s.llm.close()
 
 
 async def reply_stream(

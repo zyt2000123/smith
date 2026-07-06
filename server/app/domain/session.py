@@ -17,6 +17,8 @@ class SessionOut(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str
+    # 隐式环境上下文（工作目录/附件路径等）：只注入引擎，不落库、不显示
+    context: str | None = None
 
 
 class MessageOut(BaseModel):
