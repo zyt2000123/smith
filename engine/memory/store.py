@@ -214,6 +214,64 @@ class FileMemoryStore:
 
 
 # ---------------------------------------------------------------------------
+# Query-time retrieval for prompt injection
+# ---------------------------------------------------------------------------
+
+
+async def search_relevant_memories(employee_dir: Path, query: str, top_k: int = 5) -> str:
+    """Hybrid-search memories relevant to *query*, formatted for prompt injection.
+
+    Best-effort: returns "" on any failure so prompt assembly never blocks.
+    """
+    memory_dir = employee_dir / "memory"
+    if not memory_dir.is_dir() or not query.strip():
+        return ""
+
+    store = FileMemoryStore(memory_dir)
+    idx = None
+    embed_fn = None
+    try:
+        from .search import SearchIndex, create_jina_embed_fn
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
+        from common.config_loader import resolve_llm_config
+
+        cfg = resolve_llm_config(employee_dir.name)
+        if cfg.get("api_key") and cfg.get("base_url"):
+            embed_fn = await create_jina_embed_fn(
+                cfg["api_key"], cfg["base_url"], cfg.get("embedding_model", "jina-embeddings-v3"),
+            )
+        idx = SearchIndex(memory_dir)
+        await idx.open(embed_fn)
+        store.attach_search_index(idx)
+
+        entries = await store.search(query)
+        if not entries:
+            return ""
+        lines = ["## Relevant Memories"]
+        for e in entries[:top_k]:
+            content = " ".join(e.content.split())
+            if len(content) > 200:
+                content = content[:200] + "…"
+            lines.append(f"- {content}")
+        return "\n".join(lines)
+    except Exception:
+        return ""  # ponytail: retrieval is best-effort
+    finally:
+        if idx is not None:
+            try:
+                await idx.close()
+            except Exception:
+                pass
+        client = getattr(embed_fn, "_client", None)
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Conversation-level memory persistence
 # ---------------------------------------------------------------------------
 

@@ -73,6 +73,30 @@ def _memory_dir(employee_id: str) -> Path:
     return Path.home() / ".agent-smith" / "employees" / safe_id / "memory"
 
 
+def _scope_dirs(mem_dir: Path) -> list[Path]:
+    """Entry locations in search-priority order: project/, agent/, root (legacy)."""
+    return [mem_dir / "project", mem_dir / "agent", mem_dir]
+
+
+def _all_entry_files(mem_dir: Path) -> list[Path]:
+    """All entry .md files across scope dirs (project first) + legacy root files."""
+    files: list[Path] = []
+    for d in _scope_dirs(mem_dir):
+        if d.is_dir():
+            files.extend(sorted(f for f in d.glob("*.md") if f.is_file()))
+    return files
+
+
+def _find_entry(mem_dir: Path, memory_id: str) -> Path | None:
+    """Locate an entry file by id across scope dirs and legacy root."""
+    safe = Path(memory_id).name  # prevent path traversal
+    for d in _scope_dirs(mem_dir):
+        p = d / f"{safe}.md"
+        if p.is_file():
+            return p
+    return None
+
+
 def _check_sensitive(text: str) -> str | None:
     """Return a rejection message if text contains sensitive information."""
     match = _SENSITIVE_PATTERNS.search(text)
@@ -91,6 +115,7 @@ def _parse_md_file(path: Path) -> dict | None:
     entry_id = path.stem
     scope = "agent"
     created_at = ""
+    last_accessed = ""
     body = raw
 
     if raw.startswith("---"):
@@ -101,6 +126,8 @@ def _parse_md_file(path: Path) -> dict | None:
                     scope = line.split(":", 1)[1].strip()
                 elif line.startswith("created_at:"):
                     created_at = line.split(":", 1)[1].strip()
+                elif line.startswith("last_accessed:"):
+                    last_accessed = line.split(":", 1)[1].strip()
                 elif line.startswith("id:"):
                     entry_id = line.split(":", 1)[1].strip()
             body = parts[2].strip()
@@ -118,22 +145,30 @@ def _parse_md_file(path: Path) -> dict | None:
         "scope": scope,
         "evidence": evidence,
         "created_at": created_at,
+        "last_accessed": last_accessed or created_at,
     }
 
 
-def _write_md_file(mem_dir: Path, entry_id: str, content: str, evidence: str, scope: str, created_at: str) -> None:
-    """Write a .md memory file in the same format as FileMemoryStore.add."""
-    mem_dir.mkdir(parents=True, exist_ok=True)
+def _write_md_file(
+    mem_dir: Path, entry_id: str, content: str, evidence: str,
+    scope: str, created_at: str, last_accessed: str = "",
+) -> Path:
+    """Write a .md memory file with the same format and layout as FileMemoryStore."""
+    target_dir = mem_dir / ("project" if scope == "project" else "agent")
+    target_dir.mkdir(parents=True, exist_ok=True)
     text = (
         f"---\n"
         f"id: {entry_id}\n"
         f"scope: {scope}\n"
         f"created_at: {created_at}\n"
+        f"last_accessed: {last_accessed or created_at}\n"
         f"---\n"
         f"{content}\n\n"
         f"Evidence: {evidence}\n"
     )
-    (mem_dir / f"{entry_id}.md").write_text(text, encoding="utf-8")
+    target = target_dir / f"{entry_id}.md"
+    target.write_text(text, encoding="utf-8")
+    return target
 
 
 async def execute(
@@ -159,19 +194,18 @@ async def execute(
 
         matches: list[str] = []
 
-        # Search .md files
-        if mem_dir.is_dir():
-            for f in sorted(mem_dir.glob("*.md")):
-                try:
-                    raw = f.read_text(encoding="utf-8").lower()
-                    if any(kw in raw for kw in keywords):
-                        entry = _parse_md_file(f)
-                        if entry:
-                            matches.append(
-                                f"- [{entry['id']}] ({entry['scope']}) {entry['content'][:120]}"
-                            )
-                except (OSError, UnicodeDecodeError):
-                    continue
+        # Search .md entries across scope dirs (project first) + legacy root files
+        for f in _all_entry_files(mem_dir):
+            try:
+                raw = f.read_text(encoding="utf-8").lower()
+                if any(kw in raw for kw in keywords):
+                    entry = _parse_md_file(f)
+                    if entry:
+                        matches.append(
+                            f"- [{entry['id']}] ({entry['scope']}) {entry['content'][:120]}"
+                        )
+            except (OSError, UnicodeDecodeError):
+                continue
 
         # Search recent.jsonl
         recent_file = mem_dir / "recent.jsonl"
@@ -223,25 +257,29 @@ async def execute(
         if rejection:
             return rejection
 
-        target = mem_dir / f"{memory_id}.md"
-        if not target.is_file():
+        found = _find_entry(mem_dir, memory_id)
+        if found is None:
             return f"Error: memory '{memory_id}' not found"
 
-        # Preserve original created_at
-        old_entry = _parse_md_file(target)
-        created_at = old_entry["created_at"] if old_entry else datetime.now(timezone.utc).isoformat()
+        # Preserve original created_at + scope (like FileMemoryStore.update); refresh last_accessed
+        now = datetime.now(timezone.utc).isoformat()
+        old_entry = _parse_md_file(found)
+        created_at = (old_entry or {}).get("created_at") or now
+        entry_scope = (old_entry or {}).get("scope", "agent")
 
-        _write_md_file(mem_dir, memory_id, content, evidence, scope, created_at)
+        new_path = _write_md_file(mem_dir, memory_id, content, evidence, entry_scope, created_at, last_accessed=now)
+        if found != new_path:
+            found.unlink()  # migrate legacy root-level entry into its scope dir
         return f"OK: updated memory '{memory_id}' for employee '{employee_id}'"
 
     elif action == "remove":
         if not memory_id:
             return "Error: 'memory_id' is required for remove action"
 
-        target = mem_dir / f"{memory_id}.md"
-        if not target.is_file():
+        found = _find_entry(mem_dir, memory_id)
+        if found is None:
             return f"Error: memory '{memory_id}' not found"
-        target.unlink()
+        found.unlink()
         return f"OK: removed memory '{memory_id}' for employee '{employee_id}'"
 
     else:

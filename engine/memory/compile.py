@@ -72,7 +72,8 @@ async def _llm_summarize(llm: LLMClient, prompt: str) -> str:
             "You are a memory compiler. Extract ONLY user-relevant information: "
             "who the user is, what they care about, preferences, recurring patterns. "
             "Do NOT include file names, tool calls, command outputs, or execution details. "
-            "Output concise bullet points in the same language as the input. Max 400 chars."
+            "Output concise bullet points in the same language as the input, "
+            "within the character limit stated in the task."
         )},
         {"role": "user", "content": prompt},
     ])
@@ -105,7 +106,7 @@ async def compile_today(memory_dir: Path, llm: LLMClient) -> bool:
         return False
 
     summary = await _llm_summarize(
-        llm, f"Summarize today's conversations into 3-5 key events:\n\n{_entries_to_source(today_entries)}"
+        llm, f"Summarize today's conversations into 3-5 key events. Max 400 chars.\n\n{_entries_to_source(today_entries)}"
     )
     out.write_text(f"## Today\n\n{summary}\n", encoding="utf-8")
     _write_fp(fp_file, fp)
@@ -131,7 +132,7 @@ async def compile_week(memory_dir: Path, llm: LLMClient) -> bool:
         return False
 
     summary = await _llm_summarize(
-        llm, f"Identify 3-5 recurring themes from this week's work:\n\n{_entries_to_source(week_entries, 100)}"
+        llm, f"Identify 3-5 recurring themes from this week's work. Max 400 chars.\n\n{_entries_to_source(week_entries, 100)}"
     )
     out.write_text(f"## This Week\n\n{summary}\n", encoding="utf-8")
     _write_fp(fp_file, fp)

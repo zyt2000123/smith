@@ -49,6 +49,7 @@ class PromptAssembler:
         skill_registry: "SkillRegistry",
         context: dict,
         max_tokens: int = 100_000,
+        retrieved_memory: str = "",
     ) -> str:
         layers: list[str] = []
 
@@ -146,6 +147,10 @@ class PromptAssembler:
                         mem_parts.append(self._extract_memory_body(f))
                         total += 1
             mem_text = "\n".join(mem_parts) if mem_parts else ""
+
+        # Query-time retrieved memories (relevant to the current message)
+        if retrieved_memory:
+            mem_text = (mem_text + "\n\n" if mem_text else "") + retrieved_memory
 
         layers.append(mem_text)
 

@@ -131,6 +131,8 @@ class DreamConsolidator:
         active = [e for e in entries if e.id in active_ids]
 
         # 3. Deduplication
+        # ponytail: O(n²) keyword-overlap dedup — fine at hundreds of entries;
+        # switch to embedding clustering if a store grows to thousands.
         kw_cache: dict[str, set[str]] = {e.id: _keywords(e.content) for e in active}
         merged_away: set[str] = set()
         merges: list[_MergePlan] = []

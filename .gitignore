@@ -14,3 +14,4 @@ __pycache__/
 *.sqlite-wal
 *.sqlite-shm
 tmp/
+app/.swiftpm/
