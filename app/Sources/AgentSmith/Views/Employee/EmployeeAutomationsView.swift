@@ -29,7 +29,7 @@ struct EmployeeAutomationsView: View {
                 Image(systemName: "info.circle")
                     .appFont(size: 16)
                     .foregroundStyle(.blue)
-                Text("自动任务支持 Cron 定时调度和 Webhook 事件触发两种模式，Agent将按照预设指令自动执行工作。")
+                Text("自动任务支持 Cron 定时调度和 Webhook 事件触发两种模式，Agent 将按照预设指令自动执行工作。")
                     .appFont(size: 13)
                     .foregroundStyle(.secondary)
             }
@@ -53,7 +53,7 @@ struct EmployeeAutomationsView: View {
                     .appFont(size: 16, weight: .medium)
                     .foregroundStyle(.secondary)
 
-                Text("创建第一个自动任务，让Agent定时执行重复性工作")
+                Text("创建第一个自动任务，让 Agent 定时执行重复性工作")
                     .appFont(size: 13)
                     .foregroundStyle(.secondary.opacity(0.7))
             }

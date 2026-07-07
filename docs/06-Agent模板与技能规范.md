@@ -15,7 +15,7 @@ name: 后端工程师
 role: backend-engineer
 description: 负责服务端 API 开发、数据模型设计和系统集成
 llm:
-  model: null  # null 表示继承上层配置（平台级 → 模板级 → Agent级 → 会话级）
+  model: null  # null 表示继承上层配置（平台级 → 模板级 → Agent 级 → 会话级）
 knowledge:
   - api-design
   - database-modeling
@@ -180,10 +180,11 @@ Verify 失败 → 回退到 Implementation，修复后重新验证
 
 ## 2. 内置角色模板
 
-8 个内置模板，位于 `agents/templates/` 目录下：
+9 个内置模板，位于 `agents/templates/` 目录下：
 
 | 模板目录 | 角色名称 | 有 shell | 特化领域 |
 |----------|---------|----------|---------|
+| `personal-assistant` | 个人助手 | Yes | 目标澄清、本地执行、信息检索、写作整理、长期上下文维护 |
 | `backend-engineer` | 后端工程师 | Yes | API 开发、数据库设计、安全、缓存策略、消息队列 |
 | `frontend-engineer` | 前端工程师 | Yes | React 模式、CSS 布局、无障碍、性能优化、设计系统 |
 | `devops-engineer` | 运维工程师 | Yes | CI/CD 管道、容器编排、IaC、监控告警、云服务 |
@@ -379,18 +380,18 @@ async def execute(*, param1: str, param2: int = 0) -> str:
 
 ## 7. 技能自进化
 
-### 内置 vs Agent技能
+### 内置 vs Agent 技能
 
-| 属性 | 内置技能 | Agent技能 |
+| 属性 | 内置技能 | Agent 技能 |
 |------|---------|---------|
 | 位置 | `agents/skills/<name>/SKILL.md` | `~/.agent-smith/employees/<id>/skills/<name>/SKILL.md` |
 | 可修改 | No（只读） | Yes |
 | 版本控制 | Git 跟踪 | SkillStore 版本快照 |
-| 来源 | 系统预装 | Agent创建或进化 |
+| 来源 | 系统预装 | Agent 创建或进化 |
 
 ### SkillStore 版本管理
 
-`engine/skill/store.py` 中的 `SkillStore` 为每个Agent技能维护版本快照：
+`engine/skill/store.py` 中的 `SkillStore` 为每个 Agent 技能维护版本快照：
 
 ```
 ~/.agent-smith/employees/<id>/skills/<name>/
@@ -411,9 +412,9 @@ async def execute(*, param1: str, param2: int = 0) -> str:
 | 操作 | 必填参数 | 说明 |
 |------|---------|------|
 | `list` | `employee_id` | 列出所有技能（内置 + Agent），含来源标记 |
-| `get` | `employee_id`, `skill_name` | 读取技能内容（优先Agent版本，其次内置） |
-| `create` | `employee_id`, `skill_name`, `content` | 创建新Agent技能（不可与内置技能同名） |
-| `edit` | `employee_id`, `skill_name`, `content` | 全文替换Agent技能（自动存版本） |
+| `get` | `employee_id`, `skill_name` | 读取技能内容（优先 Agent 版本，其次内置） |
+| `create` | `employee_id`, `skill_name`, `content` | 创建新 Agent 技能（不可与内置技能同名） |
+| `edit` | `employee_id`, `skill_name`, `content` | 全文替换 Agent 技能（自动存版本） |
 | `patch` | `employee_id`, `skill_name`, `section`, `section_content` | 按 Markdown 章节局部替换（自动存版本） |
 | `versions` | `employee_id`, `skill_name` | 列出版本快照清单 |
 | `rollback` | `employee_id`, `skill_name`, `version_id` | 回滚到指定版本 |

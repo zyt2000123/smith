@@ -31,7 +31,7 @@ struct EmployeeSkillsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("技能")
                         .appFont(size: 24, weight: .bold)
-                    Text("管理该Agent可使用的技能模块")
+                    Text("管理该 Agent 可使用的技能模块")
                         .appFont(size: 14)
                         .foregroundStyle(.secondary)
                 }

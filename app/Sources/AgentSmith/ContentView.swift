@@ -49,7 +49,7 @@ struct ContentView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
-                sidebarAction("Agent总览", icon: "square.grid.2x2", page: "management")
+                sidebarAction("Agent 总览", icon: "square.grid.2x2", page: "management")
                 sidebarAction("定时任务", icon: "clock.arrow.circlepath", page: "automation")
             }
             .padding(.horizontal, 12)

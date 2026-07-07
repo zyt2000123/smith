@@ -22,7 +22,7 @@ struct CreateEmployeeSheet: View {
         VStack(alignment: .leading, spacing: 20) {
             // Header
             HStack {
-                Text("新建Agent")
+                Text("新建 Agent")
                     .appFont(size: 20, weight: .bold)
                 Spacer()
                 Button {
@@ -52,7 +52,7 @@ struct CreateEmployeeSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("名称")
                     .appFont(size: 13, weight: .medium)
-                TextField("输入Agent名称", text: $name)
+                TextField("输入 Agent 名称", text: $name)
                     .textFieldStyle(.roundedBorder)
             }
 
@@ -104,7 +104,7 @@ struct CreateEmployeeSheet: View {
                 Button("保存并启用") {
                     isCreating = true
                     let role = selectedTemplate ?? "backend-engineer"
-                    let empName = name.isEmpty ? "新Agent" : name
+                    let empName = name.isEmpty ? "新 Agent" : name
                     let empDesc = description.isEmpty
                         ? (employeeTemplates.first(where: { $0.id == selectedTemplate })?.description ?? "")
                         : description

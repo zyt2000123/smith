@@ -93,7 +93,7 @@ ZStack
 
 **分区布局**（从上到下）：
 
-1. **功能入口**（paddingTop 44pt）— "Agent总览" / "定时任务"，选中态 `AppPalette.selectedSurface` 填充
+1. **功能入口**（paddingTop 44pt）— "Agent 总览" / "定时任务"，选中态 `AppPalette.selectedSurface` 填充
 2. **Divider**
 3. **ScrollView**
    - **对话列表**（可折叠，hover 显示 "+" 按钮）— 3 条硬编码：
@@ -233,7 +233,7 @@ struct Employee: Identifiable, Hashable {
 | `"luna"` | Luna | Frontend Engineer | green | Local | true | 今天 |
 | `"theo"` | Theo | Backend Engineer | blue | Local | true | 7 天前 |
 
-所有Agent的 `device` 均为 `"AA01030deMacBook-Pro.local"`。头像图片分别为 `product-manager.png`、`frontend-engineer.png`、`backend-engineer.png`，存放于 `Resources/Employees/` 目录。
+所有 Agent 的 `device` 均为 `"AA01030deMacBook-Pro.local"`。头像图片分别为 `product-manager.png`、`frontend-engineer.png`、`backend-engineer.png`，存放于 `Resources/Employees/` 目录。
 
 ### 5.3 `EmployeeTemplate`
 
@@ -276,14 +276,14 @@ class APIClient: ObservableObject {
 |---|---|---|
 | `employees` | `@State [Employee]` | 初始 `Employee.samples` |
 | `showCreateSheet` | `@State Bool` | 控制创建面板 |
-| `selectedSegment` | `@State Int` | 顶部 tab（我的Agent/我的群组） |
+| `selectedSegment` | `@State Int` | 顶部 tab（我的 Agent/我的群组） |
 | `statusFilter` | `@State String` | 在线/离线/全部 |
 | `envFilter` | `@State String` | 本地/云端/全部 |
 | `searchText` | `@State String` | 搜索关键字 |
 
 - **回调**: `var onOpenEmployee: (Employee) -> Void`（非 Binding，由父视图传入）
 - **计算属性** `filteredEmployees`：按状态、环境、搜索文本（name/role）组合过滤
-- **布局**：ScrollView -> 标题（"我的Agent" + "新建Agent"按钮） -> 筛选栏（Segmented Picker + 状态/环境下拉菜单 + 搜索框） -> 2 列 `LazyVGrid` Agent卡片
+- **布局**：ScrollView -> 标题（"我的 Agent" + "新建 Agent"按钮） -> 筛选栏（Segmented Picker + 状态/环境下拉菜单 + 搜索框） -> 2 列 `LazyVGrid` Agent 卡片
 - **Sheet**：`CreateEmployeeSheet`，模态弹出
 
 #### `EmployeeCardView`
@@ -300,7 +300,7 @@ class APIClient: ObservableObject {
 - **布局**：Header（关闭按钮） -> 模板选择（2 列 grid，`employeeTemplates`） -> 名称 TextField -> 头像颜色选择器（8 色圆形：blue/green/orange/purple/red/pink/cyan/mint，选中带蓝色圆环） -> 描述 TextEditor -> Footer（取消 + "保存并启用"）
 - **保存逻辑**：创建新 `Employee`（UUID id），追加到 `employees` 数组
 
-### 7.2 Agent详情 (`Views/Employee/`)
+### 7.2 Agent 详情 (`Views/Employee/`)
 
 #### `EmployeeDetailView`
 
@@ -319,7 +319,7 @@ class APIClient: ObservableObject {
 | `permissions` | 权限 | `shield` | `shield.fill` |
 
 - **布局**：HStack（12pt spacing） -> 左侧 employeeSidebar（180pt） + 右侧 ScrollView 内容区
-- **侧栏**：返回按钮（"我的Agent"） -> 头像（48x58） + 姓名 + 在线状态 -> 标签页列表（选中蓝色高亮 `blue.opacity(0.12)`，hover `mutedSurface`）
+- **侧栏**：返回按钮（"我的 Agent"） -> 头像（48x58） + 姓名 + 在线状态 -> 标签页列表（选中蓝色高亮 `blue.opacity(0.12)`，hover `mutedSurface`）
 - **内容路由**：switch on `selectedTab`
   - `.home` -> `EmployeeHomeView`
   - `.skills` -> `EmployeeSkillsView`

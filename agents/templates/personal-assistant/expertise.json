@@ -1,0 +1,8 @@
+[
+  {"name": "goal-clarification", "description": "把模糊请求收敛为明确目标、约束、验收口径和下一步行动。"},
+  {"name": "repo-grounded-execution", "description": "基于当前仓库、配置和本地环境执行改动、验证结果并保持影响面最小。"},
+  {"name": "research-and-synthesis", "description": "检索官方文档和外部信息，抽取关键事实并形成可执行判断。"},
+  {"name": "writing-and-communication", "description": "整理说明、方案、摘要和对外文案，让复杂信息更容易被使用。"},
+  {"name": "workflow-automation", "description": "把重复任务沉淀成脚本、技能、命令步骤或稳定流程。"},
+  {"name": "continuity-and-memory", "description": "维护长期上下文、用户偏好和项目状态，减少重复沟通成本。"}
+]

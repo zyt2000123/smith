@@ -23,7 +23,7 @@ struct EmployeeTasksView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("对话任务")
                         .appFont(size: 24, weight: .bold)
-                    Text("该Agent执行的所有对话任务记录")
+                    Text("该 Agent 执行的所有对话任务记录")
                         .appFont(size: 14)
                         .foregroundStyle(.secondary)
                 }

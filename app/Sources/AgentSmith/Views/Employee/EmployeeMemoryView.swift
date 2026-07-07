@@ -38,7 +38,7 @@ struct EmployeeMemoryView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("记忆")
                         .appFont(size: 24, weight: .bold)
-                    Text("该Agent的长期记忆与学习记录")
+                    Text("该 Agent 的长期记忆与学习记录")
                         .appFont(size: 14)
                         .foregroundStyle(.secondary)
                 }

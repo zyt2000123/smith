@@ -10,7 +10,7 @@ output: structured project profile saved to memory/project/
 # Project Analysis Skill
 
 ## Goal
-Agent首次接触项目时，自动完成结构化分析，生成可复用的项目理解文档。
+Agent 首次接触项目时，自动完成结构化分析，生成可复用的项目理解文档。
 后续对话可直接引用分析结果，无需重复探索。
 
 ## Constraints

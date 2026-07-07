@@ -1,7 +1,7 @@
 import SwiftUI
 import Observation
 
-/// 会话级聊天状态：独立于视图生命周期，按Agent缓存常驻进程。
+/// 会话级聊天状态：独立于视图生命周期，按 Agent 缓存常驻进程。
 /// ConversationView 随页面切换销毁重建，但流式生成的 Task 和转写都挂在这里，
 /// 切走再切回不丢任何进行中的内容。
 @MainActor

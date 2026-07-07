@@ -6,7 +6,7 @@
 
 ## 产品概况
 
-QoderWake 是阿里巴巴旗下 Qoder 团队（国内品牌：通义灵码）于 2026 年 5 月推出的 AI Agent平台。与传统 AI 编码助手不同，它部署的是名为 Waker 的持久化 AI 智能体。每个 Waker 有名字、入职日期、工作记录，能 24/7 自主运作。
+QoderWake 是阿里巴巴旗下 Qoder 团队（国内品牌：通义灵码）于 2026 年 5 月推出的 AI Agent 平台。与传统 AI 编码助手不同，它部署的是名为 Waker 的持久化 AI 智能体。每个 Waker 有名字、入职日期、工作记录，能 24/7 自主运作。
 
 - 官网：qoder.com/qoderwake
 - 文档：docs.qoder.com/qoderwake/overview
@@ -20,7 +20,7 @@ QoderWake 是阿里巴巴旗下 Qoder 团队（国内品牌：通义灵码）于
 |---|---|---|
 | Qoder IDE | AI 编码 IDE | Electron（VS Code / Code-OSS 分支） |
 | QoderWork | AI 桌面助手 | 闭源，.dmg/.exe 分发 |
-| QoderWake | AI Agent平台 | 本地 daemon + 浏览器 Web Console |
+| QoderWake | AI Agent 平台 | 本地 daemon + 浏览器 Web Console |
 | Qoder Remote Control | 移动端伴侣 | iOS/Android，框架未确定 |
 
 ## 完整技术架构
@@ -240,7 +240,7 @@ version: "1.0.0"
 ```
 ~/.qoderwake/data/workers/<agent-id>/
   .qoder/
-    IDENTITY.md          # Agent身份：谁，负责什么
+    IDENTITY.md          # Agent 身份：谁，负责什么
     PERSONA.md           # 工作风格、表达方式、边界
     BIBLE.md             # 工作流、操作规范、验收标准
     TOOLS.md             # 工具配置

@@ -106,7 +106,7 @@ struct EmployeeDetailView: View {
                         dismiss()
                     }
                 } label: {
-                    Label("我的Agent", systemImage: "chevron.left")
+                    Label("我的 Agent", systemImage: "chevron.left")
                         .appFont(size: 13)
                         .foregroundStyle(.secondary)
                 }

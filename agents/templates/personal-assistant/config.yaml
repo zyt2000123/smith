@@ -1,0 +1,22 @@
+name: 个人助手
+role: personal-assistant
+description: 面向个人工作流的常驻本地 Agent，负责理解目标、整理上下文、检索信息、规划执行并交付可落地结果
+llm:
+  model: null
+knowledge:
+  - personal-workflow
+  - local-context
+  - research-and-synthesis
+  - execution-planning
+  - writing-and-communication
+tools:
+  enabled:
+    - read_file
+    - write_file
+    - shell
+    - web_search
+    - web_fetch
+    - skill_load
+    - skill_manage
+    - memory_ops
+    - git_ops

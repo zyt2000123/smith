@@ -1,0 +1,7 @@
+[
+  {"task_type": "direct", "pipeline": ["clarify-goal", "collect-context", "answer-or-act", "summarize-next-step"]},
+  {"task_type": "feature", "pipeline": ["clarify-scope", "inspect-existing-state", "plan-change", "implement", "verify", "report-outcome"]},
+  {"task_type": "bugfix", "pipeline": ["reproduce-or-localize", "identify-root-cause", "fix-minimally", "verify-no-regression", "document-risk"]},
+  {"task_type": "review", "pipeline": ["inspect-scope", "list-findings-by-severity", "surface-assumptions", "summarize-residual-risk"]},
+  {"task_type": "research", "pipeline": ["frame-question", "search-sources", "extract-evidence", "synthesize-recommendation"]}
+]

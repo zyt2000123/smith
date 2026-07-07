@@ -13,7 +13,7 @@
   - 修改 `engine/prompt/assembler.py` — 记忆层改为注入编译后的 `memory.md`
   - 修改 `engine/memory/dream.py` — 保留 secrets 过滤和去重，编译管线负责蒸馏
 - **具体改动**:
-  1. 实现 `compile_today()` / `compile_week()` / `compile_longterm()` / `compile_facts()` 四个函数，各自输出到Agent目录 `memory/today.md` 等
+  1. 实现 `compile_today()` / `compile_week()` / `compile_longterm()` / `compile_facts()` 四个函数，各自输出到 Agent 目录 `memory/today.md` 等
   2. 每个函数增加 MD5 指纹缓存（输入 session_id + updated_at 的哈希），相同则跳过
   3. `compile_today()` 和 `compile_week()` 使用 LLM 调用做摘要（复用 `engine/llm/client.py`）
   4. `assemble()` 读取四个编译文件拼成 `memory.md`，空栏写占位符
@@ -163,7 +163,7 @@
   - [ ] 技能安装是否有来源验证（防止恶意技能注入）
   - [ ] 技能自进化的评分阈值是否合理
   - [ ] 技能版本管理是否支持回滚
-  - [ ] Agent自装技能 (`~/.agent-smith/employees/<id>/skills/`) 与内置技能的优先级
+  - [ ] Agent 自装技能 (`~/.agent-smith/employees/<id>/skills/`) 与内置技能的优先级
   - [ ] 技能依赖关系是否被正确处理
 
 ---
@@ -209,7 +209,7 @@
   - `server/app/infrastructure/repositories/team_repo.py` — SQLite 持久化
   - `server/app/routers/` — 群聊路由
 - **检查要点**:
-  - [ ] Agent顺序回复的延迟是否可接受（3 个Agent = 3x LLM 调用时间）
+  - [ ] Agent 顺序回复的延迟是否可接受（3 个 Agent = 3x LLM 调用时间）
   - [ ] `@employee_id` 提及提取是否可靠（目前是简单字符串匹配）
   - [ ] 最近 20 条消息作为上下文是否足够 / 是否会超出 token 限制
   - [ ] SSE 流式输出中多个 Agent 交替输出时前端显示是否正确
@@ -299,7 +299,7 @@
 - **优先级**: P2
 - **预估工作量**: 5-7 天
 - **设计思路**:
-  1. **v1**: GitHub 仓库存放社区技能，`skill install <url>` 下载到Agent skills 目录
+  1. **v1**: GitHub 仓库存放社区技能，`skill install <url>` 下载到 Agent skills 目录
   2. **v2**: 独立市场服务，支持搜索/评分/版本管理
   3. **v3**: 根据角色和任务类型自动推荐技能
 - **涉及文件**:

@@ -123,7 +123,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 20) {
             Text("模型").appFont(size: 22, weight: .bold)
             card {
-                row("默认模型", sub: "Agent对话使用的 LLM") {
+                row("默认模型", sub: "Agent 对话使用的 LLM") {
                     Picker("", selection: $llmModel) { Text("GLM-4.7").tag("GLM-4.7"); Text("GPT-4o").tag("GPT-4o"); Text("Claude Sonnet").tag("Claude Sonnet") }.frame(width: 150)
                 }
                 Divider()
@@ -140,9 +140,9 @@ struct SettingsView: View {
             card {
                 tog("自动审核", sub: "自动审核额外访问权限请求", on: $autoReview)
                 Divider()
-                tog("Shell 受限模式", sub: "限制Agent执行系统命令", on: $shellRestricted)
+                tog("Shell 受限模式", sub: "限制 Agent 执行系统命令", on: $shellRestricted)
                 Divider()
-                tog("网络访问", sub: "允许Agent发起网络请求", on: $networkAllowed)
+                tog("网络访问", sub: "允许 Agent 发起网络请求", on: $networkAllowed)
             }
         }
     }

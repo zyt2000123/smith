@@ -88,7 +88,7 @@ struct ConversationView: View {
             )
     }
 
-    /// 会话状态常驻 ChatModel（按Agent缓存），视图随页面切换重建也不丢进行中的流
+    /// 会话状态常驻 ChatModel（按 Agent 缓存），视图随页面切换重建也不丢进行中的流
     private var chat: ChatModel {
         ChatModel.shared(for: activeConversation.id, api: apiClient)
     }
@@ -129,7 +129,7 @@ struct ConversationView: View {
         }
         conversations = items
 
-        // ContentView 传入的可能是遗留 id（如 "ivy"），按Agent名回退解析
+        // ContentView 传入的可能是遗留 id（如 "ivy"），按 Agent 名回退解析
         if !items.contains(where: { $0.id == selectedConversation }) {
             let key = selectedConversation.lowercased()
             selectedConversation = items.first(where: { $0.employeeName.lowercased() == key })?.id

@@ -63,9 +63,9 @@ struct ManagementView: View {
     private var header: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("我的Agent")
+                Text("我的 Agent")
                     .appFont(size: 26, weight: .bold)
-                Text("统一创建、管理和对话你的Agent")
+                Text("统一创建、管理和对话你的 Agent")
                     .appFont(size: 13)
                     .foregroundStyle(.secondary)
             }
@@ -73,7 +73,7 @@ struct ManagementView: View {
             Button {
                 showCreateSheet = true
             } label: {
-                Label("新建Agent", systemImage: "plus")
+                Label("新建 Agent", systemImage: "plus")
                     .appFont(size: 13, weight: .medium)
             }
             .buttonStyle(.borderedProminent)
@@ -95,7 +95,7 @@ struct ManagementView: View {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.tertiary)
                     .appFont(size: 12)
-                TextField("搜索Agent...", text: $searchText)
+                TextField("搜索 Agent...", text: $searchText)
                     .textFieldStyle(.plain)
                     .appFont(size: 13)
             }
@@ -108,7 +108,7 @@ struct ManagementView: View {
 
     private var employeeSegmentedControl: some View {
         HStack(spacing: 2) {
-            segmentButton("我的Agent", value: 0)
+            segmentButton("我的 Agent", value: 0)
             segmentButton("我的群组", value: 1)
         }
         .padding(2)

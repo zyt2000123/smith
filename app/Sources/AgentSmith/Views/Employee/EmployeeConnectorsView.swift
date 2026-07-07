@@ -9,7 +9,7 @@ struct EmployeeConnectorsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("连接器")
                         .appFont(size: 24, weight: .bold)
-                    Text("管理该Agent可使用的外部服务连接")
+                    Text("管理该 Agent 可使用的外部服务连接")
                         .appFont(size: 14)
                         .foregroundStyle(.secondary)
                 }
@@ -42,7 +42,7 @@ struct EmployeeConnectorsView: View {
                     .appFont(size: 16, weight: .medium)
                     .foregroundStyle(.secondary)
 
-                Text("添加连接器让Agent访问外部 API、数据库或第三方服务")
+                Text("添加连接器让 Agent 访问外部 API、数据库或第三方服务")
                     .appFont(size: 13)
                     .foregroundStyle(.secondary.opacity(0.7))
             }

@@ -19,7 +19,7 @@
 
 ### 1.1 目的
 
-定义 Agent-Smith Agent的记忆子系统：它要解决什么问题、如何设计、**为什么这样设计而不是别的方案**、做了哪些取舍、参考了哪些已有设计。
+定义 Agent-Smith Agent 的记忆子系统：它要解决什么问题、如何设计、**为什么这样设计而不是别的方案**、做了哪些取舍、参考了哪些已有设计。
 
 ### 1.2 问题陈述
 
@@ -41,7 +41,7 @@ LLM 是无状态的。一个"Agent"如果每次对话都从零开始，它就只
 | Dream | 周期性记忆整理：去重、剪枝、模式提取、清秘 |
 | 被动注入 | 组装 system prompt 时自动带入的记忆 |
 | 主动检索 | LLM 通过 `memory_ops` 工具自主发起的记忆查询 |
-| scope | 记忆作用域：`agent`（个体经验）/ `project`（跨Agent共识） |
+| scope | 记忆作用域：`agent`（个体经验）/ `project`（跨 Agent 共识） |
 
 ---
 
@@ -183,11 +183,11 @@ Evidence: conversation at 2026-07-05T10:00:00+00:00
 | 去重合并 | 关键词集合重叠率 ≥0.70 的条目分组；保最新条目，追加旧条目独有行 | `_OVERLAP_THRESHOLD=0.70` | 重复记忆使检索结果同质化 |
 | 模式提取 | 重叠 ≥0.5 的条目聚簇；簇大小 ≥3 生成一条 `Pattern (N entries): 共享关键词` 汇总 | `_PATTERN_MIN_COUNT=3` | Generative Agents 的 reflection：多次观察 → 一条抽象 |
 
-关键词重叠算法：`|A∩B| / min(|A|,|B|)`，关键词 = 3+ 字符的中英文词。复杂度 O(n²)——这是**有意接受的天花板**（详见 DR-08），当前单Agent条目量级（百级）下毫秒完成。
+关键词重叠算法：`|A∩B| / min(|A|,|B|)`，关键词 = 3+ 字符的中英文词。复杂度 O(n²)——这是**有意接受的天花板**（详见 DR-08），当前单 Agent 条目量级（百级）下毫秒完成。
 
 ### 4.4 混合检索（search.py）
 
-**索引结构**（`search.sqlite`，每Agent一个，WAL 模式）：
+**索引结构**（`search.sqlite`，每 Agent 一个，WAL 模式）：
 - `memory_fts`：FTS5 虚拟表（`entry_id, content, scope`，unicode61 分词）——**永远可用**（FTS5 内建于 SQLite）
 - `memory_vec`：sqlite-vec 虚拟表（`entry_id, embedding float[1024]`）——**可选**（依赖 sqlite-vec 扩展 + embedding 端点）
 
@@ -309,8 +309,8 @@ SearchIndex(memory_dir).open(embed_fn) / .index_entry() / .search() / .close()  
 
 - **候选**：(a) 全量 SQLite；(b) 专用向量库（Chroma/Qdrant/Milvus）；(c) 明文 .md 文件 + SQLite 派生索引
 - **决策**：(c)
-- **理由**：记忆是**用户资产**——本地Agent的记忆必须让用户能打开看、能改、能删（NFR-4）。明文文件天然可审计、可 Git、可迁移；(a) 对用户是黑盒；(b) 还引入独立部署（违反 NFR-3），且百级条目量远撑不满向量库的设计容量。参考 Claude Code 的 memory 目录形态（每条记忆一个 md 文件 + 索引文件）。
-- **代价**：文件 I/O 无事务；并发写同一Agent记忆可能竞态（单用户桌面产品，接受）；检索必须靠派生索引补偿。
+- **理由**：记忆是**用户资产**——本地 Agent 的记忆必须让用户能打开看、能改、能删（NFR-4）。明文文件天然可审计、可 Git、可迁移；(a) 对用户是黑盒；(b) 还引入独立部署（违反 NFR-3），且百级条目量远撑不满向量库的设计容量。参考 Claude Code 的 memory 目录形态（每条记忆一个 md 文件 + 索引文件）。
+- **代价**：文件 I/O 无事务；并发写同一 Agent 记忆可能竞态（单用户桌面产品，接受）；检索必须靠派生索引补偿。
 
 ### DR-02 压缩策略：时间分层编译，而非 MemGPT 分页 / 单一滚动摘要 / 不压缩纯 RAG
 
@@ -337,14 +337,14 @@ SearchIndex(memory_dir).open(embed_fn) / .index_entry() / .search() / .close()  
 
 - **候选**：(a) Elasticsearch/OpenSearch；(b) 独立向量库；(c) SQLite FTS5 + sqlite-vec 扩展
 - **决策**：(c)
-- **理由**：NFR-3（零部署）是硬约束——本地桌面产品要求 `pip install` 即完整功能。FTS5 内建于 SQLite（BM25 免费可得）；sqlite-vec 是单文件扩展，装不上就降级（可选依赖而非硬依赖）。每Agent一个独立 sqlite 文件，天然隔离，删Agent即删索引。
+- **理由**：NFR-3（零部署）是硬约束——本地桌面产品要求 `pip install` 即完整功能。FTS5 内建于 SQLite（BM25 免费可得）；sqlite-vec 是单文件扩展，装不上就降级（可选依赖而非硬依赖）。每 Agent 一个独立 sqlite 文件，天然隔离，删 Agent 即删索引。
 - **代价**：sqlite-vec 无 ANN 索引（暴力扫描），十万级向量后变慢——百级条目下无感；FTS5 的 unicode61 分词对中文按字切分，词组精度低于专业中文分词（由向量路和 RRF 补偿）。
 
 ### DR-06 融合算法：RRF，而非加权分数融合
 
 - **候选**：(a) 归一化分数加权（`α·BM25 + (1-α)·cosine`）；(b) Reciprocal Rank Fusion
 - **决策**：(b)
-- **理由**：BM25 分数与余弦相似度**量纲不可比**，归一化系数 α 需要针对语料调参——本系统每个Agent的记忆语料都不同，不存在全局最优 α。RRF 只用排名不用分数，免调参、对离群分数鲁棒，且是 IR 文献的成熟默认（Cormack et al. 2009，k=60）。
+- **理由**：BM25 分数与余弦相似度**量纲不可比**，归一化系数 α 需要针对语料调参——本系统每个 Agent 的记忆语料都不同，不存在全局最优 α。RRF 只用排名不用分数，免调参、对离群分数鲁棒，且是 IR 文献的成熟默认（Cormack et al. 2009，k=60）。
 - **代价**：丢弃分数幅度信息——"远超第二名的第一名"和"险胜的第一名"权重相同（top-5 场景影响可忽略）。
 
 ### DR-07 偏好学习：启发式 + 置信度计数，而非 LLM 判断
@@ -450,11 +450,11 @@ SearchIndex(memory_dir).open(embed_fn) / .index_entry() / .search() / .close()  
 | 局限 | 影响 | 演进 |
 |---|---|---|
 | embedding 端点复用 LLM `base_url` | 常见端点（GLM 等）无 `/embeddings`，向量路静默降级为 FTS5 | 配置层增加独立 `embedding_base_url`（优先级最高的待办） |
-| `project` 域无自动写入口 | 跨Agent共识层空转 | 在编译层增加"项目事实"判别，或团队会话落 project 域 |
+| `project` 域无自动写入口 | 跨 Agent 共识层空转 | 在编译层增加"项目事实"判别，或团队会话落 project 域 |
 | 非流式 `reply()` 的 `had_tools` 恒为 True | 非流式路径闲聊也落忆 | 与流式一致改为事件跟踪（非流式当前非主路径，优先级低） |
 | Dream 去重 O(n²) + 关键词法 | 千级条目后变慢、改述型重复漏检 | 换 embedding 聚类（DR-08 已预留升级路径） |
 | 模式提取产物信息量低（关键词罗列） | Pattern 条目对检索帮助有限 | 用 LLM 生成模式摘要替代关键词拼接 |
-| 编译触发绑定对话计数（每 5 次） | 低频使用的Agent编译滞后 | 增加基于时间的触发（如每日首次对话强制编译） |
+| 编译触发绑定对话计数（每 5 次） | 低频使用的 Agent 编译滞后 | 增加基于时间的触发（如每日首次对话强制编译） |
 | ~~`memory_ops` 工具与 store 目录布局不一致~~（已修复 2026-07-05） | 工具已按 scope 写子目录、跨目录检索、补 `last_accessed`，互通性测试 5/5 通过 | 残余：工具写入不进 search.sqlite 索引——为 `memory_ops.add` 补索引写入 |
 | 编译层字符限幅为提示词软约束 | LLM 超限时注入量轻微超预期 | `assemble_memory` 增加代码级截断，使 NFR-2 完全由代码保证 |
 
