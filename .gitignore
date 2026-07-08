@@ -9,9 +9,9 @@ _old_*/
 .build/
 __pycache__/
 *.pyc
+*.egg-info/
 .venv/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
 tmp/
-app/.swiftpm/

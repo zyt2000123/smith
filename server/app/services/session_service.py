@@ -5,7 +5,6 @@ from typing import AsyncGenerator
 
 from fastapi import HTTPException
 
-from common.filesystem import read_employee_file
 from engine.execution.agent_loop import reply as engine_reply, reply_events as engine_reply_events
 
 from ..domain.session import SessionOut, MessageOut
@@ -46,7 +45,12 @@ class SessionService:
         return [MessageOut(**r) for r in rows]
 
     async def send_message(
-        self, employee_id: str, session_id: str, content: str, context: str | None = None
+        self,
+        employee_id: str,
+        session_id: str,
+        content: str,
+        context: str | None = None,
+        skill_name: str | None = None,
     ) -> MessageOut:
         if not await self.session_repo.exists(session_id, employee_id):
             raise HTTPException(404, "Session not found")
@@ -63,7 +67,12 @@ class SessionService:
         # Call engine
         # context（工作目录/附件路径）由引擎侧拼接：LLM 可见，路由/记忆/落库均只用原文
         reply_text = await engine_reply(
-            employee_id, emp_name, content, history=history, context=context
+            employee_id,
+            emp_name,
+            content,
+            history=history,
+            context=context,
+            forced_skill=skill_name,
         )
 
         # Save assistant message
@@ -71,7 +80,12 @@ class SessionService:
         return MessageOut(**msg)
 
     async def stream_message(
-        self, employee_id: str, session_id: str, content: str, context: str | None = None
+        self,
+        employee_id: str,
+        session_id: str,
+        content: str,
+        context: str | None = None,
+        skill_name: str | None = None,
     ) -> AsyncGenerator[dict, None]:
         """Yield SSE event dicts. Streams text chunks as they arrive from the engine."""
         if not await self.session_repo.exists(session_id, employee_id):
@@ -92,7 +106,12 @@ class SessionService:
 
         full_reply = []
         async for ev in engine_reply_events(
-            employee_id, emp_name, content, history=history, context=context
+            employee_id,
+            emp_name,
+            content,
+            history=history,
+            context=context,
+            forced_skill=skill_name,
         ):
             t = ev.type.value
             if t == "text_delta":
@@ -102,11 +121,14 @@ class SessionService:
             elif t == "thinking":
                 yield sse("thinking", {"text": ev.data.get("text", ""), "done": bool(ev.data.get("done"))})
             elif t == "tool_call_start":
-                yield sse("tool_call", {"id": ev.data.get("id", ""), "name": ev.data.get("name", "")})
+                args = ev.data.get("arguments") or {}
+                hint = args.get("path") or args.get("file_path") or args.get("query") or args.get("command", "")
+                yield sse("tool_call", {"id": ev.data.get("id", ""), "name": ev.data.get("name", ""), "hint": str(hint)[:120]})
             elif t == "tool_call_result":
                 yield sse("tool_result", {
                     "id": ev.data.get("id", ""),
                     "error": bool(ev.data.get("error") or ev.data.get("blocked")),
+                    "blocked": bool(ev.data.get("blocked")),
                     "summary": ev.data.get("reason") or ev.data.get("content", "")[:120],
                 })
             elif t in ("skill_start", "skill_end"):

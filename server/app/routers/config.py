@@ -7,7 +7,8 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 
 
 class LLMConfig(BaseModel):
-    api_key: str
+    provider: str = "openai"
+    api_key: str | None = None
     base_url: str | None = None
     model: str = "gpt-5.2"
 
@@ -23,4 +24,9 @@ async def get_llm_config(svc: ConfigService = Depends(get_config_service)):
 
 @router.post("/llm")
 async def set_llm_config(body: LLMConfig, svc: ConfigService = Depends(get_config_service)):
-    return svc.set_llm_config(body.api_key, body.base_url, body.model)
+    return svc.set_llm_config(
+        provider=body.provider,
+        api_key=body.api_key,
+        base_url=body.base_url,
+        model=body.model,
+    )

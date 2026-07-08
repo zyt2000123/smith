@@ -19,6 +19,7 @@ from skill.registry import SkillRegistry
 from tool.interface import ToolCall
 from tool.registry import ToolRegistry
 from .backtrack import FailureLoopGuard, FailureSignature
+from .compression import compress
 from .events import EventType, ExecutionEvent
 from .gate import LLMGate, SkillRubricGate
 from .skill_chain import SkillChain
@@ -49,9 +50,7 @@ async def _react_loop(
     consecutive_errors = 0
 
     for _ in range(max_iters):
-        # Sliding window: keep system prompt + last 30 messages
-        if len(conversation) > 40:
-            conversation = [conversation[0]] + conversation[-30:]
+        conversation = await compress(conversation, llm)
 
         response = await llm.chat(conversation, tools=tools)
 
@@ -215,7 +214,7 @@ async def _react_event_loop(
 
         for tc in response.tool_calls:
             call = ToolCall(id=tc.id, name=tc.name, arguments=tc.arguments)
-            yield ExecutionEvent(EventType.TOOL_CALL_START, {"name": tc.name, "id": tc.id})
+            yield ExecutionEvent(EventType.TOOL_CALL_START, {"name": tc.name, "id": tc.id, "arguments": tc.arguments})
 
             if tool_guard is not None:
                 guard_result = tool_guard.check(call)
@@ -257,8 +256,23 @@ async def run_agent_stream(
     tool_guard: ToolGuard | None = None,
     max_react_iters: int = 20,
     history: list[dict] | None = None,
+    forced_skill: str | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Streaming version of run_agent — yields ExecutionEvents throughout execution."""
+    if forced_skill:
+        async for event in _run_forced_skill_stream(
+            llm,
+            tool_registry,
+            skill_registry,
+            user_message,
+            forced_skill,
+            tool_guard,
+            max_react_iters,
+            history=history,
+        ):
+            yield event
+        return
+
     base_messages = [
         {"role": "system", "content": system_prompt},
         *(history or []),
@@ -401,12 +415,25 @@ async def run_agent(
     tool_guard: ToolGuard | None = None,
     max_react_iters: int = 20,
     history: list[dict] | None = None,
+    forced_skill: str | None = None,
 ) -> str:
     """Orchestrate the full agent flow.
 
     DIRECT tasks run a simple ReAct loop.
     BUGFIX/FEATURE tasks iterate through a skill chain with gates and backtracking.
     """
+    if forced_skill:
+        return await _run_forced_skill(
+            llm,
+            tool_registry,
+            skill_registry,
+            user_message,
+            forced_skill,
+            tool_guard,
+            max_react_iters,
+            history=history,
+        )
+
     base_messages = [
         {"role": "system", "content": system_prompt},
         *(history or []),
@@ -537,6 +564,86 @@ def _merge_context(user_message: str, context: str | None) -> str:
     return f"{user_message}\n\n{context}" if context else user_message
 
 
+def _missing_skill_message(skill_registry: SkillRegistry, forced_skill: str) -> str:
+    available = ", ".join(
+        sorted(summary["name"] for summary in skill_registry.list_summaries())
+    )
+    if not available:
+        return f"Skill '{forced_skill}' not found. No skills are currently available."
+    return (
+        f"Skill '{forced_skill}' not found. "
+        f"Available skills: {available}"
+    )
+
+
+async def _run_forced_skill(
+    llm: LLMClient,
+    tool_registry: ToolRegistry,
+    skill_registry: SkillRegistry,
+    user_message: str,
+    forced_skill: str,
+    tool_guard: ToolGuard | None,
+    max_react_iters: int,
+    history: list[dict] | None = None,
+) -> str:
+    skill = skill_registry.get(forced_skill)
+    if skill is None:
+        return _missing_skill_message(skill_registry, forced_skill)
+
+    messages = [*(history or []), {"role": "user", "content": user_message}]
+    context = {"user_message": user_message, "task_type": "skill", "forced_skill": forced_skill}
+    return await execute_skill(
+        skill,
+        llm,
+        tool_registry,
+        messages,
+        context,
+        max_react_iters,
+        tool_guard=tool_guard,
+    )
+
+
+async def _run_forced_skill_stream(
+    llm: LLMClient,
+    tool_registry: ToolRegistry,
+    skill_registry: SkillRegistry,
+    user_message: str,
+    forced_skill: str,
+    tool_guard: ToolGuard | None,
+    max_react_iters: int,
+    history: list[dict] | None = None,
+) -> AsyncGenerator[ExecutionEvent, None]:
+    yield ExecutionEvent(EventType.ROUTE_DECIDED, {"type": "skill", "skill": forced_skill})
+
+    skill = skill_registry.get(forced_skill)
+    if skill is None:
+        yield ExecutionEvent(EventType.BLOCKED, {
+            "skill": forced_skill,
+            "reason": _missing_skill_message(skill_registry, forced_skill),
+        })
+        yield ExecutionEvent(EventType.TEXT_DELTA, {
+            "text": _missing_skill_message(skill_registry, forced_skill),
+        })
+        yield ExecutionEvent(EventType.DONE, {})
+        return
+
+    yield ExecutionEvent(EventType.SKILL_START, {"skill": forced_skill, "index": 0})
+    messages = [*(history or []), {"role": "user", "content": user_message}]
+    context = {"user_message": user_message, "task_type": "skill", "forced_skill": forced_skill}
+    output = await execute_skill(
+        skill,
+        llm,
+        tool_registry,
+        messages,
+        context,
+        max_react_iters,
+        tool_guard=tool_guard,
+    )
+    yield ExecutionEvent(EventType.SKILL_END, {"skill": forced_skill, "status": "passed"})
+    yield ExecutionEvent(EventType.TEXT_DELTA, {"text": output})
+    yield ExecutionEvent(EventType.DONE, {})
+
+
 async def _prepare(employee_id: str, name: str, user_message: str) -> _AgentSetup:
     """Shared setup: build LLM, registries, MCP tools, prompt, and route the task."""
     # Import here to avoid circular deps at module level
@@ -602,7 +709,9 @@ async def _prepare(employee_id: str, name: str, user_message: str) -> _AgentSetu
 
 async def reply(
     employee_id: str, name: str, user_message: str,
-    history: list[dict] | None = None, context: str | None = None,
+    history: list[dict] | None = None,
+    context: str | None = None,
+    forced_skill: str | None = None,
 ) -> str:
     """High-level entry point for the server layer.
 
@@ -620,6 +729,7 @@ async def reply(
             s.task_type, s.chain, guard,
             tool_guard=s.tool_guard,
             history=history,
+            forced_skill=forced_skill,
         )
 
         # Save conversation memory + learn preferences (best-effort, never break the reply)
@@ -640,7 +750,9 @@ async def reply(
 
 async def reply_events(
     employee_id: str, name: str, user_message: str,
-    history: list[dict] | None = None, context: str | None = None,
+    history: list[dict] | None = None,
+    context: str | None = None,
+    forced_skill: str | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Event-streaming entry point: yields structured ExecutionEvents
     (thinking / tool_call / text_delta / skill / done...) for Agent-style UIs."""
@@ -657,6 +769,7 @@ async def reply_events(
                 s.task_type, s.chain, guard,
                 tool_guard=s.tool_guard,
                 history=history,
+                forced_skill=forced_skill,
             ):
                 if event.type == EventType.TEXT_DELTA:
                     full_text.append(event.data.get("text", ""))

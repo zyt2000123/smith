@@ -50,6 +50,14 @@ async def execute(
         except OSError as e:
             return f"Error: cannot create directory {parent}: {e}"
 
+    # ponytail: snapshot before overwrite; skip on append (no data loss)
+    if not append:
+        try:
+            from snapshot import get_snapshot
+            get_snapshot().track(resolved)
+        except Exception:
+            pass
+
     mode = "a" if append else "w"
     try:
         with open(resolved, mode, encoding="utf-8") as f:

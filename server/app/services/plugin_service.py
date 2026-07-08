@@ -41,7 +41,11 @@ class PluginService:
     def list_plugins(self) -> list[dict]:
         plugins = self._registry.list_all()
         for p in plugins:
-            p["enabled"] = p["name"] in self._enabled
+            enabled = p["name"] in self._enabled
+            p["enabled"] = enabled
+            p["installed"] = True
+            p["status"] = "enabled" if enabled else "disabled"
+            p["skill_count"] = len(p.get("skills", []))
         return plugins
 
     def get_plugin(self, name: str) -> PluginManifest | None:

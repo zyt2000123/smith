@@ -11,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.cli import (
     BUILTIN_AGENT,
     _context_from_args,
+    _extract_shell_argv,
     _find_session_in_list,
+    _should_launch_shell,
     build_parser,
     ensure_builtin_agent,
     resolve_agent,
@@ -102,6 +104,19 @@ def test_chat_parser_accepts_session_resume() -> None:
 
     assert args.agent == BUILTIN_AGENT.key
     assert args.session == "sess-123"
+
+
+def test_extract_shell_argv_supports_default_and_alias() -> None:
+    assert _extract_shell_argv([]) == []
+    assert _extract_shell_argv(["shell", "--foo"]) == ["--foo"]
+    assert _extract_shell_argv(["chat"]) is None
+
+
+def test_should_launch_shell_requires_tty() -> None:
+    assert _should_launch_shell([], stdin_tty=True, stdout_tty=True) is True
+    assert _should_launch_shell(["shell"], stdin_tty=True, stdout_tty=True) is True
+    assert _should_launch_shell([], stdin_tty=False, stdout_tty=True) is False
+    assert _should_launch_shell(["chat"], stdin_tty=True, stdout_tty=True) is False
 
 
 def test_find_session_in_list_matches_by_id() -> None:

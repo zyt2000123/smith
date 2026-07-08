@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from .interface import ToolCall, ToolDefinition, ToolResult
 from .schema import function_to_schema
+from .truncation import truncate_output
 
 
 class ToolRegistry:
@@ -84,13 +85,11 @@ class ToolRegistry:
         except Exception as exc:
             result = ToolResult(call_id=call.id, content=str(exc), is_error=True)
 
-        # Truncate oversized output to protect context window
-        if len(result.content) > 4000:
-            result = ToolResult(
-                call_id=result.call_id,
-                content=result.content[:4000] + f"\n\n...[truncated, total {len(result.content)} chars]",
-                is_error=result.is_error,
-            )
+        result = ToolResult(
+            call_id=result.call_id,
+            content=truncate_output(result.content, tool_name=call.name),
+            is_error=result.is_error,
+        )
         return result
 
     def list_tools(self) -> list[ToolDefinition]:

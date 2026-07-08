@@ -4,140 +4,103 @@ This file is the working brief for Claude or any coding agent operating in this 
 
 ## 1. What This Project Is
 
-Agent-Smith is no longer positioned as a "digital employee platform".
+Agent-Smith is a local-first personal assistant Agent workbench that runs in the terminal.
 
-The current product direction is:
+- Smith is the single, always-on Agent
+- Smith uses the skill system to switch workflows per task type (debug, planning, review, etc.)
+- Smith uses knowledge injection to gain domain expertise when needed (frontend patterns, backend patterns, etc.)
+- No sub-agents, no multi-agent routing — one Agent, one conversation, accumulating memory over time
 
-- one self-built, local-first personal assistant Agent
-- CLI-first delivery
-- persistent context, memory, tools, and sessions
-- execution over chat-for-chat's-sake
+One-line:
 
-If you need a one-line description, use this:
-
-> Agent-Smith is a local personal assistant Agent that runs on the user's machine, keeps context over time, and helps execute real work through tools, sessions, and memory.
+> Agent-Smith is a local-first Agent workbench. Smith is your single resident assistant — it keeps context, accumulates memory, switches workflows via skills, and injects domain knowledge when a task demands it.
 
 ## 2. Current Priority
 
-The current priority is the Agent CLI, not the macOS app.
+The current priority is the terminal workbench experience:
 
-Unless the user explicitly asks for frontend work:
+1. Smith CLI (chat, sessions, agent management) works end-to-end
+2. Ink shell (`shell/`) provides the rich terminal UI
+3. Skill-based workflow switching works for different task types
+4. Memory accumulation across sessions
 
-- do not expand the SwiftUI app
-- do not spend time polishing macOS UI flows
-- do not introduce new product language around "multiple employees"
+## 3. Agent Architecture
 
-The current intended surface is:
+```
+User ←→ Smith (single Agent, always-on)
+           │
+           ├── skill system (workflow per task type)
+           │    ├── sde-debug → planning → testing → validation → review
+           │    ├── planning → architecture → testing → validation → review
+           │    └── direct reply (simple questions)
+           │
+           └── knowledge injection (domain expertise on demand)
+                ├── frontend knowledge (React, CSS, build tools, browser)
+                └── backend knowledge (API, DB, infra, performance)
+```
 
-- one built-in default Agent
-- session-based CLI interaction
-- ability to inspect, resume, and continue work from CLI
+Smith decides everything. Skills switch the workflow. Knowledge injection provides domain context. No agent routing needed.
 
-## 3. Product Language
+## 4. Product Language
 
-Prefer these terms in new docs and new user-facing CLI text:
+Use: "Smith", "Agent", "skill", "knowledge", "session", "memory", "tool", "template"
 
-- "Agent"
-- "personal assistant"
-- "built-in agent"
-- "session"
-- "memory"
-- "tooling"
-
-Avoid reintroducing these as the main product framing:
-
-- "digital employee"
-- "multiple employees as the primary story"
-- "hire employees"
-- "employee workbench"
-
-Important compatibility note:
-
-- internal code, database tables, API paths, and runtime directories still use `employee` / `employees`
-- keep those internal names unless the task explicitly requires a compatibility-breaking rename
-- treat that as an implementation shell, not the product truth
-
-## 4. What To Optimize For
-
-When making changes, optimize for:
-
-1. a single Agent that is actually usable from CLI
-2. minimal change on top of the current architecture
-3. reuse of existing `server`, `engine`, and `common` logic
-4. clear session continuity
-5. low-risk evolution rather than broad renaming
-
-Do not over-abstract. Do not build a parallel system if the current one can be adapted.
+Avoid: "sub-agent", "employee", "digital employee", "hire"
 
 ## 5. Architecture Boundaries
 
-This repo uses a five-layer architecture:
+Four layers, one-way dependencies:
 
-```text
-app/    -> frontend shell (currently not the priority)
-server/ -> platform and CLI-facing orchestration
-engine/ -> execution engine, task routing, ReAct loop, safety
-common/ -> config, filesystem, sqlite, shared infrastructure
-agents/ -> templates, built-in skills, built-in tools, safety rules
+```
+server/ → engine/ → common/
+          ↑
+        agents/
 ```
 
-Dependency direction is one-way:
+Plus `shell/` as the terminal frontend (Ink/React, calls server via HTTP).
 
-```text
-app -> server -> engine -> common
-                 ^
-                 |
-               agents
-```
+| Layer | Directory | Responsibility |
+|---|---|---|
+| Infrastructure | `common/` | Config, SQLite, filesystem, logging. Zero business logic. |
+| Execution | `engine/` | Agent framework: LLM, DAG+ReAct, memory, skills, tools, safety. Zero platform knowledge. |
+| Content | `agents/` | Template, built-in skills, built-in tools, safety rules. Pure content. |
+| Platform | `server/` | FastAPI + CLI. Orchestration, session/agent lifecycle, API. |
+| Terminal UI | `shell/` | Ink shell. Calls server HTTP. Auto-starts backend. |
 
 Rules:
 
-- `engine/` should not know FastAPI or product-shell concepts
-- `server/routers/` should stay thin
-- `server/services/` should orchestrate, not embed storage details
-- `agents/templates/` is where Agent identity lives
-- new Agent behavior should prefer template and CLI changes before engine rewrites
+- `engine/` must not know FastAPI, HTTP, or agent instance management
+- `server/routers/` stays thin — extract params, call service, return result
+- `agents/templates/personal-assistant/` is where Smith's identity lives
+- New capabilities → add skills or knowledge docs, not new agents
 
-## 6. Files That Matter Most Right Now
+## 6. Files That Matter
 
-For the current CLI-first direction, start here:
+| Area | Key Files |
+|---|---|
+| CLI entry | `server/app/cli.py` |
+| Agent lifecycle | `server/app/services/employee_service.py` (pending rename to agent_service) |
+| Chat + execution | `server/app/services/session_service.py` |
+| ReAct loop | `engine/execution/agent_loop.py` |
+| Task routing | `engine/execution/task_router.py` |
+| Skill chain | `engine/execution/skill_chain.py` |
+| Prompt assembly | `engine/prompt/assembler.py` |
+| Smith template | `agents/templates/personal-assistant/` |
+| Terminal shell | `shell/src/index.tsx` |
 
-- `server/app/cli.py`
-- `server/app/services/session_service.py`
-- `server/app/services/employee_service.py`
-- `server/app/infrastructure/repositories/session_repo.py`
-- `agents/templates/personal-assistant/`
-- `README.md`
-- `docs/01-产品设计与定位.md`
-- `docs/02-系统架构.md`
+## 7. Template System
 
-If you are adding or changing CLI features, prefer building on top of existing session and message services instead of bypassing them.
+Only `personal-assistant` is active — it defines Smith. The other 8 templates in `agents/templates/` are frozen legacy from the old multi-agent design. Their useful content (toolbox.md, expertise.json) may be extracted into knowledge docs later, but the templates themselves are not loaded or referenced.
 
-## 7. Implementation Guidance
+## 8. Implementation Guidance
 
-When editing this repo:
+- Inspect current code first; prefer existing patterns
+- Keep changes local; preserve compatibility unless asked to break it
+- New domain expertise → knowledge docs injected via assembler, not new templates
+- New task workflows → SKILL.md files, not new agents
+- The frozen templates stay in the repo but are not part of the product surface
 
-- inspect current code first
-- prefer the existing patterns
-- keep changes local
-- preserve compatibility unless the user asks to break it
-- write docs that reflect the actual product direction, not the old one
-
-Good examples of the current direction:
-
-- one built-in `personal-assistant` template
-- CLI commands for ensuring the agent exists
-- session listing, session inspection, and session resume
-
-Bad examples:
-
-- adding more "demo employees" as the main flow
-- building frontend-first features while CLI remains incomplete
-- renaming core storage/API internals without a migration plan
-
-## 8. Testing And Verification
-
-For CLI and backend work, default to these checks:
+## 9. Testing And Verification
 
 ```bash
 cd server && uv run --with pytest --with pytest-asyncio pytest tests/test_cli.py
@@ -147,36 +110,11 @@ cd server && uv run python -m app.cli sessions list
 cd server && uv run python -m app.cli chat --help
 ```
 
-If you add a CLI command, verify:
-
-- parser help renders correctly
-- the command works against the real local database path
-- the command composes with the built-in personal assistant flow
-
-## 9. Documentation Standard
-
-When rewriting docs in this repo:
-
-- start from the real communication goal
-- keep the language concrete
-- prefer first-principles explanation over fluffy positioning
-- keep it simple
-- do not be vague
-
-If a document still reflects the old "digital employee" framing, update it toward:
-
-- single-Agent framing
-- CLI-first reality
-- compatibility note where old `employee` naming still exists
-
 ## 10. Default Decision Rule
 
 If a choice is unclear, prefer the option that:
 
-- strengthens the single-Agent CLI experience
-- preserves current architecture
-- avoids broad renames
-- leaves the frontend untouched
-- makes the system more usable today
-
-That is the default path unless the user explicitly redirects the work.
+- makes the single-Agent terminal experience more usable
+- reuses existing skill/knowledge infrastructure
+- avoids introducing multi-agent complexity
+- keeps changes minimal and reversible

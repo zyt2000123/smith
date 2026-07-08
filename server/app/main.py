@@ -13,12 +13,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from common.database import get_db, close_db
-from .routers import employees, sessions, templates, tasks, files, config, auth, stats, auto_tasks, plugins, teams
+from .routers import employees, sessions, templates, tasks, files, config, auth, stats, auto_tasks, plugins, teams, skills
 from .services.scheduler import run_scheduler
 from .services.plugin_service import PluginService
 
 from common.config import BUILTIN_PLUGINS_DIR
 _plugin_service = PluginService(BUILTIN_PLUGINS_DIR)
+plugins.set_service(_plugin_service)
 
 
 @asynccontextmanager
@@ -55,6 +56,7 @@ app.include_router(auth.router)
 app.include_router(stats.router)
 app.include_router(auto_tasks.router)
 app.include_router(plugins.router)
+app.include_router(skills.router)
 app.include_router(teams.router)
 
 

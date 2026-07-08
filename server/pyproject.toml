@@ -1,7 +1,7 @@
 [project]
 name = "agent-smith-server"
 version = "0.2.0"
-description = "Agent-Smith local digital employee server"
+description = "Agent-Smith local execution agent CLI and server"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
@@ -15,8 +15,18 @@ dependencies = [
     "tiktoken>=0.13.0",
 ]
 
+[project.scripts]
+smith = "app.cli:main"
+
 [project.optional-dependencies]
 dev = ["httpx>=0.28", "pytest>=8.0", "pytest-asyncio>=0.25"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
 
 [tool.uv]
 # crawl4ai 依赖瘦身：我们只用 arun→markdown 抓取路径，以下传递依赖经逐一

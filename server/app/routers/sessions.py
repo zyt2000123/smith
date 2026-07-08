@@ -30,9 +30,23 @@ async def list_messages(employee_id: str, session_id: str, limit: int = 0, offse
 
 @router.post("/{session_id}/messages", response_model=MessageOut, status_code=201)
 async def send_message(employee_id: str, session_id: str, body: MessageCreate, svc: SessionService = Depends(get_session_service)):
-    return await svc.send_message(employee_id, session_id, body.content, context=body.context)
+    return await svc.send_message(
+        employee_id,
+        session_id,
+        body.content,
+        context=body.context,
+        skill_name=body.skill_name,
+    )
 
 
 @router.post("/{session_id}/messages/stream")
 async def stream_message(employee_id: str, session_id: str, body: MessageCreate, svc: SessionService = Depends(get_session_service)):
-    return EventSourceResponse(svc.stream_message(employee_id, session_id, body.content, context=body.context))
+    return EventSourceResponse(
+        svc.stream_message(
+            employee_id,
+            session_id,
+            body.content,
+            context=body.context,
+            skill_name=body.skill_name,
+        )
+    )
