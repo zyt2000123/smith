@@ -1,6 +1,5 @@
 import {Box, Text} from "ink";
-import {Marked} from "marked";
-import {markedTerminal} from "marked-terminal";
+import {MarkdownText} from "@assistant-ui/react-ink-markdown";
 
 import type {StreamEvent} from "./api.js";
 
@@ -70,9 +69,6 @@ type ToolGroupBlock = {
 };
 type RenderBlock = ThinkingBlock | ToolBlock | SkillBlock | ToolGroupBlock;
 
-const md = new Marked();
-md.use(markedTerminal({reflowText: true, width: 80}) as Parameters<typeof md.use>[0]);
-
 function createId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -93,14 +89,6 @@ function truncateLines(text: string, max = 4): {text: string; hidden: number} {
     text: lines.slice(0, max).join("\n"),
     hidden: lines.length - max,
   };
-}
-
-function renderMarkdown(text: string): string {
-  try {
-    return String(md.parse(text)).trimEnd();
-  } catch {
-    return text;
-  }
 }
 
 function findLastTurnIndex(entries: TranscriptEntry[]): number {
@@ -162,11 +150,6 @@ function nextSkillState(status: string): SkillState {
     return "running";
   }
   return "done";
-}
-
-function renderSystemText(text: string): string {
-  const trimmed = text.trim();
-  return trimmed ? renderMarkdown(trimmed) : text;
 }
 
 export function createSystemEntry(text: string, tone: SystemTone = "info"): SystemEntry {
@@ -396,11 +379,16 @@ export function applyStreamEvent(
 }
 
 function SystemMessage({entry}: {entry: SystemEntry}) {
+  const trimmed = entry.text.trim();
   return (
     <Box marginBottom={1} paddingLeft={1}>
-      <Text color={entry.tone === "error" ? ERROR : MUTED}>
-        {renderSystemText(entry.text)}
-      </Text>
+      {trimmed ? (
+        <MarkdownText text={trimmed} />
+      ) : (
+        <Text color={entry.tone === "error" ? ERROR : MUTED}>
+          {entry.text}
+        </Text>
+      )}
     </Box>
   );
 }
@@ -576,9 +564,11 @@ function TurnViewWithMode(
         <Box flexDirection="column" marginTop={1}>
           <Text color={ASSISTANT} bold>smith</Text>
           <Box paddingLeft={1}>
-            <Text color={hasAssistantBody ? INFO : MUTED}>
-              {hasAssistantBody ? renderMarkdown(assistantBody) : "Processing..."}
-            </Text>
+            {hasAssistantBody ? (
+              <MarkdownText text={assistantBody} />
+            ) : (
+              <Text color={MUTED}>Processing...</Text>
+            )}
           </Box>
         </Box>
       ) : null}
