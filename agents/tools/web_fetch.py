@@ -3,9 +3,14 @@
 JS 渲染页面（SPA / 动态加载）也能抓到正文；crawl4ai 不可用或失败时退回 urllib 原始抓取。
 """
 
+from __future__ import annotations
+
 import asyncio
-import urllib.request
+import ipaddress
+import socket
 import urllib.error
+import urllib.parse
+import urllib.request
 
 TOOL_META = {
     "name": "web_fetch",
@@ -34,16 +39,69 @@ TOOL_META = {
 MAX_CHARS = 40_000
 MAX_TIMEOUT = 60
 BLOCKED_SCHEMES = {"file", "ftp", "data"}
+BLOCKED_HOSTS = {"localhost"}
+
+
+def _blocked_ip_reason(host: str) -> str | None:
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return None
+
+    if ip.is_loopback:
+        return "loopback address"
+    if ip.is_private:
+        return "private network address"
+    if ip.is_link_local:
+        return "link-local address"
+    if ip.is_multicast:
+        return "multicast address"
+    if ip.is_reserved:
+        return "reserved address"
+    if ip.is_unspecified:
+        return "unspecified address"
+    return None
+
+
+def _validate_url(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    scheme = parsed.scheme.lower()
+    if scheme in BLOCKED_SCHEMES:
+        return f"scheme '{scheme}' is not allowed. Only http/https supported."
+    if scheme not in {"http", "https"}:
+        return "URL must start with http:// or https://"
+    if not parsed.hostname:
+        return "URL must include a hostname"
+
+    host = parsed.hostname.rstrip(".").lower()
+    if host in BLOCKED_HOSTS or host.endswith(".localhost"):
+        return "localhost targets are not allowed"
+
+    reason = _blocked_ip_reason(host)
+    if reason:
+        return f"host resolves to a blocked {reason}"
+
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        return f"could not resolve host '{host}': {e}"
+
+    for info in infos:
+        sockaddr = info[4]
+        resolved_host = sockaddr[0]
+        reason = _blocked_ip_reason(resolved_host)
+        if reason:
+            return f"host resolves to a blocked {reason}: {resolved_host}"
+
+    return None
 
 
 async def execute(*, url: str, timeout: int = 30) -> str:
     timeout = min(max(1, timeout), MAX_TIMEOUT)
 
-    scheme = url.split("://")[0].lower() if "://" in url else ""
-    if scheme in BLOCKED_SCHEMES:
-        return f"Error: scheme '{scheme}' is not allowed. Only http/https supported."
-    if not url.startswith(("http://", "https://")):
-        return "Error: URL must start with http:// or https://"
+    validation_error = _validate_url(url)
+    if validation_error:
+        return f"Error: {validation_error}"
 
     try:
         return await _fetch_browser(url, timeout)

@@ -1,0 +1,64 @@
+"""List directory tool — tree-style directory listing."""
+
+import os
+
+TOOL_META = {
+    "name": "list_dir",
+    "description": (
+        "List files and directories in a path. Returns a tree-style view. "
+        "Use to understand project structure before reading specific files."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Directory to list", "default": "."},
+            "max_depth": {"type": "integer", "description": "Max directory depth (1-5)", "default": 2},
+        },
+        "required": [],
+    },
+}
+
+MAX_ENTRIES = 300
+EXCLUDED = {".git", "node_modules", "__pycache__", ".venv", "dist", ".build", ".DS_Store", ".egg-info"}
+
+
+async def execute(*, path: str = ".", max_depth: int = 2) -> str:
+    base = os.path.abspath(path)
+    if not os.path.isdir(base):
+        return f"Error: not a directory: {base}"
+
+    max_depth = max(1, min(max_depth, 5))
+    lines: list[str] = [f"# {base}"]
+    count = 0
+
+    def walk(dir_path: str, prefix: str, depth: int) -> None:
+        nonlocal count
+        if depth > max_depth or count >= MAX_ENTRIES:
+            return
+        try:
+            entries = sorted(os.listdir(dir_path))
+        except PermissionError:
+            return
+
+        dirs = [e for e in entries if os.path.isdir(os.path.join(dir_path, e)) and e not in EXCLUDED]
+        files = [e for e in entries if os.path.isfile(os.path.join(dir_path, e)) and e not in EXCLUDED]
+
+        for f in files:
+            if count >= MAX_ENTRIES:
+                return
+            size = os.path.getsize(os.path.join(dir_path, f))
+            size_str = f"{size}B" if size < 1024 else f"{size/1024:.1f}K" if size < 1048576 else f"{size/1048576:.1f}M"
+            lines.append(f"{prefix}{f}  {size_str}")
+            count += 1
+
+        for d in dirs:
+            if count >= MAX_ENTRIES:
+                return
+            lines.append(f"{prefix}{d}/")
+            count += 1
+            walk(os.path.join(dir_path, d), prefix + "  ", depth + 1)
+
+    walk(base, "", 1)
+    if count >= MAX_ENTRIES:
+        lines.append(f"\n...truncated at {MAX_ENTRIES} entries")
+    return "\n".join(lines)

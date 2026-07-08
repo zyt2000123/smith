@@ -182,19 +182,19 @@ Verify 失败 → 回退到 Implementation，修复后重新验证
 
 9 个内置模板，位于 `agents/templates/` 目录下：
 
-| 模板目录 | 角色名称 | 有 shell | 特化领域 |
-|----------|---------|----------|---------|
+| 模板目录 | 角色名称 | shell-native 默认 | 特化领域 |
+|----------|---------|-------------------|---------|
 | `personal-assistant` | 个人助手 | Yes | 目标澄清、本地执行、信息检索、写作整理、长期上下文维护 |
 | `backend-engineer` | 后端工程师 | Yes | API 开发、数据库设计、安全、缓存策略、消息队列 |
 | `frontend-engineer` | 前端工程师 | Yes | React 模式、CSS 布局、无障碍、性能优化、设计系统 |
 | `devops-engineer` | 运维工程师 | Yes | CI/CD 管道、容器编排、IaC、监控告警、云服务 |
 | `test-engineer` | 测试工程师 | Yes | 测试模式、测试框架、边界分析、Mock 策略、CI 测试 |
 | `data-analyst` | 数据分析师 | Yes | SQL 分析、统计方法、数据可视化、业务指标、数据质量 |
-| `product-manager` | 产品经理 | No | 用户研究、产品策略、需求撰写、数据分析、竞品分析 |
-| `content-ops` | 内容运营 | No | 技术文档、内容策略、风格指南、信息架构、SEO 基础 |
-| `ui-designer` | UI 设计师 | No | 设计系统、交互模式、视觉层级、无障碍标准、响应式设计 |
+| `product-manager` | 产品经理 | Yes, 可按配置收窄 | 用户研究、产品策略、需求撰写、数据分析、竞品分析 |
+| `content-ops` | 内容运营 | Yes, 可按配置收窄 | 技术文档、内容策略、风格指南、信息架构、SEO 基础 |
+| `ui-designer` | UI 设计师 | Yes, 可按配置收窄 | 设计系统、交互模式、视觉层级、无障碍标准、响应式设计 |
 
-**有 shell vs 无 shell**：技术岗位（后端/前端/运维/测试/数据分析）拥有 shell 工具，可执行命令行操作；非技术岗位（产品/内容/设计）无 shell 访问权限。
+**shell-native 默认**：Agent-Smith 的 Agent 定位是本地终端原生执行体，默认具备 shell 能力；产品/内容/设计类模板也不再从产品定义上禁止 shell。是否收窄某个 Agent 的工具集，应通过 `employees/<id>/config.yaml` 的 `tools.enabled/disabled` 或更细粒度 guard 配置完成，而不是把「角色类型」和「本地执行权限」绑定死。
 
 **共性**：所有模板共享同一工作流骨架（5 步：Understand → Investigate → Implement → Verify → Deliver）和强制技能链，差异仅在领域专有内容（知识标签、专家能力、风格标签、管线步骤）。
 

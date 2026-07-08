@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import traceback
 from pathlib import Path
 from typing import Any, Callable
@@ -21,6 +22,8 @@ class ToolRegistry:
         parameters: dict,
         func: Callable,
     ) -> None:
+        if name in self._tools:
+            raise ValueError(f"Duplicate tool registered: {name}")
         defn = ToolDefinition(name=name, description=description, parameters=parameters)
         self._tools[name] = (defn, func)
 
@@ -44,10 +47,18 @@ class ToolRegistry:
                 meta: dict[str, Any] = getattr(mod, "TOOL_META", {})
                 execute_fn: Callable | None = getattr(mod, "execute", None)
                 if meta and execute_fn:
+                    name = meta.get("name")
+                    if not isinstance(name, str) or not name:
+                        raise ValueError(f"{py_file} has invalid TOOL_META.name")
+                    if not callable(execute_fn):
+                        raise ValueError(f"{py_file} execute is not callable")
+                    parameters = meta.get("parameters", {})
+                    if parameters and not isinstance(parameters, dict):
+                        raise ValueError(f"{py_file} TOOL_META.parameters must be a dict")
                     self.register(
-                        name=meta["name"],
+                        name=name,
                         description=meta.get("description", ""),
-                        parameters=meta.get("parameters", {}),
+                        parameters=parameters,
                         func=execute_fn,
                     )
             except Exception:
@@ -81,7 +92,11 @@ class ToolRegistry:
                 content = await func(**call.arguments)
             else:
                 content = func(**call.arguments)
-            result = ToolResult(call_id=call.id, content=str(content))
+            result = ToolResult(
+                call_id=call.id,
+                content=str(content),
+                is_error=_looks_like_tool_error(str(content)),
+            )
         except Exception as exc:
             result = ToolResult(call_id=call.id, content=str(exc), is_error=True)
 
@@ -94,3 +109,21 @@ class ToolRegistry:
 
     def list_tools(self) -> list[ToolDefinition]:
         return [defn for defn, _ in self._tools.values()]
+
+
+_EXIT_CODE_RE = re.compile(r"^\[exit_code=(-?\d+)\]")
+
+
+def _looks_like_tool_error(content: str) -> bool:
+    """Detect provider-level failures returned as text.
+
+    Tool providers historically returned strings instead of ToolResult. Treat
+    the common failure prefixes as errors so the ReAct loop can recover.
+    """
+
+    stripped = content.lstrip()
+    if stripped.startswith(("Error:", "[BLOCKED]", "Memory rejected:")):
+        return True
+
+    match = _EXIT_CODE_RE.match(stripped)
+    return bool(match and int(match.group(1)) != 0)

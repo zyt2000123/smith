@@ -14,6 +14,10 @@ def _check(command):
     return ToolGuard(_RULES).check(ToolCall(id="t", name="shell", arguments={"command": command}))
 
 
+def _check_tool(name, arguments):
+    return ToolGuard(_RULES).check(ToolCall(id="t", name=name, arguments=arguments))
+
+
 def test_pip_install_in_user_project_allowed():
     assert _check("pip install requests").allowed
 
@@ -33,6 +37,20 @@ def test_uv_add_in_user_project_allowed():
 
 def test_rm_platform_data_blocked():
     assert not _check("rm -rf ~/.agent-smith/employees").allowed
+
+
+def test_path_tools_are_guarded():
+    blocked_calls = [
+        ("grep", {"pattern": "root", "path": "/etc"}),
+        ("glob_files", {"pattern": "*.conf", "path": "/etc"}),
+        ("list_dir", {"path": "/etc"}),
+        ("edit_file", {"path": "/etc/hosts", "old_string": "a", "new_string": "b"}),
+        ("git_ops", {"action": "worktree_remove", "path": "/etc"}),
+        ("git_ops", {"action": "commit", "cwd": str(Path.cwd()), "files": ["/etc/passwd"]}),
+        ("shell", {"command": "pwd", "cwd": "/etc"}),
+    ]
+    for name, arguments in blocked_calls:
+        assert not _check_tool(name, arguments).allowed, name
 
 
 if __name__ == "__main__":

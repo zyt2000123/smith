@@ -41,6 +41,7 @@ Agent-Smith 交付的不是"聊天机器人"，而是**本地 Agent**：
 - **有过程**：复杂任务走强制的技能链（规划 → 测试策略 → 验证 → 评审），每步有质量门禁
 - **有成长**：记忆会积累、编译、遗忘；偏好会被自动学习；技能可以自装自改
 - **有边界**：破坏性操作被规则层拦截，产出必须带证据才能通过门禁
+- **有本地执行力**：它是 terminal-native / shell-native 的本地进程 Agent，`shell` 是一等执行能力，结构化工具是对 shell/file/git/web 常见操作的安全封装
 
 ### 1.2 核心哲学：宏观确定性，微观自由度
 
@@ -490,6 +491,17 @@ preview（生成计划）/ apply（执行）两段式，四个动作：
 
 ## 八、工具系统设计
 
+### 8.0 工具定位：shell-native，但不是裸 shell
+
+Agent-Smith 的工具系统按 **本地终端 Agent** 设计：ReAct 循环里的 LLM 可以选择工具、传参、观察结果，其中 `shell` 是主执行通道。`read_file`、`write_file`、`grep`、`git_ops`、`web_fetch` 等工具不是替代 shell 的另一套权限体系，而是把高频操作结构化，让 UI、日志、guard 和错误处理更稳定。
+
+因此工具系统的设计边界是：
+
+- **能力优先于工具名**：安全策略按文件访问、网络访问、Git 副作用、写入、删除、secret 访问等能力建模，而不是只看调用的是不是 `shell`。
+- **结构化工具优先复用同一 guard**：能枚举文件、读取内容、修改文件或移除 worktree 的工具，都必须进入文件边界检查；能访问网络的工具必须进入网络边界检查。
+- **shell 放行不等于无审计**：本地任务默认可执行，但敏感路径、破坏性命令、内网地址、密钥文件、强制 push 等高风险行为要被拦截或要求用户显式确认。
+- **错误作为观察返回**：工具失败不应炸掉 Agent 主循环，而应作为 `ToolResult(is_error=True)` 返回，让 LLM 换策略或向用户报告。
+
 ### 8.1 Provider 约定：一个文件一个工具，零框架依赖
 
 `agents/tools/*.py` 每个文件只需两个顶层符号：
@@ -505,18 +517,21 @@ async def execute(**kwargs) -> str: ...   # 同步函数也支持
 
 | 工具 | 职责 |
 |---|---|
-| `read_file` / `write_file` | 文件读写（受 FileGuard 目录白名单约束） |
+| `read_file` / `write_file` / `edit_file` | 文件读写和精确替换（受 FileGuard 目录白名单约束） |
+| `grep` / `glob_files` / `list_dir` | 文件搜索与目录枚举（同样受 FileGuard 约束） |
 | `shell` | 命令执行（受 dangerous_commands.json 规则拦截） |
-| `git_ops` | Git 操作 |
-| `web_fetch` | 网页抓取 |
+| `git_ops` | Git 操作（提交前检查敏感文件，worktree/path 参数进入 FileGuard） |
+| `web_search` / `web_fetch` | 搜索与网页抓取（只允许 http/https；拒绝 localhost、私网、link-local 等目标） |
 | `memory_ops` | 记忆 CRUD（search/add/update/remove，与 FileMemoryStore 同格式互通） |
 | `skill_load` | 按名加载 SKILL.md 全文（技能的运行时"翻书"） |
 | `skill_manage` | 技能管理：list/get/create/edit/patch/versions/rollback（内置技能只读） |
+| `todo` | 会话内任务列表（用于多步工作进度跟踪） |
 
 ### 8.3 执行保护
 
 - 未知工具 / 抛异常 → 一律转成 `ToolResult(is_error=True)`，**工具失败永远不炸主循环**，作为观察值交还 LLM
-- 输出超 4000 字符截断并标注总长（`tool/registry.py:88`）——保护上下文窗口
+- 返回 `Error:`、`Memory rejected:` 或非零 `[exit_code=...]` 的工具结果，也视为 `is_error=True`
+- 输出超出预算时截断并保存完整输出路径（`tool/truncation.py`）——保护上下文窗口
 - `schema.py` 提供 `function_to_schema()`：从 Python 类型注解 + docstring 自动生成 OpenAI 工具 schema（Optional → 非必填，list[X] → array）
 
 ### 8.4 MCP 外接（tool/mcp_client.py）
@@ -593,7 +608,7 @@ execute_skill(): SKILL.md 全文 + 链上下文 ──作为独立 system prompt
 | 层 | 机制 | 实现 |
 |---|---|---|
 | L1 规则拦截 | 工具调用前正则匹配危险模式 | `ToolGuard` + `agents/safety/dangerous_commands.json` |
-| L2 文件边界 | 路径白名单 + 敏感目录黑名单 | `FileGuard`（tool_guard.py:17） |
+| L2 文件边界 | 路径白名单 + 敏感目录黑名单；覆盖所有路径型工具 | `FileGuard`（tool_guard.py:17） |
 | L3 质量门禁 | 产出必须带真实证据，防"谎报成功" | Gate 体系（6.5） |
 | L4 提交防线 | 敏感文件（.env/credentials/密钥）禁止入库 | `PRGate`（gate.py:327） |
 | L5 记忆消毒 | 已落库的秘密被周期清除 | Dream 清秘（7.4） |
@@ -611,7 +626,9 @@ execute_skill(): SKILL.md 全文 + 链上下文 ──作为独立 system prompt
 
 覆盖类别：命令注入、fork 炸弹/死循环/巨型文件（资源滥用）、inline eval/exec（代码执行）、rm -rf / DROP TABLE / git --force / dd 等破坏性命令。`tools` 字段限定规则作用域；`excludePatterns` 用白名单精修误报（如允许 `| grep`）。
 
-**L2 语义**：默认允许 `$HOME`、`/tmp`、cwd；但 `.ssh/.gnupg/.aws/.kube` **在白名单内也一律拒绝**。shell 命令中的绝对路径会被正则提取后逐一过检。
+**L2 语义**：默认允许 `$HOME`、`/tmp`、cwd；但 `.ssh/.gnupg/.aws/.kube` **在白名单内也一律拒绝**。shell 命令中的绝对路径会被正则提取后逐一过检；`read_file/write_file/edit_file/grep/glob_files/list_dir/git_ops/shell.cwd` 等路径参数也进入同一套 FileGuard。
+
+**网络语义**：`web_fetch` 只允许 http/https，并拒绝 localhost、loopback、private、link-local、reserved、unspecified 等地址。Agent 是本地进程，不应把用户机器的内网访问能力变成默认外部抓取能力。
 
 **统一处置哲学**：拦截 ≠ 终止。所有拦截以 `[BLOCKED] 原因` 作为工具观察返回，LLM 得知边界后自行调整方案；连续 3 次受阻才触发"换方法"提示（6.4）。
 

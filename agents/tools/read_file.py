@@ -27,7 +27,8 @@ TOOL_META = {
     }
 }
 
-MAX_FILE_SIZE = 50 * 1024  # 50KB
+MAX_READ_BYTES = 50 * 1024  # 50KB preview budget per call
+MAX_LIMIT = 2000
 
 
 async def execute(*, path: str, offset: int = 0, limit: int = 500) -> str:
@@ -39,29 +40,55 @@ async def execute(*, path: str, offset: int = 0, limit: int = 500) -> str:
     if not os.path.isfile(resolved):
         return f"Error: not a regular file: {resolved}"
 
-    file_size = os.path.getsize(resolved)
-    if file_size > MAX_FILE_SIZE:
-        return (
-            f"Error: file too large ({file_size} bytes, max {MAX_FILE_SIZE} bytes). "
-            f"Use offset/limit to read a portion."
-        )
+    start = max(0, offset)
+    limit = min(max(1, limit), MAX_LIMIT)
 
     try:
         with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
+            selected: list[str] = []
+            selected_bytes = 0
+            last_line = start
+            hit_byte_limit = False
+
+            for line_no, line in enumerate(f, start=1):
+                if line_no <= start:
+                    continue
+                if len(selected) >= limit:
+                    break
+
+                encoded = line.encode("utf-8")
+                line_bytes = len(encoded)
+                if selected_bytes + line_bytes > MAX_READ_BYTES:
+                    if not selected:
+                        remaining = max(1, MAX_READ_BYTES - selected_bytes)
+                        line = encoded[:remaining].decode("utf-8", errors="replace")
+                        selected.append(line)
+                        last_line = line_no
+                    hit_byte_limit = True
+                    break
+
+                selected.append(line)
+                selected_bytes += line_bytes
+                last_line = line_no
+
+                if selected_bytes >= MAX_READ_BYTES:
+                    hit_byte_limit = True
+                    break
     except PermissionError:
         return f"Error: permission denied: {resolved}"
     except Exception as e:
         return f"Error reading file: {e}"
 
-    total_lines = len(lines)
-    start = max(0, offset)
-    end = min(total_lines, start + limit)
-    selected = lines[start:end]
-
     numbered = []
     for i, line in enumerate(selected, start=start + 1):
         numbered.append(f"{i}\t{line.rstrip()}")
 
-    header = f"# {resolved} ({total_lines} lines total, showing {start + 1}-{end})"
+    if selected:
+        header = f"# {resolved} (showing lines {start + 1}-{last_line})"
+    else:
+        header = f"# {resolved} (no lines from offset {start})"
+    if hit_byte_limit:
+        header += f" — stopped at {MAX_READ_BYTES} byte preview limit"
+    elif len(selected) >= limit:
+        header += f" — stopped at {limit} line limit"
     return header + "\n" + "\n".join(numbered)
