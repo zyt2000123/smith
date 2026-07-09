@@ -6,7 +6,7 @@ export type LlmConfig = {
   base_url: string;
 };
 
-export type Employee = {
+export type AgentProfile = {
   id: string;
   name: string;
   role: string;
@@ -32,7 +32,7 @@ export type PluginManifest = {
   description?: string;
   trigger_type?: string;
   skill_count?: number;
-  skills?: Array<{path?: string}>;
+  skills?: Array<{ path?: string }>;
 };
 
 export type SkillSummary = {
@@ -43,13 +43,20 @@ export type SkillSummary = {
   argument_hint: string;
 };
 
+export type TokenUsage = {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+};
+
 export type StreamEvent =
-  | {type: "message"; text: string}
-  | {type: "thinking"; text: string; done: boolean}
-  | {type: "tool_call"; id: string; name: string; hint: string}
-  | {type: "tool_result"; id: string; error: boolean; blocked: boolean; summary: string}
-  | {type: "skill"; name: string; status: string}
-  | {type: "done"; id?: string};
+  | { type: "message"; text: string }
+  | { type: "thinking"; text: string; done: boolean }
+  | { type: "tool_call"; id: string; name: string; hint: string }
+  | { type: "tool_result"; id: string; error: boolean; blocked: boolean; summary: string }
+  | { type: "skill"; name: string; status: string }
+  | ({ type: "token_usage" } & TokenUsage)
+  | { type: "done"; id?: string };
 
 type RequestOptions = {
   method?: string;
@@ -67,15 +74,11 @@ function buildUrl(baseUrl: string, pathname: string): string {
   return new URL(pathname, `${baseUrl.replace(/\/$/, "")}/`).toString();
 }
 
-async function request<T>(
-  baseUrl: string,
-  pathname: string,
-  options: RequestOptions = {},
-): Promise<T> {
+async function request<T>(baseUrl: string, pathname: string, options: RequestOptions = {}): Promise<T> {
   const response = await fetch(buildUrl(baseUrl, pathname), {
     method: options.method ?? "GET",
     headers: {
-      "Accept": "application/json",
+      Accept: "application/json",
       "Content-Type": "application/json",
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
@@ -93,64 +96,48 @@ export async function getLlmConfig(baseUrl: string): Promise<LlmConfig> {
   return request<LlmConfig>(baseUrl, "/api/config/llm");
 }
 
-export async function setLlmConfig(
-  baseUrl: string,
-  payload: LlmConfigInput,
-): Promise<LlmConfig> {
+export async function setLlmConfig(baseUrl: string, payload: LlmConfigInput): Promise<LlmConfig> {
   return request<LlmConfig>(baseUrl, "/api/config/llm", {
     method: "POST",
     body: payload,
   });
 }
 
-export async function listEmployees(baseUrl: string): Promise<Employee[]> {
-  return request<Employee[]>(baseUrl, "/api/employees");
+export async function getAgentProfile(baseUrl: string): Promise<AgentProfile> {
+  return request<AgentProfile>(baseUrl, "/api/agent");
 }
 
-export async function createEmployee(
-  baseUrl: string,
-  payload: Pick<Employee, "name" | "role" | "description">,
-): Promise<Employee> {
-  return request<Employee>(baseUrl, "/api/employees", {
+export async function ensureAgentProfile(baseUrl: string): Promise<AgentProfile> {
+  return request<AgentProfile>(baseUrl, "/api/agent/ensure", {
     method: "POST",
-    body: payload,
   });
 }
 
-export async function ensureSmithAgent(baseUrl: string): Promise<Employee> {
-  const employees = await listEmployees(baseUrl);
-  const existing = employees.find(
-    (employee) => employee.name === "Smith" && employee.role === "personal-assistant",
-  );
-
-  if (existing) {
-    return existing;
-  }
-
-  return createEmployee(baseUrl, {
-    name: "Smith",
-    role: "personal-assistant",
-    description:
-      "面向个人工作流的常驻本地 Agent，负责理解目标、整理上下文、检索信息、规划执行并交付可落地结果。",
-  });
+export async function ensureSmithAgent(baseUrl: string): Promise<AgentProfile> {
+  return ensureAgentProfile(baseUrl);
 }
 
-export async function listSessions(
-  baseUrl: string,
-  employeeId: string,
-): Promise<Session[]> {
-  return request<Session[]>(baseUrl, `/api/employees/${employeeId}/sessions`);
+export async function listSessions(baseUrl: string): Promise<Session[]> {
+  return request<Session[]>(baseUrl, "/api/agent/sessions");
 }
 
-export async function createSession(
-  baseUrl: string,
-  employeeId: string,
-  title: string,
-): Promise<Session> {
-  return request<Session>(baseUrl, `/api/employees/${employeeId}/sessions`, {
+export async function createSession(baseUrl: string, title: string): Promise<Session> {
+  return request<Session>(baseUrl, "/api/agent/sessions", {
     method: "POST",
-    body: {title},
+    body: { title },
   });
+}
+
+export type Message = {
+  id: string;
+  session_id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+};
+
+export async function listMessages(baseUrl: string, sessionId: string): Promise<Message[]> {
+  return request<Message[]>(baseUrl, `/api/agent/sessions/${sessionId}/messages`);
 }
 
 export async function listPlugins(baseUrl: string): Promise<PluginManifest[]> {
@@ -161,45 +148,43 @@ export async function listPlugins(baseUrl: string): Promise<PluginManifest[]> {
   }
 }
 
-export async function enablePlugin(baseUrl: string, name: string): Promise<{status: string; plugin: string}> {
-  return request<{status: string; plugin: string}>(baseUrl, `/api/plugins/${name}/enable`, {
+export async function enablePlugin(baseUrl: string, name: string): Promise<{ status: string; plugin: string }> {
+  return request<{ status: string; plugin: string }>(baseUrl, `/api/plugins/${name}/enable`, {
     method: "POST",
   });
 }
 
-export async function disablePlugin(baseUrl: string, name: string): Promise<{status: string; plugin: string}> {
-  return request<{status: string; plugin: string}>(baseUrl, `/api/plugins/${name}/disable`, {
+export async function disablePlugin(baseUrl: string, name: string): Promise<{ status: string; plugin: string }> {
+  return request<{ status: string; plugin: string }>(baseUrl, `/api/plugins/${name}/disable`, {
     method: "POST",
   });
 }
 
-export async function listSkills(
-  baseUrl: string,
-  employeeId: string,
-): Promise<SkillSummary[]> {
-  return request<SkillSummary[]>(baseUrl, `/api/employees/${employeeId}/skills`);
+export async function listSkills(baseUrl: string): Promise<SkillSummary[]> {
+  return request<SkillSummary[]>(baseUrl, "/api/agent/skills");
 }
 
 type StreamMessageOptions = {
   context?: string;
   skillName?: string;
+  signal?: AbortSignal;
 };
 
-export async function *streamMessage(
+export async function* streamMessage(
   baseUrl: string,
-  employeeId: string,
   sessionId: string,
   content: string,
   options: StreamMessageOptions = {},
 ): AsyncGenerator<StreamEvent, void, void> {
   const response = await fetch(
-    buildUrl(baseUrl, `/api/employees/${employeeId}/sessions/${sessionId}/messages/stream`),
+    buildUrl(baseUrl, `/api/agent/sessions/${sessionId}/messages/stream`),
     {
       method: "POST",
       headers: {
-        "Accept": "text/event-stream",
+        Accept: "text/event-stream",
         "Content-Type": "application/json",
       },
+      signal: options.signal,
       body: JSON.stringify({
         content,
         context: options.context,
@@ -222,12 +207,12 @@ export async function *streamMessage(
   let buffer = "";
 
   while (true) {
-    const {done, value} = await reader.read();
+    const { done, value } = await reader.read();
     if (done) {
       break;
     }
 
-    buffer += decoder.decode(value, {stream: true}).replace(/\r\n/g, "\n");
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
 
     while (true) {
       const boundary = buffer.indexOf("\n\n");
@@ -263,7 +248,7 @@ export async function *streamMessage(
 
       switch (eventName) {
         case "message":
-          yield {type: "message", text: String(payload.text ?? "")};
+          yield { type: "message", text: String(payload.text ?? "") };
           break;
         case "thinking":
           yield {
@@ -296,8 +281,16 @@ export async function *streamMessage(
             status: String(payload.status ?? ""),
           };
           break;
+        case "token_usage":
+          yield {
+            type: "token_usage",
+            input_tokens: Number(payload.input_tokens ?? 0),
+            output_tokens: Number(payload.output_tokens ?? 0),
+            total_tokens: Number(payload.total_tokens ?? 0),
+          };
+          break;
         case "done":
-          yield {type: "done", id: payload.id ? String(payload.id) : undefined};
+          yield { type: "done", id: payload.id ? String(payload.id) : undefined };
           break;
         default:
           break;
