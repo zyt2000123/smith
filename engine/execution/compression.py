@@ -88,8 +88,12 @@ def _total_chars(conversation: list[dict]) -> int:
     return sum(len(m.get("content", "")) for m in conversation if isinstance(m.get("content"), str))
 
 
+def _estimate_tokens_from_chars(char_count: int) -> int:
+    return max(char_count // 3, 1) if char_count > 0 else 0
+
+
 def needs_compaction(conversation: list[dict], context_limit: int = 120000) -> bool:
-    return estimate_tokens(str(_total_chars(conversation))) > context_limit * CONTEXT_TRIGGER_RATIO
+    return _estimate_tokens_from_chars(_total_chars(conversation)) > context_limit * CONTEXT_TRIGGER_RATIO
 
 
 async def compress(conversation: list[dict], llm: "LLMClient" = None) -> list[dict]:

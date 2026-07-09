@@ -4,6 +4,8 @@ version = "0.2.0"
 description = "Agent-Smith local execution agent CLI and server"
 requires-python = ">=3.11"
 dependencies = [
+    "agent-smith-common",
+    "agent-smith-engine",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "aiosqlite>=0.21",
@@ -14,6 +16,10 @@ dependencies = [
     "packaging>=26.2",
     "tiktoken>=0.13.0",
 ]
+
+[tool.uv.sources]
+agent-smith-common = { path = "../common", editable = true }
+agent-smith-engine = { path = "../engine", editable = true }
 
 [project.scripts]
 smith = "app.cli:main"

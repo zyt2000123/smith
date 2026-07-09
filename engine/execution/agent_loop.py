@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,18 +9,22 @@ from typing import TYPE_CHECKING, AsyncGenerator, NamedTuple
 if TYPE_CHECKING:
     pass
 
-from llm.client import LLMClient
-from llm.model_config import build_llm_client
-from prompt.assembler import PromptAssembler
-from safety.tool_guard import ToolGuard
-from skill.executor import execute_skill
-from skill.registry import SkillRegistry
-from tool.interface import ToolCall
-from tool.registry import ToolRegistry
+from engine.llm.client import LLMClient
+from engine.prompt.assembler import PromptAssembler
+from engine.react_budget import DEFAULT_MAX_REACT_ITERS
+from engine.safety.tool_guard import ToolGuard
+from engine.skill.executor import execute_skill
+from engine.skill.registry import SkillRegistry
+from engine.tool.registry import ToolRegistry
 from .backtrack import FailureLoopGuard, FailureSignature
-from .compression import compress
 from .events import EventType, ExecutionEvent
 from .gate import LLMGate, SkillRubricGate
+from .react_loop import (
+    react_event_loop as _react_event_loop,
+    react_loop as _react_loop,
+    react_stream_loop as _react_stream_loop,
+)
+from .runtime import EngineRequest, EngineResult, RuntimeContext, RuntimeServices
 from .skill_chain import SkillChain
 from .task_router import (
     EVAL_SENSITIVE_GUIDANCE,
@@ -30,218 +33,19 @@ from .task_router import (
     route_task,
 )
 
+__all__ = ("_react_event_loop", "_react_loop", "_react_stream_loop")
+
 # Shared rubric gate instance — stateless, safe to reuse
 _rubric_gate = SkillRubricGate()
 _RUBRIC_MAX_RETRIES = 3
 
 logger = logging.getLogger(__name__)
-
-
-async def _react_loop(
-    llm: LLMClient,
-    messages: list[dict],
-    tool_registry: ToolRegistry,
-    tool_guard: ToolGuard | None = None,
-    max_iters: int = 20,
-) -> str:
-    """Simple ReAct loop: think -> act -> observe, until no tool calls."""
-    tools = tool_registry.get_schemas() or None
-    conversation = list(messages)
-    consecutive_errors = 0
-
-    for _ in range(max_iters):
-        conversation = await compress(conversation, llm)
-
-        response = await llm.chat(conversation, tools=tools)
-
-        if not response.has_tool_calls:
-            return response.text
-
-        conversation.append({
-            "role": "assistant",
-            "content": response.text,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)},
-                }
-                for tc in response.tool_calls
-            ],
-        })
-
-        for tc in response.tool_calls:
-            call = ToolCall(id=tc.id, name=tc.name, arguments=tc.arguments)
-
-            # Safety guard: check before executing
-            if tool_guard is not None:
-                guard_result = tool_guard.check(call)
-                if not guard_result.allowed:
-                    conversation.append({
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": f"[BLOCKED] {guard_result.reason}",
-                    })
-                    consecutive_errors += 1
-                    if consecutive_errors >= 3:
-                        conversation.append({"role": "system", "content":
-                            "Multiple tool calls have failed consecutively. Change your approach — try a different tool, simplify the command, or explain what you need without using tools."})
-                        consecutive_errors = 0
-                    continue
-
-            result = await tool_registry.execute(call)
-            conversation.append({
-                "role": "tool",
-                "tool_call_id": result.call_id,
-                "content": result.content,
-            })
-            if result.is_error:
-                consecutive_errors += 1
-                if consecutive_errors >= 3:
-                    conversation.append({"role": "system", "content":
-                        "Multiple tool calls have failed consecutively. Change your approach — try a different tool, simplify the command, or explain what you need without using tools."})
-                    consecutive_errors = 0
-            else:
-                consecutive_errors = 0
-
-    return "Max ReAct iterations reached."
-
-
-async def _react_stream_loop(
-    llm: LLMClient,
-    messages: list[dict],
-    tool_registry: ToolRegistry,
-    tool_guard: ToolGuard | None = None,
-    max_iters: int = 20,
-) -> AsyncGenerator[str, None]:
-    """Streaming ReAct loop: run tool calls synchronously, stream the final text response."""
-    tools = tool_registry.get_schemas() or None
-    conversation = list(messages)
-
-    for _ in range(max_iters):
-        response = await llm.chat(conversation, tools=tools)
-
-        if not response.has_tool_calls:
-            # Final response — re-issue as streaming call (without tools to avoid tool_calls)
-            async for chunk in llm.chat_stream(conversation):
-                yield chunk
-            return
-
-        # Tool-calling iteration — same as non-streaming
-        conversation.append({
-            "role": "assistant",
-            "content": response.text,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)},
-                }
-                for tc in response.tool_calls
-            ],
-        })
-
-        for tc in response.tool_calls:
-            call = ToolCall(id=tc.id, name=tc.name, arguments=tc.arguments)
-
-            # Safety guard: check before executing
-            if tool_guard is not None:
-                guard_result = tool_guard.check(call)
-                if not guard_result.allowed:
-                    conversation.append({
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": f"[BLOCKED] {guard_result.reason}",
-                    })
-                    continue
-
-            result = await tool_registry.execute(call)
-            conversation.append({
-                "role": "tool",
-                "tool_call_id": result.call_id,
-                "content": result.content,
-            })
-
-    yield "Max ReAct iterations reached."
-
-
-async def _react_event_loop(
-    llm: LLMClient,
-    messages: list[dict],
-    tool_registry: ToolRegistry,
-    tool_guard: ToolGuard | None = None,
-    max_iters: int = 20,
-) -> AsyncGenerator[ExecutionEvent, None]:
-    """ReAct loop that yields structured ExecutionEvents."""
-    tools = tool_registry.get_schemas() or None
-    conversation = list(messages)
-    consecutive_errors = 0
-
-    for _ in range(max_iters):
-        if len(conversation) > 40:
-            conversation = [conversation[0]] + conversation[-30:]
-
-        yield ExecutionEvent(EventType.THINKING, {})
-        response = await llm.chat(conversation, tools=tools)
-
-        # 思考内容：优先思考模型的 reasoning_content；工具轮退回前导推理文本
-        thought = (response.reasoning or (response.text if response.has_tool_calls else "")).strip()
-        if thought:
-            yield ExecutionEvent(EventType.THINKING, {"text": thought, "done": True})
-
-        if not response.has_tool_calls:
-            # 最终回答：重发为流式调用（不带 tools，避免再触发 tool_calls），逐块透出
-            streamed_any = False
-            try:
-                async for chunk in llm.chat_stream(conversation):
-                    streamed_any = True
-                    yield ExecutionEvent(EventType.TEXT_DELTA, {"text": chunk})
-            except Exception:
-                pass
-            if not streamed_any:
-                yield ExecutionEvent(EventType.TEXT_DELTA, {"text": response.text})
-            return
-
-        conversation.append({
-            "role": "assistant",
-            "content": response.text,
-            "tool_calls": [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)}}
-                for tc in response.tool_calls
-            ],
-        })
-
-        for tc in response.tool_calls:
-            call = ToolCall(id=tc.id, name=tc.name, arguments=tc.arguments)
-            yield ExecutionEvent(EventType.TOOL_CALL_START, {"name": tc.name, "id": tc.id, "arguments": tc.arguments})
-
-            if tool_guard is not None:
-                guard_result = tool_guard.check(call)
-                if not guard_result.allowed:
-                    conversation.append({"role": "tool", "tool_call_id": call.id,
-                                         "content": f"[BLOCKED] {guard_result.reason}"})
-                    yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {"id": tc.id, "blocked": True, "reason": guard_result.reason})
-                    consecutive_errors += 1
-                    if consecutive_errors >= 3:
-                        conversation.append({"role": "system", "content": "Multiple tool calls failed. Change your approach."})
-                        consecutive_errors = 0
-                    continue
-
-            result = await tool_registry.execute(call)
-            conversation.append({"role": "tool", "tool_call_id": result.call_id, "content": result.content})
-            yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
-                "id": tc.id, "error": result.is_error, "content": result.content[:200],
-            })
-            if result.is_error:
-                consecutive_errors += 1
-                if consecutive_errors >= 3:
-                    conversation.append({"role": "system", "content": "Multiple tool calls failed. Change your approach."})
-                    consecutive_errors = 0
-            else:
-                consecutive_errors = 0
-
-    yield ExecutionEvent(EventType.TEXT_DELTA, {"text": "Max ReAct iterations reached."})
+_HIDDEN_DEFAULT_TOOLS = frozenset({
+    "memory_ops",
+    "search_knowledge",
+    "skill_load",
+    "skill_manage",
+})
 
 
 async def run_agent_stream(
@@ -254,9 +58,10 @@ async def run_agent_stream(
     skill_chain: SkillChain | None,
     guard: FailureLoopGuard,
     tool_guard: ToolGuard | None = None,
-    max_react_iters: int = 20,
+    max_react_iters: int = DEFAULT_MAX_REACT_ITERS,
     history: list[dict] | None = None,
     forced_skill: str | None = None,
+    execution_context: dict | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Streaming version of run_agent — yields ExecutionEvents throughout execution."""
     if forced_skill:
@@ -288,6 +93,8 @@ async def run_agent_stream(
         return
 
     context: dict = {"user_message": user_message, "task_type": task_type.value}
+    if execution_context:
+        context.update({k: v for k, v in execution_context.items() if v is not None})
     node_idx = 0
     max_backtracks = 5
     backtrack_count = 0
@@ -347,19 +154,22 @@ async def run_agent_stream(
         if gate_result.verdict == "pass":
             context[f"{node.skill_name}_output"] = output
             # Checkpoint save after each successful skill node
-            try:
-                from .session_state import SessionStateManager, SessionCheckpoint
-                state_mgr = SessionStateManager(Path(context.get("_employee_dir", "")))
-                state_mgr.save(SessionCheckpoint(
-                    employee_id=context.get("employee_id", ""),
-                    session_id=context.get("session_id", ""),
-                    task_type=context.get("task_type", ""),
-                    skill_chain_index=node_idx,
-                    context={k: v for k, v in context.items() if not k.startswith("_")},
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                ))
-            except Exception:
-                pass
+            session_id = str(context.get("session_id") or "")
+            employee_dir = str(context.get("_employee_dir") or "")
+            if session_id and employee_dir:
+                try:
+                    from .session_state import SessionStateManager, SessionCheckpoint
+                    state_mgr = SessionStateManager(Path(employee_dir))
+                    state_mgr.save(SessionCheckpoint(
+                        employee_id=str(context.get("employee_id") or ""),
+                        session_id=session_id,
+                        task_type=str(context.get("task_type") or ""),
+                        skill_chain_index=node_idx,
+                        context={k: v for k, v in context.items() if not k.startswith("_")},
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    ))
+                except Exception:
+                    logger.exception("failed to save session checkpoint")
             yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "passed"})
             node_idx += 1
             continue
@@ -393,12 +203,15 @@ async def run_agent_stream(
             break
 
     # Clear checkpoint on successful completion
-    try:
-        from .session_state import SessionStateManager
-        state_mgr = SessionStateManager(Path(context.get("_employee_dir", "")))
-        state_mgr.clear(context.get("session_id", ""))
-    except Exception:
-        pass
+    session_id = str(context.get("session_id") or "")
+    employee_dir = str(context.get("_employee_dir") or "")
+    if session_id and employee_dir:
+        try:
+            from .session_state import SessionStateManager
+            state_mgr = SessionStateManager(Path(employee_dir))
+            state_mgr.clear(session_id)
+        except Exception:
+            logger.exception("failed to clear session checkpoint")
 
     yield ExecutionEvent(EventType.DONE, {})
 
@@ -413,7 +226,7 @@ async def run_agent(
     skill_chain: SkillChain | None,
     guard: FailureLoopGuard,
     tool_guard: ToolGuard | None = None,
-    max_react_iters: int = 20,
+    max_react_iters: int = DEFAULT_MAX_REACT_ITERS,
     history: list[dict] | None = None,
     forced_skill: str | None = None,
 ) -> str:
@@ -548,15 +361,11 @@ async def run_agent(
 
 
 class _AgentSetup(NamedTuple):
-    """reply()/reply_events() 的公共装配结果。"""
-    llm: LLMClient
-    tool_registry: ToolRegistry
-    skill_registry: SkillRegistry
-    employee_dir: Path
+    """Prepared prompt/routing state for one engine request."""
+    profile_dir: Path
     system_prompt: str
     task_type: TaskType
     chain: SkillChain | None
-    tool_guard: ToolGuard
 
 
 def _merge_context(user_message: str, context: str | None) -> str:
@@ -574,6 +383,134 @@ def _missing_skill_message(skill_registry: SkillRegistry, forced_skill: str) -> 
         f"Skill '{forced_skill}' not found. "
         f"Available skills: {available}"
     )
+
+
+def _enabled_tools_from_config(emp_config: dict, tool_registry: ToolRegistry) -> list[str]:
+    """Resolve the runtime tool allowlist for an employee.
+
+    Missing config means "all registered tools except internal/default-hidden
+    tools"; explicit tools.enabled narrows that list further. This keeps stale
+    template entries such as search_knowledge from resurfacing.
+    """
+    available = tool_registry.list_tool_names(include_disabled=True)
+    tools_cfg = emp_config.get("tools") if isinstance(emp_config, dict) else {}
+    enabled = tools_cfg.get("enabled") if isinstance(tools_cfg, dict) else None
+    if not isinstance(enabled, list):
+        return [name for name in available if name not in _HIDDEN_DEFAULT_TOOLS]
+
+    return [
+        name
+        for name in enabled
+        if isinstance(name, str) and name and name not in _HIDDEN_DEFAULT_TOOLS
+    ]
+
+
+def _runtime_prompt_context(runtime: RuntimeContext) -> dict[str, str]:
+    context = {
+        "agent_id": runtime.agent_id,
+        "employee_id": runtime.agent_id,  # legacy prompt/tool compatibility
+        "name": runtime.agent_name,
+        "_profile_dir": str(runtime.profile_dir),
+        "_employee_dir": str(runtime.profile_dir),  # legacy checkpoint compatibility
+    }
+    if runtime.session_id:
+        context["session_id"] = runtime.session_id
+    for key, value in runtime.metadata.items():
+        context.setdefault(key, value)
+    return context
+
+
+def _runtime_execution_context(runtime: RuntimeContext) -> dict[str, str | None]:
+    context: dict[str, str | None] = {
+        "agent_id": runtime.agent_id,
+        "employee_id": runtime.agent_id,  # legacy checkpoint compatibility
+        "session_id": runtime.session_id,
+        "_profile_dir": str(runtime.profile_dir),
+        "_employee_dir": str(runtime.profile_dir),
+    }
+    context.update({key: value for key, value in runtime.metadata.items()})
+    return context
+
+
+async def _load_profile_config(runtime: RuntimeContext) -> dict:
+    try:
+        from common.yaml_utils import load_yaml
+
+        loaded_config = load_yaml(runtime.profile_dir / "config.yaml")
+        if isinstance(loaded_config, dict):
+            return loaded_config
+    except Exception:
+        logger.exception("failed to load agent config (agent=%s)", runtime.agent_id)
+    return {}
+
+
+async def _register_mcp_tools(emp_config: dict, runtime: RuntimeContext, services: RuntimeServices) -> None:
+    try:
+        mcp_servers = emp_config.get("mcp_servers", [])
+        if not mcp_servers:
+            return
+        from engine.tool.mcp_client import MCPClient, register_mcp_tools
+
+        for srv in mcp_servers:
+            cmd = srv.get("command", [])
+            if not cmd:
+                continue
+            client = MCPClient(cmd, env=srv.get("env"))
+            await client.connect()
+            services.mcp_clients.append(client)
+            await register_mcp_tools(services.tool_registry, client)
+    except Exception:
+        logger.exception("failed to register MCP tools (agent=%s)", runtime.agent_id)
+
+
+async def prepare_runtime(
+    request: EngineRequest,
+    runtime: RuntimeContext,
+    services: RuntimeServices,
+) -> _AgentSetup:
+    """Prepare prompt, tools, skills, and task routing from an explicit runtime."""
+    services.tool_registry.load_providers(runtime.agents_dir / "tools")
+    emp_config = await _load_profile_config(runtime)
+    await _register_mcp_tools(emp_config, runtime, services)
+
+    unknown_tools = services.tool_registry.set_enabled(
+        _enabled_tools_from_config(emp_config, services.tool_registry)
+    )
+    if unknown_tools:
+        logger.warning(
+            "agent %s configured unknown tools ignored: %s",
+            runtime.agent_id,
+            ", ".join(sorted(set(unknown_tools))),
+        )
+
+    services.skill_registry.load_builtin(runtime.agents_dir / "skills")
+    profile_skills = runtime.profile_dir / "skills"
+    if profile_skills.is_dir():
+        services.skill_registry.load_employee_skills(profile_skills)
+
+    from engine.memory.store import search_relevant_memories
+
+    retrieved = await search_relevant_memories(runtime.profile_dir, request.message)
+    assembler = PromptAssembler()
+    system_prompt = assembler.assemble(
+        runtime.profile_dir,
+        services.tool_registry,
+        services.skill_registry,
+        _runtime_prompt_context(runtime),
+        retrieved_memory=retrieved,
+    )
+
+    task_type = route_task(request.message)
+    if detect_eval_sensitive(request.message):
+        system_prompt += "\n\n" + EVAL_SENSITIVE_GUIDANCE
+
+    chain: SkillChain | None = None
+    if task_type == TaskType.FEATURE:
+        chain = SkillChain.feature_chain()
+    elif task_type == TaskType.BUGFIX:
+        chain = SkillChain.bugfix_chain()
+
+    return _AgentSetup(runtime.profile_dir, system_prompt, task_type, chain)
 
 
 async def _run_forced_skill(
@@ -644,119 +581,65 @@ async def _run_forced_skill_stream(
     yield ExecutionEvent(EventType.DONE, {})
 
 
-async def _prepare(employee_id: str, name: str, user_message: str) -> _AgentSetup:
-    """Shared setup: build LLM, registries, MCP tools, prompt, and route the task."""
-    # Import here to avoid circular deps at module level
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from common.config_loader import resolve_llm_config
-    from common.config import DATA_DIR, SAFETY_RULES_PATH
-
-    llm = build_llm_client(resolve_llm_config(employee_id))
-
-    tool_registry = ToolRegistry()
-    skill_registry = SkillRegistry()
-    employee_dir = DATA_DIR / "employees" / employee_id
-
-    agents_dir = Path(__file__).resolve().parents[2] / "agents"
-    tool_registry.load_providers(agents_dir / "tools")
-
-    # Load MCP servers from employee config (if any)
+async def _persist_runtime_learning(
+    runtime: RuntimeContext,
+    user_message: str,
+    reply_text: str,
+    had_tools: bool,
+) -> None:
     try:
-        from common.yaml_utils import load_yaml
-        emp_config = load_yaml(employee_dir / "config.yaml")
-        mcp_servers = emp_config.get("mcp_servers", [])
-        if mcp_servers:
-            from tool.mcp_client import MCPClient, register_mcp_tools
-            for srv in mcp_servers:
-                cmd = srv.get("command", [])
-                if cmd:
-                    client = MCPClient(cmd, env=srv.get("env"))
-                    await client.connect()
-                    await register_mcp_tools(tool_registry, client)
+        from engine.memory.store import save_conversation_memory
+
+        await save_conversation_memory(runtime.profile_dir, user_message, reply_text, had_tools)
     except Exception:
-        pass  # MCP is best-effort
+        pass
 
-    skill_registry.load_builtin(agents_dir / "skills")
-    emp_skills = employee_dir / "skills"
-    if emp_skills.is_dir():
-        skill_registry.load_employee_skills(emp_skills)
+    try:
+        from engine.memory.user_learner import UserPreferenceLearner
 
-    # Assemble prompt (with query-time memory retrieval)
-    from memory.store import search_relevant_memories
-    retrieved = await search_relevant_memories(employee_dir, user_message)
-    assembler = PromptAssembler()
-    context = {"employee_id": employee_id, "name": name, "_employee_dir": str(employee_dir)}
-    system_prompt = assembler.assemble(
-        employee_dir, tool_registry, skill_registry, context, retrieved_memory=retrieved,
-    )
-
-    task_type = route_task(user_message)
-    if detect_eval_sensitive(user_message):
-        system_prompt += "\n\n" + EVAL_SENSITIVE_GUIDANCE
-
-    chain: SkillChain | None = None
-    if task_type == TaskType.FEATURE:
-        chain = SkillChain.feature_chain()
-    elif task_type == TaskType.BUGFIX:
-        chain = SkillChain.bugfix_chain()
-
-    return _AgentSetup(
-        llm, tool_registry, skill_registry, employee_dir,
-        system_prompt, task_type, chain, ToolGuard(SAFETY_RULES_PATH),
-    )
+        learner = UserPreferenceLearner(runtime.profile_dir)
+        await learner.observe(user_message, reply_text)
+    except Exception:
+        pass
 
 
-async def reply(
-    employee_id: str, name: str, user_message: str,
-    history: list[dict] | None = None,
-    context: str | None = None,
-    forced_skill: str | None = None,
-) -> str:
-    """High-level entry point for the server layer.
-
-    *history*: recent session messages ({"role","content"}) for short-term context.
-    *context*: implicit environment context (workdir/attachments) — visible to the
-    LLM only; routing and memory persistence use the raw user message.
-    """
-    s = await _prepare(employee_id, name, user_message)
+async def reply_with_runtime(
+    request: EngineRequest,
+    runtime: RuntimeContext,
+    services: RuntimeServices,
+) -> EngineResult:
+    """Run one engine request using an explicit runtime contract."""
+    s = await prepare_runtime(request, runtime, services)
     guard = FailureLoopGuard()
 
     try:
         result = await run_agent(
-            s.llm, s.system_prompt, _merge_context(user_message, context),
-            s.tool_registry, s.skill_registry,
-            s.task_type, s.chain, guard,
-            tool_guard=s.tool_guard,
-            history=history,
-            forced_skill=forced_skill,
+            services.llm,
+            s.system_prompt,
+            _merge_context(request.message, request.context),
+            services.tool_registry,
+            services.skill_registry,
+            s.task_type,
+            s.chain,
+            guard,
+            tool_guard=services.tool_guard,
+            history=request.history,
+            forced_skill=request.forced_skill,
         )
 
-        # Save conversation memory + learn preferences (best-effort, never break the reply)
-        try:
-            from memory.store import save_conversation_memory
-            await save_conversation_memory(s.employee_dir, user_message, result, True)
-
-            from memory.user_learner import UserPreferenceLearner
-            learner = UserPreferenceLearner(s.employee_dir)
-            await learner.observe(user_message, result)
-        except Exception:
-            pass
-
-        return result
+        await _persist_runtime_learning(runtime, request.message, result, True)
+        return EngineResult(text=result, had_tools=True)
     finally:
-        await s.llm.close()
+        await services.close()
 
 
-async def reply_events(
-    employee_id: str, name: str, user_message: str,
-    history: list[dict] | None = None,
-    context: str | None = None,
-    forced_skill: str | None = None,
+async def reply_events_with_runtime(
+    request: EngineRequest,
+    runtime: RuntimeContext,
+    services: RuntimeServices,
 ) -> AsyncGenerator[ExecutionEvent, None]:
-    """Event-streaming entry point: yields structured ExecutionEvents
-    (thinking / tool_call / text_delta / skill / done...) for Agent-style UIs."""
-    s = await _prepare(employee_id, name, user_message)
+    """Event-streaming entry point over an explicit runtime contract."""
+    s = await prepare_runtime(request, runtime, services)
     guard = FailureLoopGuard()
 
     full_text = []
@@ -764,12 +647,18 @@ async def reply_events(
     try:
         try:
             async for event in run_agent_stream(
-                s.llm, s.system_prompt, _merge_context(user_message, context),
-                s.tool_registry, s.skill_registry,
-                s.task_type, s.chain, guard,
-                tool_guard=s.tool_guard,
-                history=history,
-                forced_skill=forced_skill,
+                services.llm,
+                s.system_prompt,
+                _merge_context(request.message, request.context),
+                services.tool_registry,
+                services.skill_registry,
+                s.task_type,
+                s.chain,
+                guard,
+                tool_guard=services.tool_guard,
+                history=request.history,
+                forced_skill=request.forced_skill,
+                execution_context=_runtime_execution_context(runtime),
             ):
                 if event.type == EventType.TEXT_DELTA:
                     full_text.append(event.data.get("text", ""))
@@ -779,35 +668,65 @@ async def reply_events(
         except Exception as e:
             # 任一环节失败（LLM 超长上下文/网络/工具崩溃）：优雅收尾，SSE 流不裸断。
             # 异常详情只进服务端日志，不透给前端（可能含 base_url / 请求细节）。
-            logger.exception("agent execution failed (employee=%s)", employee_id)
+            logger.exception("agent execution failed (agent=%s)", runtime.agent_id)
             yield ExecutionEvent(EventType.TEXT_DELTA, {
                 "text": f"⚠️ 执行失败：{type(e).__name__}（详情见服务端日志）",
             })
             yield ExecutionEvent(EventType.DONE, {})
     finally:
         full = "".join(full_text)
-        try:
-            from memory.store import save_conversation_memory
-            await save_conversation_memory(s.employee_dir, user_message, full, had_tools)
-        except Exception:
-            pass  # memory persistence must never break the stream teardown
-        try:
-            from memory.user_learner import UserPreferenceLearner
-            learner = UserPreferenceLearner(s.employee_dir)
-            await learner.observe(user_message, full)
-        except Exception:
-            pass  # learning must never break the stream teardown
-        await s.llm.close()
+        await _persist_runtime_learning(runtime, request.message, full, had_tools)
+        await services.close()
 
 
-async def reply_stream(
-    employee_id: str, name: str, user_message: str, history: list[dict] | None = None
+async def reply(
+    employee_id: str, name: str, user_message: str,
+    history: list[dict] | None = None,
+    context: str | None = None,
+    forced_skill: str | None = None,
+) -> str:
+    """Legacy high-level entry point for employee_id-based callers."""
+    from .legacy import reply as legacy_reply
+
+    return await legacy_reply(
+        employee_id,
+        name,
+        user_message,
+        history=history,
+        context=context,
+        forced_skill=forced_skill,
+    )
+
+
+async def reply_events(
+    employee_id: str, name: str, user_message: str,
+    history: list[dict] | None = None,
+    context: str | None = None,
+    forced_skill: str | None = None,
+    session_id: str | None = None,
+) -> AsyncGenerator[ExecutionEvent, None]:
+    """Legacy structured event stream for employee_id-based callers."""
+    from .legacy import reply_events as legacy_reply_events
+
+    async for event in legacy_reply_events(
+        employee_id,
+        name,
+        user_message,
+        history=history,
+        context=context,
+        forced_skill=forced_skill,
+        session_id=session_id,
+    ):
+        yield event
+
+
+async def reply_stream_with_runtime(
+    request: EngineRequest,
+    runtime: RuntimeContext,
+    services: RuntimeServices,
 ) -> AsyncGenerator[str, None]:
-    """Streaming version of reply(). Yields text chunks as they arrive.
-
-    Thin adapter over reply_events() — kept for callers that only need text
-    (e.g. team_service group chat)."""
-    async for event in reply_events(employee_id, name, user_message, history=history):
+    """Text-only stream adapter over reply_events_with_runtime()."""
+    async for event in reply_events_with_runtime(request, runtime, services):
         if event.type == EventType.TEXT_DELTA:
             yield event.data.get("text", "")
         elif event.type == EventType.SKILL_START:
@@ -818,3 +737,23 @@ async def reply_stream(
             yield f"\n[↩ 回退: {event.data.get('from', '')} → {event.data.get('to', '')}]\n"
         elif event.type == EventType.BLOCKED:
             yield f"\n[⛔ 阻断: {event.data.get('reason', '')}]\n"
+
+
+async def reply_stream(
+    employee_id: str,
+    name: str,
+    user_message: str,
+    history: list[dict] | None = None,
+    session_id: str | None = None,
+) -> AsyncGenerator[str, None]:
+    """Legacy text stream for employee_id-based callers."""
+    from .legacy import reply_stream as legacy_reply_stream
+
+    async for chunk in legacy_reply_stream(
+        employee_id,
+        name,
+        user_message,
+        history=history,
+        session_id=session_id,
+    ):
+        yield chunk

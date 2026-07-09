@@ -28,6 +28,7 @@ class EventType(str, Enum):
     ROUTE_DECIDED = "route_decided"         # 任务路由决策
     BACKTRACK = "backtrack"                 # 回溯到更早的节点
     BLOCKED = "blocked"                     # 执行阻塞，需要人工介入
+    TOKEN_USAGE = "token_usage"             # LLM token 使用量
     DONE = "done"                           # 执行完成
 
 

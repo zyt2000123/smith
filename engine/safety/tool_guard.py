@@ -11,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from tool.interface import ToolCall
+from engine.tool.interface import ToolCall
 
 
 # ── Permission Levels (req #2: default-deny + tiered approval) ──
@@ -30,6 +30,8 @@ TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
     "list_dir": PermissionLevel.READ,
     "web_search": PermissionLevel.READ,
     "web_fetch": PermissionLevel.READ,
+    "websearch": PermissionLevel.READ,
+    "webfetch": PermissionLevel.READ,
     "memory_ops": PermissionLevel.READ,
     "skill_load": PermissionLevel.READ,
     "todo": PermissionLevel.READ,

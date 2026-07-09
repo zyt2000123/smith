@@ -10,10 +10,20 @@ from .interface import ToolCall, ToolDefinition, ToolResult
 from .schema import function_to_schema
 from .truncation import truncate_output
 
+_TOOL_ALIASES = {
+    "websearch": "web_search",
+    "webfetch": "web_fetch",
+}
+
+
+def _canonical_tool_name(name: str) -> str:
+    return _TOOL_ALIASES.get(name, name)
+
 
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, tuple[ToolDefinition, Callable]] = {}
+        self._enabled: set[str] | None = None
 
     def register(
         self,
@@ -66,9 +76,10 @@ class ToolRegistry:
 
     def get_schemas(self, enabled: list[str] | None = None) -> list[dict]:
         """Return OpenAI-compatible tool schemas."""
+        active = set(enabled) if enabled is not None else self._enabled
         result: list[dict] = []
         for name, (defn, _) in self._tools.items():
-            if enabled is not None and name not in enabled:
+            if active is not None and name not in active:
                 continue
             result.append({
                 "type": "function",
@@ -77,13 +88,44 @@ class ToolRegistry:
                     "description": defn.description,
                     "parameters": defn.parameters,
                 },
-            })
+        })
         return result
 
+    def set_enabled(self, enabled: list[str] | None) -> list[str]:
+        """Restrict visible/executable tools.
+
+        Returns configured names that are not registered. Unknown names are
+        intentionally not kept in the active set, so stale config cannot expose
+        phantom tools to prompts or execution.
+        """
+        if enabled is None:
+            self._enabled = None
+            return []
+
+        requested = [
+            (name, _canonical_tool_name(name))
+            for name in enabled
+            if isinstance(name, str) and name
+        ]
+        known = set(self._tools)
+        self._enabled = {canonical for _, canonical in requested if canonical in known}
+        return [name for name, canonical in requested if canonical not in known]
+
+    def list_tool_names(self, *, include_disabled: bool = False) -> list[str]:
+        names = sorted(self._tools)
+        if include_disabled or self._enabled is None:
+            return names
+        return [name for name in names if name in self._enabled]
+
     async def execute(self, call: ToolCall) -> ToolResult:
-        entry = self._tools.get(call.name)
+        tool_name = _canonical_tool_name(call.name)
+
+        entry = self._tools.get(tool_name)
         if entry is None:
             return ToolResult(call_id=call.id, content=f"Unknown tool: {call.name}", is_error=True)
+
+        if self._enabled is not None and tool_name not in self._enabled:
+            return ToolResult(call_id=call.id, content=f"Tool disabled: {tool_name}", is_error=True)
 
         _, func = entry
         try:
@@ -102,13 +144,15 @@ class ToolRegistry:
 
         result = ToolResult(
             call_id=result.call_id,
-            content=truncate_output(result.content, tool_name=call.name),
+            content=truncate_output(result.content, tool_name=tool_name),
             is_error=result.is_error,
         )
         return result
 
     def list_tools(self) -> list[ToolDefinition]:
-        return [defn for defn, _ in self._tools.values()]
+        if self._enabled is None:
+            return [defn for defn, _ in self._tools.values()]
+        return [defn for name, (defn, _) in self._tools.items() if name in self._enabled]
 
 
 _EXIT_CODE_RE = re.compile(r"^\[exit_code=(-?\d+)\]")

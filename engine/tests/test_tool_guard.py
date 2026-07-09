@@ -2,10 +2,9 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from safety.tool_guard import ToolGuard  # noqa: E402
-from tool.interface import ToolCall  # noqa: E402
+from engine.safety.tool_guard import GuardResult, PermissionLevel, ToolGuard
+from engine.safety.tool_policy import ToolPolicy
+from engine.tool.interface import ToolCall
 
 _RULES = Path(__file__).resolve().parents[2] / "agents" / "safety" / "dangerous_commands.json"
 
@@ -16,6 +15,44 @@ def _check(command):
 
 def _check_tool(name, arguments):
     return ToolGuard(_RULES).check(ToolCall(id="t", name=name, arguments=arguments))
+
+
+class _FakeGuard:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def check(self, call):
+        self.calls.append(call)
+        return self.result
+
+
+def test_tool_policy_allows_without_guard():
+    decision = ToolPolicy().evaluate(ToolCall(id="t", name="read_file", arguments={}))
+
+    assert decision.allowed
+    assert decision.observation == ""
+
+
+def test_tool_policy_maps_guard_block_to_observation():
+    guard = _FakeGuard(
+        GuardResult(
+            allowed=False,
+            reason="needs approval",
+            level=PermissionLevel.DESTRUCTIVE,
+            needs_confirmation=True,
+        )
+    )
+    call = ToolCall(id="t", name="shell", arguments={"command": "rm -rf ./x"})
+
+    decision = ToolPolicy(guard).evaluate(call)
+
+    assert guard.calls == [call]
+    assert not decision.allowed
+    assert decision.reason == "needs approval"
+    assert decision.level is PermissionLevel.DESTRUCTIVE
+    assert decision.needs_confirmation
+    assert decision.observation == "[BLOCKED] needs approval"
 
 
 def test_pip_install_in_user_project_allowed():
@@ -51,6 +88,11 @@ def test_path_tools_are_guarded():
     ]
     for name, arguments in blocked_calls:
         assert not _check_tool(name, arguments).allowed, name
+
+
+def test_web_tool_aliases_keep_read_permission_level():
+    assert _check_tool("websearch", {"query": "docs"}).level is PermissionLevel.READ
+    assert _check_tool("webfetch", {"url": "https://example.com"}).level is PermissionLevel.READ
 
 
 if __name__ == "__main__":
