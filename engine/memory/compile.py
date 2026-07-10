@@ -1,11 +1,10 @@
-"""Memory compilation pipeline — LLM-based distillation with fingerprint caching.
+"""Memory compilation — recent events + durable facts + episode summaries.
 
-Four independent layers, each producing a .md file:
-  compile_today()    → today.md     (today's sessions → 3-5 event summaries)
-  compile_week()     → week.md      (7-day window → theme overview)
-  compile_longterm() → longterm.md  (fold week into long-term accumulation)
-  compile_facts()    → facts.md     (extract durable facts from recent 30 days)
-  assemble_memory()  → combined str (for prompt injection)
+Three compilation targets:
+  compile_recent()   → recent.md     (last 7-14 days, budget-capped)
+  compile_durable()  → durable.md    (incremental merge of stable facts)
+  compact_episode()  → episodes/*.md (on topic completion, not automatic)
+  assemble_memory()  → combined str  (for prompt injection)
 
 Fingerprint caching: MD5 of input keys. Same input → skip compilation.
 """
@@ -20,6 +19,10 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engine.llm.client import LLMClient
+
+MAX_RECENT_CHARS = 8000
+MIN_WINDOW_DAYS = 7
+MAX_WINDOW_DAYS = 14
 
 
 def _fingerprint(keys: list[str]) -> str:
@@ -58,15 +61,21 @@ def _parse_ts(ts: str) -> datetime | None:
 
 
 def _filter_by_time(entries: list[dict], after: datetime) -> list[dict]:
-    result = []
-    for e in entries:
-        t = _parse_ts(e.get("timestamp", ""))
-        if t and t >= after:
-            result.append(e)
-    return result
+    return [
+        e for e in entries
+        if (_parse_ts(e.get("timestamp", "")) or datetime.min.replace(tzinfo=timezone.utc)) >= after
+    ]
 
 
-async def _llm_summarize(llm: LLMClient, prompt: str) -> str:
+def _entries_to_source(entries: list[dict], summary_limit: int = 120) -> str:
+    return "\n".join(
+        f"- [{e.get('timestamp', '?')[:16]}] {e.get('task', '?')}: "
+        f"{e.get('summary', '?')[:summary_limit]}"
+        for e in entries
+    )
+
+
+async def _llm_summarize(llm: "LLMClient", prompt: str) -> str:
     resp = await llm.chat([
         {"role": "system", "content": (
             "You are a memory compiler. Extract ONLY user-relevant information: "
@@ -80,145 +89,156 @@ async def _llm_summarize(llm: LLMClient, prompt: str) -> str:
     return resp.text.strip()
 
 
-def _entries_to_source(entries: list[dict], summary_limit: int = 120) -> str:
-    return "\n".join(
-        f"- [{e.get('timestamp', '?')[:16]}] {e.get('task', '?')}: "
-        f"{e.get('summary', '?')[:summary_limit]}"
-        for e in entries
-    )
+# ---------------------------------------------------------------------------
+# compile_recent: replace today.md + week.md with a single budget-capped view
+# ---------------------------------------------------------------------------
 
-
-async def compile_today(memory_dir: Path, llm: LLMClient) -> bool:
-    """Compile today's conversations into today.md. Returns True if recompiled."""
+async def compile_recent(memory_dir: Path, llm: "LLMClient") -> bool:
+    """Compile recent events into recent.md. Budget-capped, elastic 7-14 day window."""
     now = datetime.now(timezone.utc)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_entries = _filter_by_time(_load_recent(memory_dir), today_start)
+    all_entries = _load_recent(memory_dir)
 
-    out = memory_dir / "today.md"
-    fp_file = memory_dir / ".fp_today"
-
-    if not today_entries:
-        out.write_text("## Today\n\n_No conversations today._\n", encoding="utf-8")
+    entries = _filter_by_time(all_entries, now - timedelta(days=MIN_WINDOW_DAYS))
+    if not entries:
+        entries = _filter_by_time(all_entries, now - timedelta(days=MAX_WINDOW_DAYS))
+    if not entries:
         return False
 
-    fp = _fingerprint([f"{e.get('timestamp', '')}:{e.get('task', '')[:50]}" for e in today_entries])
+    out = memory_dir / "recent.md"
+    fp_file = memory_dir / ".fp_recent"
+
+    fp = _fingerprint([f"{e.get('timestamp', '')}:{e.get('task', '')[:50]}" for e in entries])
     if _read_fp(fp_file) == fp:
         return False
 
-    summary = await _llm_summarize(
-        llm, f"Summarize today's conversations into 3-5 key events. Max 400 chars.\n\n{_entries_to_source(today_entries)}"
-    )
-    out.write_text(f"## Today\n\n{summary}\n", encoding="utf-8")
+    source = _entries_to_source(entries)
+    if len(source) > MAX_RECENT_CHARS:
+        summary = await _llm_summarize(
+            llm,
+            f"Summarize recent activity into key events, grouped by date. "
+            f"Max {MAX_RECENT_CHARS} chars.\n\n{source}",
+        )
+    else:
+        summary = source
+
+    out.write_text(f"## Recent Activity\n\n{summary}\n", encoding="utf-8")
     _write_fp(fp_file, fp)
     return True
 
 
-async def compile_week(memory_dir: Path, llm: LLMClient) -> bool:
-    """Compile past 7 days into week.md."""
-    week_entries = _filter_by_time(
-        _load_recent(memory_dir),
-        datetime.now(timezone.utc) - timedelta(days=7),
-    )
+# ---------------------------------------------------------------------------
+# compile_durable: incremental merge of stable facts (replace longterm+facts)
+# ---------------------------------------------------------------------------
 
-    out = memory_dir / "week.md"
-    fp_file = memory_dir / ".fp_week"
+_DURABLE_MERGE_PROMPT = """\
+Update the long-term memory based on new events.
 
-    if not week_entries:
-        out.write_text("## This Week\n\n_No recent activity._\n", encoding="utf-8")
-        return False
+Rules:
+1. Keep existing facts that are still valid.
+2. Add new stable information that will remain useful in future sessions.
+3. When new info conflicts with old, replace the old.
+4. Remove outdated, completed, or superseded content.
+5. Do NOT record temporary debugging, one-off operations, or chat.
+6. Do NOT record language, tone, verbosity, or interaction preferences (managed separately).
+7. Do NOT repeat the same fact in different phrasings.
+8. Keep the Markdown structure; add new headings if needed.
+9. Output ONLY the updated memory content.
 
-    fp = _fingerprint([f"{e.get('timestamp', '')}:{e.get('task', '')[:50]}" for e in week_entries])
-    if _read_fp(fp_file) == fp:
-        return False
+Existing memory:
+{existing}
 
-    summary = await _llm_summarize(
-        llm, f"Identify 3-5 recurring themes from this week's work. Max 400 chars.\n\n{_entries_to_source(week_entries, 100)}"
-    )
-    out.write_text(f"## This Week\n\n{summary}\n", encoding="utf-8")
-    _write_fp(fp_file, fp)
-    return True
-
-
-async def compile_longterm(memory_dir: Path, llm: LLMClient) -> bool:
-    """Fold week.md into longterm.md (accumulative)."""
-    week_file = memory_dir / "week.md"
-    out = memory_dir / "longterm.md"
-    fp_file = memory_dir / ".fp_longterm"
-
-    if not week_file.is_file():
-        return False
-    week_content = week_file.read_text(encoding="utf-8").strip()
-    if not week_content or "_No recent" in week_content:
-        return False
-
-    fp = _fingerprint([week_content])
-    if _read_fp(fp_file) == fp:
-        return False
-
-    existing = out.read_text(encoding="utf-8").strip() if out.is_file() else ""
-
-    summary = await _llm_summarize(llm, (
-        f"Merge this week's summary into long-term memory. "
-        f"Keep only durable patterns and preferences. Remove duplicates. Max 600 chars.\n\n"
-        f"Existing:\n{existing or '(empty)'}\n\nThis week:\n{week_content}"
-    ))
-    out.write_text(f"## Long-term Memory\n\n{summary}\n", encoding="utf-8")
-    _write_fp(fp_file, fp)
-    return True
+New events:
+{new_events}"""
 
 
-async def compile_facts(memory_dir: Path, llm: LLMClient) -> bool:
-    """Extract durable facts from recent 30 days."""
-    recent = _filter_by_time(
-        _load_recent(memory_dir),
-        datetime.now(timezone.utc) - timedelta(days=30),
-    )[-50:]
+async def compile_durable(memory_dir: Path, llm: "LLMClient") -> bool:
+    """Incrementally merge new events into durable.md."""
+    all_entries = _load_recent(memory_dir)
 
-    out = memory_dir / "facts.md"
-    fp_file = memory_dir / ".fp_facts"
+    out = memory_dir / "durable.md"
+    fp_file = memory_dir / ".fp_durable"
 
-    if not recent:
-        return False
-
-    fp = _fingerprint([f"{e.get('timestamp', '')}:{e.get('task', '')[:50]}" for e in recent])
+    fp = _fingerprint([f"{e.get('timestamp', '')}:{e.get('task', '')[:50]}" for e in all_entries[-30:]])
     if _read_fp(fp_file) == fp:
         return False
 
     existing = out.read_text(encoding="utf-8").strip() if out.is_file() else ""
+    new_source = _entries_to_source(all_entries[-20:], 100)
 
-    summary = await _llm_summarize(llm, (
-        f"Extract durable facts about the user. Carry forward still-valid facts. "
-        f"Facts = who they are, projects, preferences, tech stack. "
-        f"NOT session details. Max 500 chars.\n\n"
-        f"Previous facts:\n{existing or '(none)'}\n\n"
-        f"Recent:\n{_entries_to_source(recent, 100)}"
+    if not new_source.strip():
+        return False
+
+    summary = await _llm_summarize(llm, _DURABLE_MERGE_PROMPT.format(
+        existing=existing or "(empty — first compilation)",
+        new_events=new_source,
     ))
-    out.write_text(f"## Key Facts\n\n{summary}\n", encoding="utf-8")
+
+    out.write_text(f"## Durable Memory\n\n{summary}\n", encoding="utf-8")
     _write_fp(fp_file, fp)
     return True
 
+
+# ---------------------------------------------------------------------------
+# compact_episode: compress a completed topic into an episode file
+# ---------------------------------------------------------------------------
+
+async def compact_episode(
+    memory_dir: Path,
+    llm: "LLMClient",
+    topic: str,
+    related_entries: list[dict],
+) -> Path | None:
+    """Generate an episode summary for a completed topic. Returns the file path."""
+    if not related_entries:
+        return None
+
+    episodes_dir = memory_dir / "episodes"
+    episodes_dir.mkdir(parents=True, exist_ok=True)
+
+    slug = topic.lower().replace(" ", "-")[:60]
+    out = episodes_dir / f"{slug}.md"
+
+    source = _entries_to_source(related_entries)
+    summary = await _llm_summarize(llm, (
+        f"Write a concise episode summary for the topic: {topic}\n\n"
+        f"Include: background, process, key decisions, and outcome.\n"
+        f"Max 800 chars.\n\n{source}"
+    ))
+
+    out.write_text(f"# {topic}\n\n{summary}\n", encoding="utf-8")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# assemble_memory: combine compiled layers for prompt injection
+# ---------------------------------------------------------------------------
 
 def assemble_memory(memory_dir: Path) -> str:
-    """Combine compiled layers into a single memory block for prompt injection.
+    """Combine durable + recent into a single memory block for prompt injection.
 
-    Falls back to empty string if no compiled files exist yet.
+    Episodes are not included here — they should be retrieved via FTS5
+    based on the current query and injected separately.
     """
     sections = []
-    for name in ("facts.md", "longterm.md", "week.md", "today.md"):
+
+    for name in ("durable.md", "recent.md"):
         path = memory_dir / name
         if path.is_file():
             content = path.read_text(encoding="utf-8").strip()
-            if content and "_No " not in content:
+            if content:
                 sections.append(content)
+
     return "\n\n".join(sections)
 
 
-async def run_compilation(memory_dir: Path, llm: LLMClient) -> dict:
-    """Run full compilation pipeline. Returns {layer: recompiled_bool}."""
+# ---------------------------------------------------------------------------
+# run_compilation: entry point called by store.py after Dream
+# ---------------------------------------------------------------------------
+
+async def run_compilation(memory_dir: Path, llm: "LLMClient") -> dict:
+    """Run compilation pipeline. Returns {layer: recompiled_bool}."""
     memory_dir.mkdir(parents=True, exist_ok=True)
     return {
-        "today": await compile_today(memory_dir, llm),
-        "week": await compile_week(memory_dir, llm),
-        "longterm": await compile_longterm(memory_dir, llm),
-        "facts": await compile_facts(memory_dir, llm),
+        "recent": await compile_recent(memory_dir, llm),
+        "durable": await compile_durable(memory_dir, llm),
     }

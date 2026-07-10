@@ -98,11 +98,11 @@ def _detect_code_style(text: str) -> str | None:
 
 
 # --- Field mapping ---
-# Maps learner keys to context.md field labels
+# Maps learner keys to context.md field labels.
+# Only interaction preferences — project/identity info belongs in durable.md.
 _FIELD_MAP = {
     "language": "Preferred Language",
     "verbosity": "Communication Style",
-    "tech_level": "Code Style",  # We merge tech_level into code style context
     "code_style": "Code Style",
 }
 
@@ -115,9 +115,9 @@ class UserPreferenceLearner:
     a preference to context.md after seeing it ``_CONFIDENCE_THRESHOLD`` times.
     """
 
-    def __init__(self, employee_dir: Path) -> None:
-        self._context_path = employee_dir / "context.md"
-        self._state_path = employee_dir / ".learner_state.json"
+    def __init__(self, agent_dir: Path) -> None:
+        self._context_path = agent_dir / "context.md"
+        self._state_path = agent_dir / ".learner_state.json"
 
     # --- public API ---
 
@@ -191,10 +191,6 @@ class UserPreferenceLearner:
         field_label = _FIELD_MAP.get(key)
         if field_label is None:
             return False
-
-        # For tech_level, we merge into "代码风格" as additional info
-        if key == "tech_level":
-            value = f"Technical Level: {value}"
 
         # Try to replace the placeholder on the matching line
         marker = f"- {field_label}: {_PLACEHOLDER}"

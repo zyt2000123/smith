@@ -1,26 +1,29 @@
-"""Dream — automatic memory consolidation.
+"""Dream — low-frequency memory consolidation for durable.md.
 
-Runs periodically after conversations to keep the memory store healthy:
-  1. Deduplicate: merge entries with >70% keyword overlap
-  2. Prune: archive entries older than 30 days with no recent access
-  3. Extract patterns: if 3+ entries share a theme, create a summary
-  4. Filter secrets: remove entries that contain API keys / passwords
+Runs less frequently than compile_durable (every ~50 conversations or daily).
+While compile_durable is an online incremental writer, Dream is a conservative
+offline janitor that cleans up what incremental compilation accumulates.
+
+Steps:
+  1. Sanitize: regex-scan durable.md for leaked secrets, remove matching lines
+  2. Consolidate: LLM pass to compress redundancy, merge near-synonyms,
+     remove stale facts, without introducing new information
+  3. Report what changed
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .interface import MemoryEntry
-    from .store import FileMemoryStore
+    from engine.llm.client import LLMClient
 
 
 # ---------------------------------------------------------------------------
-# Secret patterns — memories matching these are unsafe to keep
+# Secret patterns — lines matching these are unsafe to keep
 # ---------------------------------------------------------------------------
 
 _SECRET_PATTERNS: list[re.Pattern[str]] = [
@@ -34,37 +37,22 @@ _SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----"),
 ]
 
-_PRUNE_DAYS = 30
-_OVERLAP_THRESHOLD = 0.70
-_PATTERN_MIN_COUNT = 3
-
 
 def _contains_secret(text: str) -> bool:
     return any(p.search(text) for p in _SECRET_PATTERNS)
 
 
-def _keywords(text: str) -> set[str]:
-    """Extract lowercase keywords (3+ chars) from text."""
-    return {w for w in re.findall(r"[a-zA-Z一-鿿]{3,}", text.lower())}
-
-
-def _keyword_overlap(a: set[str], b: set[str]) -> float:
-    if not a or not b:
-        return 0.0
-    intersection = a & b
-    smaller = min(len(a), len(b))
-    return len(intersection) / smaller
-
-
-def _parse_iso(ts: str) -> datetime | None:
-    if not ts:
-        return None
-    try:
-        # Handle both aware and naive ISO strings
-        ts = ts.replace("Z", "+00:00")
-        return datetime.fromisoformat(ts)
-    except ValueError:
-        return None
+def _sanitize_lines(content: str) -> tuple[str, int]:
+    """Remove lines containing secrets. Returns (cleaned, count_removed)."""
+    lines = content.splitlines()
+    clean = []
+    removed = 0
+    for line in lines:
+        if _contains_secret(line):
+            removed += 1
+        else:
+            clean.append(line)
+    return "\n".join(clean), removed
 
 
 # ---------------------------------------------------------------------------
@@ -74,169 +62,73 @@ def _parse_iso(ts: str) -> datetime | None:
 @dataclass
 class DreamReport:
     secrets_removed: int = 0
-    merged: int = 0
-    pruned: int = 0
-    patterns_found: int = 0
+    consolidated: bool = False
+    skipped: str = ""
     errors: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
-# Preview plan (returned by preview(), consumed by apply())
+# LLM consolidation prompt
 # ---------------------------------------------------------------------------
 
-@dataclass
-class _MergePlan:
-    keep_id: str
-    remove_ids: list[str]
-    merged_content: str
+_CONSOLIDATE_PROMPT = """\
+You are maintaining long-term memory. Clean up the content below.
 
-@dataclass
-class _DreamPlan:
-    secret_ids: list[str]
-    prune_ids: list[str]
-    merges: list[_MergePlan]
-    pattern_summaries: list[str]
+Rules:
+1. Do NOT introduce any new facts not present in the input.
+2. Do NOT modify recent.jsonl (not your concern).
+3. Do NOT record or modify interaction preferences (language, tone, verbosity).
+4. Merge duplicate or near-synonym expressions into one.
+5. Remove facts that are clearly outdated or superseded by newer statements.
+6. Keep specific project names, key decisions, and current status.
+7. Only generalize into a pattern if 3+ separate facts support it.
+8. Do NOT turn a one-time action into a long-term habit.
+9. Preserve the Markdown heading structure.
+10. Output ONLY the cleaned content — no commentary.
+
+Content to consolidate:
+{content}"""
 
 
 # ---------------------------------------------------------------------------
-# Consolidator
+# Entry point
 # ---------------------------------------------------------------------------
 
-class DreamConsolidator:
-    """Analyze and consolidate memory entries."""
+DREAM_INTERVAL = 50
 
-    def __init__(self, store: FileMemoryStore) -> None:
-        self._store = store
 
-    async def preview(self) -> _DreamPlan:
-        """Analyze current memories and generate a consolidation plan."""
-        entries = await self._store.list_all()
-        now = datetime.now(timezone.utc)
+async def run_dream(memory_dir: Path, llm: "LLMClient") -> DreamReport:
+    """Run Dream consolidation on durable.md. Returns a report."""
+    report = DreamReport()
+    durable_path = memory_dir / "durable.md"
 
-        # 1. Secrets
-        secret_ids = [e.id for e in entries if _contains_secret(e.content)]
-
-        # 2. Pruning — old + never re-accessed
-        prune_ids: list[str] = []
-        cutoff = now - timedelta(days=_PRUNE_DAYS)
-        for e in entries:
-            if e.id in secret_ids:
-                continue
-            accessed = _parse_iso(e.last_accessed) or _parse_iso(e.created_at)
-            if accessed and accessed < cutoff:
-                prune_ids.append(e.id)
-
-        # Filter out pruned/secret entries for dedup + pattern analysis
-        active_ids = {e.id for e in entries} - set(secret_ids) - set(prune_ids)
-        active = [e for e in entries if e.id in active_ids]
-
-        # 3. Deduplication
-        # ponytail: O(n²) keyword-overlap dedup — fine at hundreds of entries;
-        # switch to embedding clustering if a store grows to thousands.
-        kw_cache: dict[str, set[str]] = {e.id: _keywords(e.content) for e in active}
-        merged_away: set[str] = set()
-        merges: list[_MergePlan] = []
-
-        for i, a in enumerate(active):
-            if a.id in merged_away:
-                continue
-            group = [a]
-            for b in active[i + 1 :]:
-                if b.id in merged_away:
-                    continue
-                if _keyword_overlap(kw_cache[a.id], kw_cache[b.id]) >= _OVERLAP_THRESHOLD:
-                    group.append(b)
-                    merged_away.add(b.id)
-            if len(group) > 1:
-                # Keep the newest; merge contents
-                group.sort(key=lambda e: e.created_at, reverse=True)
-                keep = group[0]
-                remove_ids = [e.id for e in group[1:]]
-                combined = keep.content
-                for e in group[1:]:
-                    # Append unique lines from older entries
-                    for line in e.content.splitlines():
-                        if line.strip() and line not in combined:
-                            combined += "\n" + line
-                merges.append(_MergePlan(
-                    keep_id=keep.id,
-                    remove_ids=remove_ids,
-                    merged_content=combined,
-                ))
-
-        # 4. Pattern extraction — cluster by shared keywords
-        remaining = [e for e in active if e.id not in merged_away]
-        pattern_summaries: list[str] = []
-        used_in_pattern: set[str] = set()
-
-        for i, anchor in enumerate(remaining):
-            if anchor.id in used_in_pattern:
-                continue
-            cluster = [anchor]
-            for other in remaining[i + 1 :]:
-                if other.id in used_in_pattern:
-                    continue
-                if _keyword_overlap(kw_cache[anchor.id], kw_cache.get(other.id, set())) >= 0.5:
-                    cluster.append(other)
-            if len(cluster) >= _PATTERN_MIN_COUNT:
-                for e in cluster:
-                    used_in_pattern.add(e.id)
-                # Build a theme summary from shared keywords
-                shared = kw_cache[cluster[0].id]
-                for e in cluster[1:]:
-                    shared = shared & kw_cache.get(e.id, set())
-                theme = ", ".join(sorted(shared)[:8]) if shared else "related topics"
-                summary = f"Pattern ({len(cluster)} entries): {theme}"
-                pattern_summaries.append(summary)
-
-        return _DreamPlan(
-            secret_ids=secret_ids,
-            prune_ids=prune_ids,
-            merges=merges,
-            pattern_summaries=pattern_summaries,
-        )
-
-    async def apply(self) -> DreamReport:
-        """Execute consolidation: secrets, prune, merge, patterns."""
-        plan = await self.preview()
-        report = DreamReport()
-
-        # Remove secrets
-        for eid in plan.secret_ids:
-            try:
-                await self._store.remove(eid)
-                report.secrets_removed += 1
-            except Exception as exc:
-                report.errors.append(f"secret remove {eid}: {exc}")
-
-        # Prune old entries
-        for eid in plan.prune_ids:
-            try:
-                await self._store.remove(eid)
-                report.pruned += 1
-            except Exception as exc:
-                report.errors.append(f"prune {eid}: {exc}")
-
-        # Merge duplicates
-        for merge in plan.merges:
-            try:
-                await self._store.update(merge.keep_id, content=merge.merged_content)
-                for eid in merge.remove_ids:
-                    await self._store.remove(eid)
-                report.merged += len(merge.remove_ids)
-            except Exception as exc:
-                report.errors.append(f"merge {merge.keep_id}: {exc}")
-
-        # Create pattern summaries
-        for summary in plan.pattern_summaries:
-            try:
-                await self._store.add(
-                    content=summary,
-                    evidence="dream consolidation",
-                    scope="agent",
-                )
-                report.patterns_found += 1
-            except Exception as exc:
-                report.errors.append(f"pattern: {exc}")
-
+    if not durable_path.is_file():
+        report.skipped = "no durable.md"
         return report
+
+    content = durable_path.read_text(encoding="utf-8").strip()
+    if not content or len(content) < 100:
+        report.skipped = "durable.md too short to consolidate"
+        return report
+
+    # Step 1: sanitize secrets (fast, no LLM)
+    content, secrets_removed = _sanitize_lines(content)
+    report.secrets_removed = secrets_removed
+
+    # Step 2: LLM consolidation
+    try:
+        resp = await llm.chat([
+            {"role": "system", "content": "You are a memory janitor. Be conservative — only clean, never add."},
+            {"role": "user", "content": _CONSOLIDATE_PROMPT.format(content=content)},
+        ])
+        consolidated = resp.text.strip()
+
+        if consolidated and len(consolidated) > 50:
+            durable_path.write_text(consolidated + "\n", encoding="utf-8")
+            report.consolidated = True
+        else:
+            report.skipped = "LLM returned insufficient output"
+    except Exception as e:
+        report.errors.append(f"consolidation: {type(e).__name__}: {e}")
+
+    return report

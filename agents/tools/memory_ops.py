@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-"""Memory operations tool provider — CRUD for employee memory directory.
+"""Memory operations tool provider — CRUD for the agent's memory directory.
 
 Unified with engine/memory/store.py: both read/write .md files with YAML
-frontmatter in ~/.agent-smith/employees/<id>/memory/.  This ensures the
-prompt assembler sees memories written by the agent tool and vice-versa.
+frontmatter under the agent profile's memory dir (see
+common.paths.LEGACY_PROFILES_DIRNAME).  This ensures the prompt assembler
+sees memories written by the agent tool and vice-versa.
 """
 
 import json
@@ -13,18 +14,22 @@ from pathlib import Path
 
 TOOL_META = {
     "name": "memory_ops",
-    "description": "Memory CRUD operations: search, add, update, and remove memory entries for an employee.",
+    "description": "Memory CRUD operations: search, add, update, and remove memory entries for an agent.",
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["search", "add", "update", "remove"],
+                "enum": ["search", "add", "update", "remove", "episode"],
                 "description": "The memory operation to perform",
             },
-            "employee_id": {
+            "topic": {
                 "type": "string",
-                "description": "Employee identifier (used to locate memory directory)",
+                "description": "Episode topic name (required for episode action)",
+            },
+            "agent_id": {
+                "type": "string",
+                "description": "Agent identifier (used to locate memory directory)",
             },
             "query": {
                 "type": "string",
@@ -48,7 +53,7 @@ TOOL_META = {
                 "description": "Memory entry id (required for update/remove)",
             },
         },
-        "required": ["action", "employee_id"],
+        "required": ["action", "agent_id"],
     },
 }
 
@@ -65,10 +70,16 @@ _SENSITIVE_PATTERNS = re.compile(
 )
 
 
-def _memory_dir(employee_id: str) -> Path:
-    """Canonical memory directory: ~/.agent-smith/employees/<id>/memory/"""
-    safe_id = Path(employee_id).name  # prevent path traversal
-    return Path.home() / ".agent-smith" / "employees" / safe_id / "memory"
+def _memory_dir(agent_id: str) -> Path:
+    """Canonical memory directory: <data_dir>/<LEGACY_PROFILES_DIRNAME>/<id>/memory/"""
+    try:
+        from common.paths import LEGACY_PROFILES_DIRNAME
+    except ModuleNotFoundError:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from common.paths import LEGACY_PROFILES_DIRNAME
+    safe_id = Path(agent_id).name  # prevent path traversal
+    return Path.home() / ".agent-smith" / LEGACY_PROFILES_DIRNAME / safe_id / "memory"
 
 
 def _check_sensitive(text: str) -> str | None:
@@ -100,14 +111,15 @@ def _remove_legacy_duplicate(mem_dir: Path, memory_id: str) -> None:
 async def execute(
     *,
     action: str,
-    employee_id: str,
+    agent_id: str,
     query: str | None = None,
     content: str | None = None,
     evidence: str | None = None,
     scope: str | None = None,
     memory_id: str | None = None,
+    topic: str | None = None,
 ) -> str:
-    mem_dir = _memory_dir(employee_id)
+    mem_dir = _memory_dir(agent_id)
     scope = scope or "agent"
     if scope not in {"agent", "project"}:
         return "Error: 'scope' must be either 'agent' or 'project'"
@@ -161,7 +173,7 @@ async def execute(
             return rejection
 
         entry = await store.add(content, evidence, scope)
-        return f"OK: added memory '{entry.id}' for employee '{employee_id}'"
+        return f"OK: added memory '{entry.id}' for agent '{agent_id}'"
 
     elif action == "update":
         if not memory_id:
@@ -180,7 +192,7 @@ async def execute(
         if not updated:
             return f"Error: memory '{memory_id}' not found"
         _remove_legacy_duplicate(mem_dir, memory_id)
-        return f"OK: updated memory '{memory_id}' for employee '{employee_id}'"
+        return f"OK: updated memory '{memory_id}' for agent '{agent_id}'"
 
     elif action == "remove":
         if not memory_id:
@@ -190,7 +202,50 @@ async def execute(
         if not removed:
             return f"Error: memory '{memory_id}' not found"
         _remove_legacy_duplicate(mem_dir, memory_id)
-        return f"OK: removed memory '{memory_id}' for employee '{employee_id}'"
+        return f"OK: removed memory '{memory_id}' for agent '{agent_id}'"
+
+    elif action == "episode":
+        if not topic:
+            return "Error: 'topic' is required for episode action"
+
+        # Load recent events and filter by topic keywords
+        recent_file = mem_dir / "recent.jsonl"
+        if not recent_file.is_file():
+            return "Error: no recent events to summarize"
+
+        topic_keywords = topic.lower().split()
+        related: list[dict] = []
+        for line in recent_file.read_text(encoding="utf-8").strip().splitlines():
+            try:
+                entry = json.loads(line)
+                text = f"{entry.get('task', '')} {entry.get('summary', '')}".lower()
+                if any(kw in text for kw in topic_keywords):
+                    related.append(entry)
+            except json.JSONDecodeError:
+                continue
+
+        if not related:
+            return f"No events found matching topic '{topic}'"
+
+        try:
+            from engine.memory.compile import compact_episode
+            from engine.llm.model_config import resolve_llm_config, build_llm_client
+
+            llm_cfg = resolve_llm_config(agent_id)
+            if not llm_cfg.get("api_key"):
+                return "Error: no LLM API key configured — cannot generate episode"
+
+            llm = build_llm_client(llm_cfg)
+            try:
+                path = await compact_episode(mem_dir, llm, topic, related)
+            finally:
+                await llm.close()
+
+            if path:
+                return f"OK: episode saved to {path.name} ({len(related)} related events)"
+            return "Error: episode generation returned no output"
+        except Exception as e:
+            return f"Error generating episode: {type(e).__name__}: {e}"
 
     else:
-        return f"Error: unknown action '{action}'. Use: search, add, update, remove"
+        return f"Error: unknown action '{action}'. Use: search, add, update, remove, episode"

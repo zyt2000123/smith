@@ -1,5 +1,13 @@
+"""Memory store — recent.jsonl as sole event source + episode FTS5 search.
+
+FileMemoryStore is retained for backward compat with dream.py (pending redesign).
+New conversation memories are NOT written as .md entries — recent.jsonl is the
+sole event source. See compile.py for the compilation pipeline.
+"""
+
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,177 +15,101 @@ from pathlib import Path
 from .interface import MemoryEntry
 
 
+# ---------------------------------------------------------------------------
+# Legacy FileMemoryStore — retained for Dream migration
+# ---------------------------------------------------------------------------
+
+
 class FileMemoryStore:
-    """File-based memory store with scope-based subdirectories.
+    """Legacy file-based memory store with scope-based subdirectories.
 
-    Directory layout:
-        memory/agent/<id>.md   — agent-scoped memories
-        memory/project/<id>.md — project-scoped memories
-
-    Project-scoped memories sort before agent-scoped in search results.
-    Optionally backed by a SearchIndex for FTS5 + vector hybrid search.
+    New conversation memories are no longer written here.
+    Kept temporarily for Dream migration and backward compatibility.
     """
 
     def __init__(self, memory_dir: Path) -> None:
         self._dir = memory_dir
         self._agent_dir = memory_dir / "agent"
         self._project_dir = memory_dir / "project"
-        self._agent_dir.mkdir(parents=True, exist_ok=True)
-        self._project_dir.mkdir(parents=True, exist_ok=True)
-        self._search_index = None  # set via attach_search_index()
-
-    def attach_search_index(self, index) -> None:
-        """Attach a SearchIndex for hybrid search (FTS5 + vector)."""
-        self._search_index = index
-
-    def _scope_dir(self, scope: str) -> Path:
-        return self._project_dir if scope == "project" else self._agent_dir
 
     def _all_md_files(self) -> list[tuple[Path, str]]:
-        """Return (path, scope) for every memory file, project first."""
         files: list[tuple[Path, str]] = []
-        for f in sorted(self._project_dir.glob("*.md")):
-            files.append((f, "project"))
-        for f in sorted(self._agent_dir.glob("*.md")):
-            files.append((f, "agent"))
-        # Backward compat: root-level .md files treated as agent scope
-        for f in sorted(self._dir.glob("*.md")):
-            if f.parent == self._dir:
-                files.append((f, "agent"))
+        for scope_dir, scope in [(self._project_dir, "project"), (self._agent_dir, "agent")]:
+            if scope_dir.is_dir():
+                for f in sorted(scope_dir.glob("*.md")):
+                    files.append((f, scope))
         return files
 
     async def search(self, query: str) -> list[MemoryEntry]:
-        # Hybrid search via SearchIndex if available
-        if self._search_index:
-            try:
-                hits = await self._search_index.search(query)
-                results: list[MemoryEntry] = []
-                for hit in hits:
-                    path, scope = self._find_entry_file(hit["id"])
-                    if path:
-                        raw = path.read_text(encoding="utf-8")
-                        entry = self._parse_file(path, raw, scope or "agent")
-                        if entry:
-                            results.append(entry)
-                if results:
-                    return results
-            except Exception:
-                pass  # ponytail: fall through to keyword search
-
-        # Fallback: keyword scan
-        results: list[MemoryEntry] = []
+        """Keyword scan over legacy .md entries."""
         keywords = query.lower().split()
         if not keywords:
-            return results
-        for path, default_scope in self._all_md_files():
+            return []
+        results: list[MemoryEntry] = []
+        for path, scope in self._all_md_files():
             content = path.read_text(encoding="utf-8")
             if any(kw in content.lower() for kw in keywords):
-                entry = self._parse_file(path, content, default_scope)
+                entry = self._parse_file(path, content, scope)
                 if entry:
                     results.append(entry)
         return results
 
-    async def add(self, content: str, evidence: str, scope: str) -> MemoryEntry:
-        entry_id = uuid.uuid4().hex[:12]
-        now = datetime.now(timezone.utc).isoformat()
-        entry = MemoryEntry(
-            id=entry_id,
-            content=content,
-            scope=scope,  # type: ignore[arg-type]
-            evidence=evidence,
-            created_at=now,
-            last_accessed=now,
-        )
-        self._write_entry(entry)
-        if self._search_index:
-            try:
-                await self._search_index.index_entry(entry.id, entry.content, entry.scope)
-            except Exception:
-                pass
-        return entry
-
-    async def update(
-        self, entry_id: str, content: str | None = None, evidence: str | None = None
-    ) -> bool:
-        """Update an existing memory entry's content and/or evidence."""
-        path, scope = self._find_entry_file(entry_id)
-        if path is None:
-            return False
-
-        raw = path.read_text(encoding="utf-8")
-        entry = self._parse_file(path, raw, scope or "agent")
-        if entry is None:
-            return False
-
-        if content is not None:
-            entry.content = content
-        if evidence is not None:
-            entry.evidence = evidence
-        entry.last_accessed = datetime.now(timezone.utc).isoformat()
-
-        self._write_entry(entry)
-        if self._search_index:
-            try:
-                await self._search_index.index_entry(entry.id, entry.content, entry.scope)
-            except Exception:
-                pass
-        return True
-
-    async def remove(self, entry_id: str) -> bool:
-        path, _ = self._find_entry_file(entry_id)
-        if path is not None and path.is_file():
-            path.unlink()
-            if self._search_index:
-                try:
-                    await self._search_index.remove_entry(entry_id)
-                except Exception:
-                    pass
-            return True
-        return False
-
     async def list_all(self) -> list[MemoryEntry]:
-        """Return all memory entries, project-scoped first."""
         entries: list[MemoryEntry] = []
-        for path, default_scope in self._all_md_files():
+        for path, scope in self._all_md_files():
             raw = path.read_text(encoding="utf-8")
-            entry = self._parse_file(path, raw, default_scope)
+            entry = self._parse_file(path, raw, scope)
             if entry:
                 entries.append(entry)
         return entries
 
-    def _find_entry_file(self, entry_id: str) -> tuple[Path | None, str | None]:
-        """Locate an entry file across all scope directories."""
-        for scope_dir, scope in [
-            (self._project_dir, "project"),
-            (self._agent_dir, "agent"),
-            (self._dir, "agent"),
-        ]:
+    async def add(self, content: str, evidence: str, scope: str) -> MemoryEntry:
+        entry_id = uuid.uuid4().hex[:12]
+        now = datetime.now(timezone.utc).isoformat()
+        entry = MemoryEntry(id=entry_id, content=content, scope=scope, evidence=evidence, created_at=now, last_accessed=now)
+        target_dir = self._project_dir if scope == "project" else self._agent_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        text = f"---\nid: {entry.id}\nscope: {entry.scope}\ncreated_at: {entry.created_at}\nlast_accessed: {entry.last_accessed}\n---\n{entry.content}\n\nEvidence: {entry.evidence}\n"
+        (target_dir / f"{entry.id}.md").write_text(text, encoding="utf-8")
+        return entry
+
+    async def update(self, entry_id: str, content: str | None = None, evidence: str | None = None) -> bool:
+        """Update a legacy .md entry."""
+        for scope_dir, scope in [(self._project_dir, "project"), (self._agent_dir, "agent")]:
+            if not scope_dir.is_dir():
+                continue
             path = scope_dir / f"{entry_id}.md"
             if path.is_file():
-                return path, scope
-        return None, None
+                raw = path.read_text(encoding="utf-8")
+                entry = self._parse_file(path, raw, scope)
+                if entry is None:
+                    return False
+                if content is not None:
+                    entry.content = content
+                if evidence is not None:
+                    entry.evidence = evidence
+                entry.last_accessed = datetime.now(timezone.utc).isoformat()
+                target_dir = self._project_dir if entry.scope == "project" else self._agent_dir
+                text = f"---\nid: {entry.id}\nscope: {entry.scope}\ncreated_at: {entry.created_at}\nlast_accessed: {entry.last_accessed}\n---\n{entry.content}\n\nEvidence: {entry.evidence}\n"
+                (target_dir / f"{entry.id}.md").write_text(text, encoding="utf-8")
+                return True
+        return False
 
-    def _write_entry(self, entry: MemoryEntry) -> None:
-        target_dir = self._scope_dir(entry.scope)
-        text = (
-            f"---\n"
-            f"id: {entry.id}\n"
-            f"scope: {entry.scope}\n"
-            f"created_at: {entry.created_at}\n"
-            f"last_accessed: {entry.last_accessed}\n"
-            f"---\n"
-            f"{entry.content}\n\n"
-            f"Evidence: {entry.evidence}\n"
-        )
-        (target_dir / f"{entry.id}.md").write_text(text, encoding="utf-8")
+    async def remove(self, entry_id: str) -> bool:
+        for scope_dir in (self._project_dir, self._agent_dir):
+            if not scope_dir.is_dir():
+                continue
+            path = scope_dir / f"{entry_id}.md"
+            if path.is_file():
+                path.unlink()
+                return True
+        return False
 
     @staticmethod
     def _parse_file(path: Path, raw: str, default_scope: str = "agent") -> MemoryEntry | None:
-        """Parse a memory file with YAML frontmatter."""
         entry_id = path.stem
         scope = default_scope
-        created_at = ""
-        last_accessed = ""
+        created_at = last_accessed = ""
         body = raw
 
         if raw.startswith("---"):
@@ -186,152 +118,107 @@ class FileMemoryStore:
                 for line in parts[1].strip().splitlines():
                     key, _, val = line.partition(":")
                     val = val.strip()
-                    if key == "scope":
-                        scope = val
-                    elif key == "created_at":
-                        created_at = val
-                    elif key == "last_accessed":
-                        last_accessed = val
-                    elif key == "id":
-                        entry_id = val
+                    if key == "scope": scope = val
+                    elif key == "created_at": created_at = val
+                    elif key == "last_accessed": last_accessed = val
+                    elif key == "id": entry_id = val
                 body = parts[2].strip()
 
-        # Split body from evidence
         evidence = ""
         if "\nEvidence:" in body:
-            body_part, evidence = body.rsplit("\nEvidence:", 1)
-            body = body_part.strip()
+            body, evidence = body.rsplit("\nEvidence:", 1)
+            body = body.strip()
             evidence = evidence.strip()
 
-        return MemoryEntry(
-            id=entry_id,
-            content=body,
-            scope=scope,  # type: ignore[arg-type]
-            evidence=evidence,
-            created_at=created_at,
-            last_accessed=last_accessed or created_at,
-        )
+        return MemoryEntry(id=entry_id, content=body, scope=scope, evidence=evidence, created_at=created_at, last_accessed=last_accessed or created_at)
 
 
 # ---------------------------------------------------------------------------
-# Query-time retrieval for prompt injection
+# Query-time retrieval: search episodes via FTS5
 # ---------------------------------------------------------------------------
 
+_MAX_EPISODE_CONTEXT_CHARS = 6000
 
-async def search_relevant_memories(employee_dir: Path, query: str, top_k: int = 5) -> str:
-    """Hybrid-search memories relevant to *query*, formatted for prompt injection.
 
-    Best-effort: returns "" on any failure so prompt assembly never blocks.
+async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) -> str:
+    """Search episode summaries relevant to *query* for prompt injection.
+
+    durable.md and recent.md are already injected by assembler (fixed);
+    this function only searches episodes (on-demand). Returns "" on any
+    failure so prompt assembly never blocks.
     """
-    memory_dir = employee_dir / "memory"
-    if not memory_dir.is_dir() or not query.strip():
+    episodes_dir = agent_dir / "memory" / "episodes"
+    if not episodes_dir.is_dir() or not query.strip():
         return ""
 
-    store = FileMemoryStore(memory_dir)
-    idx = None
-    embed_fn = None
     try:
-        from .search import SearchIndex, create_jina_embed_fn
-        import sys as _sys
-        _sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
-        from common.config_loader import resolve_llm_config
+        from .search import SearchIndex
 
-        cfg = resolve_llm_config(employee_dir.name)
-        if cfg.get("api_key") and cfg.get("base_url"):
-            embed_fn = await create_jina_embed_fn(
-                cfg["api_key"], cfg["base_url"], cfg.get("embedding_model", "jina-embeddings-v3"),
-            )
-        idx = SearchIndex(memory_dir)
-        await idx.open(embed_fn)
-        store.attach_search_index(idx)
+        idx = SearchIndex(episodes_dir)
+        await idx.open()
+        try:
+            episodes = list(episodes_dir.glob("*.md"))
+            if not episodes:
+                return ""
 
-        entries = await store.search(query)
-        if not entries:
-            return ""
-        lines = ["## Relevant Memories"]
-        for e in entries[:top_k]:
-            content = " ".join(e.content.split())
-            if len(content) > 200:
-                content = content[:200] + "…"
-            lines.append(f"- {content}")
-        return "\n".join(lines)
+            for ep in episodes:
+                content = ep.read_text(encoding="utf-8")
+                await idx.index_entry(ep.stem, content, "episode")
+
+            hits = await idx.search(query, top_k)
+            if not hits:
+                return ""
+
+            lines = ["## Relevant Episodes"]
+            total_chars = 0
+            for hit in hits:
+                ep_path = episodes_dir / f"{hit['id']}.md"
+                if not ep_path.is_file():
+                    continue
+                content = ep_path.read_text(encoding="utf-8").strip()
+                if total_chars + len(content) > _MAX_EPISODE_CONTEXT_CHARS:
+                    break
+                lines.append(content)
+                total_chars += len(content)
+
+            return "\n\n".join(lines) if len(lines) > 1 else ""
+        finally:
+            await idx.close()
     except Exception:
-        return ""  # ponytail: retrieval is best-effort
-    finally:
-        if idx is not None:
-            try:
-                await idx.close()
-            except Exception:
-                pass
-        client = getattr(embed_fn, "_client", None)
-        if client is not None:
-            try:
-                await client.aclose()
-            except Exception:
-                pass
+        return ""
 
 
 # ---------------------------------------------------------------------------
 # Conversation-level memory persistence
 # ---------------------------------------------------------------------------
 
-_DREAM_INTERVAL = 5  # run dream every N conversations
+_COMPILE_INTERVAL = 5
 
 
 async def save_conversation_memory(
-    employee_dir: Path, user_msg: str, reply: str, had_tools: bool
+    agent_dir: Path, user_msg: str, reply: str, had_tools: bool
 ) -> None:
-    """Save a memory entry after a conversation that involved tool usage."""
+    """Append to recent.jsonl and periodically trigger compilation.
+
+    Dream consolidation is temporarily disabled. The current DreamConsolidator
+    operates on legacy FileMemoryStore entries and will be redesigned to
+    maintain durable.md in a later migration.
+    """
     if not had_tools:
         return
 
-    import json
-
-    memory_dir = employee_dir / "memory"
-    conversations_dir = memory_dir / "conversations"
-    conversations_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir = agent_dir / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
 
     recent_file = memory_dir / "recent.jsonl"
-    recent_file.parent.mkdir(parents=True, exist_ok=True)
-
     now = datetime.now(timezone.utc).isoformat()
-    entry = {
-        "task": user_msg[:100],
-        "summary": reply[:200],
-        "timestamp": now,
-    }
+    entry = {"task": user_msg[:100], "summary": reply[:200], "timestamp": now}
 
     with open(recent_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    store = FileMemoryStore(memory_dir)
-
-    # Attach search index for hybrid FTS5 + vector indexing
-    try:
-        from .search import SearchIndex, create_jina_embed_fn
-        import sys as _sys
-        _sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
-        from common.config_loader import resolve_llm_config
-        cfg = resolve_llm_config(employee_dir.name)
-        embed_fn = None
-        if cfg.get("api_key") and cfg.get("base_url"):
-            embed_fn = await create_jina_embed_fn(
-                cfg["api_key"], cfg["base_url"], cfg.get("embedding_model", "jina-embeddings-v3"),
-            )
-        idx = SearchIndex(memory_dir)
-        await idx.open(embed_fn)
-        store.attach_search_index(idx)
-    except Exception:
-        pass  # ponytail: search indexing is best-effort
-
-    await store.add(
-        content=f"Task: {user_msg[:100]}\nResult: {reply[:200]}",
-        evidence=f"conversation at {now}",
-        scope="agent",
-    )
-
-    # Periodic dream consolidation
-    counter_file = memory_dir / ".dream_counter"
+    # Periodic compilation (recent + durable)
+    counter_file = memory_dir / ".compile_counter"
     count = 0
     if counter_file.is_file():
         try:
@@ -341,24 +228,45 @@ async def save_conversation_memory(
     count += 1
     counter_file.write_text(str(count), encoding="utf-8")
 
-    if count >= _DREAM_INTERVAL:
+    if count >= _COMPILE_INTERVAL:
         counter_file.write_text("0", encoding="utf-8")
-        from .dream import DreamConsolidator
-        consolidator = DreamConsolidator(store)
-        await consolidator.apply()
-
-        # ponytail: compilation is best-effort after Dream cleaning
         try:
             from .compile import run_compilation
-            import sys as _sys
-            _sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
-            from common.config_loader import resolve_llm_config
-            from engine.llm.model_config import build_llm_client
-            llm_cfg = resolve_llm_config(employee_dir.name)
+            from engine.llm.model_config import resolve_llm_config, build_llm_client
+
+            llm_cfg = resolve_llm_config(agent_dir.name)
             if llm_cfg.get("api_key"):
                 llm = build_llm_client(llm_cfg)
                 try:
                     await run_compilation(memory_dir, llm)
+                finally:
+                    await llm.close()
+        except Exception:
+            pass
+
+    # Low-frequency Dream consolidation (separate counter)
+    from .dream import DREAM_INTERVAL
+    dream_counter = memory_dir / ".dream_counter"
+    d_count = 0
+    if dream_counter.is_file():
+        try:
+            d_count = int(dream_counter.read_text().strip())
+        except (ValueError, OSError):
+            d_count = 0
+    d_count += 1
+    dream_counter.write_text(str(d_count), encoding="utf-8")
+
+    if d_count >= DREAM_INTERVAL:
+        dream_counter.write_text("0", encoding="utf-8")
+        try:
+            from .dream import run_dream
+            from engine.llm.model_config import resolve_llm_config, build_llm_client
+
+            llm_cfg = resolve_llm_config(agent_dir.name)
+            if llm_cfg.get("api_key"):
+                llm = build_llm_client(llm_cfg)
+                try:
+                    await run_dream(memory_dir, llm)
                 finally:
                     await llm.close()
         except Exception:

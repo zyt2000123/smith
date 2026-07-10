@@ -9,8 +9,8 @@ __all__ = [
 ]
 
 try:
-    from .dream import DreamConsolidator, DreamReport
-    __all__ += ["DreamConsolidator", "DreamReport"]
+    from .dream import run_dream, DreamReport
+    __all__ += ["run_dream", "DreamReport"]
 except ModuleNotFoundError:
     pass
 
@@ -21,7 +21,7 @@ except ModuleNotFoundError:
     pass
 
 try:
-    from .search import SearchIndex, create_jina_embed_fn
-    __all__ += ["SearchIndex", "create_jina_embed_fn"]
+    from .search import SearchIndex
+    __all__ += ["SearchIndex"]
 except ModuleNotFoundError:
     pass
