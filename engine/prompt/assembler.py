@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engine.skill.registry import SkillRegistry
@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 _SEPARATOR = "\n\n---\n\n"
 
-# Cache: employee_dir -> (content_hash, assembled_prompt)
+# Cache: agent_dir -> (content_hash, assembled_prompt)
 _prompt_cache: dict[str, tuple[str, str]] = {}
 
 
@@ -40,11 +40,11 @@ def build_team_context(
 
 
 class PromptAssembler:
-    """Assemble an 11-layer system prompt from an employee directory."""
+    """Assemble Smith's system prompt from an agent profile directory."""
 
     def assemble(
         self,
-        employee_dir: Path,
+        agent_dir: Path,
         tool_registry: "ToolRegistry",
         skill_registry: "SkillRegistry",
         context: dict,
@@ -54,16 +54,16 @@ class PromptAssembler:
         layers: list[str] = []
 
         # Layer 1: role (identity)
-        layers.append(self._read(employee_dir / "role.md"))
+        layers.append(self._read(agent_dir / "role.md"))
 
         # Layer 2: style (persona)
-        layers.append(self._read(employee_dir / "style.md"))
+        layers.append(self._read(agent_dir / "style.md"))
 
         # Layer 3: workflow (bible)
-        layers.append(self._read(employee_dir / "workflow.md"))
+        layers.append(self._read(agent_dir / "workflow.md"))
 
         # Layer 4: toolbox
-        tools_text = self._read(employee_dir / "toolbox.md")
+        tools_text = self._read(agent_dir / "toolbox.md")
         tool_list = tool_registry.list_tools()
         if tool_list:
             tool_lines = ["## Available Tools"]
@@ -72,7 +72,7 @@ class PromptAssembler:
             tools_text += "\n\n" + "\n".join(tool_lines)
         layers.append(tools_text)
 
-        # Layer 5: skills
+        # Layer 5: skill catalog (metadata only; skill bodies load on demand)
         summaries = skill_registry.list_summaries()
         if summaries:
             skill_lines = ["## Available Skills"]
@@ -82,79 +82,27 @@ class PromptAssembler:
         else:
             layers.append("")
 
-        # Layer 6: capabilities
-        layers.append(self._read_json_layer(
-            employee_dir / "expertise.json",
-            "## 核心能力\n",
-            self._format_capabilities,
-        ))
+        # Layer 6: user context
+        layers.append(self._read(agent_dir / "context.md"))
 
-        # Layer 7: work styles
-        layers.append(self._read_json_layer(
-            employee_dir / "traits.json",
-            "## 工作风格\n",
-            self._format_work_styles,
-        ))
-
-        # Layer 8: delivery
-        layers.append(self._read_json_layer(
-            employee_dir / "pipeline.json",
-            "## 交付承诺\n",
-            self._format_delivery,
-        ))
-
-        # Layer 9: user
-        layers.append(self._read(employee_dir / "context.md"))
-
-        # Layer 10: output style
+        # Layer 7: output style
         output_style_path = (
             Path(__file__).resolve().parents[2] / "agents" / "output_style.md"
         )
         layers.append(self._read(output_style_path))
 
-        # Layer 11: memory (prefer compiled memory, fallback to raw files)
-        memory_dir = employee_dir / "memory"
-        mem_text = ""
+        # Layer 8: memory (durable + recent compiled, plus query-time retrieval)
+        memory_dir = agent_dir / "memory"
 
         from engine.memory.compile import assemble_memory
-        compiled = assemble_memory(memory_dir) if memory_dir.is_dir() else ""
+        mem_text = assemble_memory(memory_dir) if memory_dir.is_dir() else ""
 
-        if compiled:
-            mem_text = compiled
-        else:
-            mem_parts: list[str] = []
-            recent_file = memory_dir / "recent.jsonl"
-            if recent_file.is_file():
-                import json
-                lines = recent_file.read_text(encoding="utf-8").strip().splitlines()
-                for line in lines[-10:]:
-                    try:
-                        entry = json.loads(line)
-                        mem_parts.append(
-                            f"- [{entry.get('timestamp', '?')}] "
-                            f"{entry.get('task', '?')} → {entry.get('summary', '?')[:80]}"
-                        )
-                    except json.JSONDecodeError:
-                        continue
-            if memory_dir.is_dir():
-                total = 0
-                for scope_dir in (memory_dir / "project", memory_dir / "agent"):
-                    if not scope_dir.is_dir():
-                        continue
-                    for f in sorted(scope_dir.glob("*.md")):
-                        if total >= 20:
-                            break
-                        mem_parts.append(self._extract_memory_body(f))
-                        total += 1
-            mem_text = "\n".join(mem_parts) if mem_parts else ""
-
-        # Query-time retrieved memories (relevant to the current message)
         if retrieved_memory:
             mem_text = (mem_text + "\n\n" if mem_text else "") + retrieved_memory
 
         layers.append(mem_text)
 
-        # Layer 11: runtime context
+        # Layer 9: runtime context
         if context:
             ctx_lines = ["## Runtime Context"]
             for k, v in context.items():
@@ -164,10 +112,10 @@ class PromptAssembler:
             layers.append("")
 
         # Compute hash of stable layers (1-5: role, style, workflow, tools, skills)
-        # These rarely change between calls for the same employee
+        # These rarely change between calls for the same agent
         stable_content = _SEPARATOR.join(layers[:5])
         stable_hash = hashlib.md5(stable_content.encode()).hexdigest()
-        cache_key = str(employee_dir)
+        cache_key = str(agent_dir)
 
         cached = _prompt_cache.get(cache_key)
         if cached and cached[0] == stable_hash:
@@ -185,9 +133,8 @@ class PromptAssembler:
             total = sum(_estimate_tokens(l) for l in layers if l.strip())
             if total > max_tokens:
                 # Indices to cut, lowest priority first:
-                # 7=pipeline, 6=traits, 5=expertise, 9=output_style, 10=memory,
-                # 8=context_md, 4=skills, 3=tools, 1=style
-                cut_order = [7, 6, 5, 9, 10, 8, 4, 3, 1]
+                # 6=output_style, 7=memory, 5=context_md, 4=skills, 3=tools, 1=style
+                cut_order = [6, 7, 5, 4, 3, 1]
                 for idx in cut_order:
                     if idx < len(layers) and layers[idx].strip():
                         total -= _estimate_tokens(layers[idx])
@@ -199,9 +146,9 @@ class PromptAssembler:
         return _SEPARATOR.join(layer for layer in layers if layer.strip())
 
     @staticmethod
-    def get_prefix_cache_key(employee_dir: Path) -> str | None:
+    def get_prefix_cache_key(agent_dir: Path) -> str | None:
         """Return the hash of stable prompt layers for LLM prefix caching."""
-        cached = _prompt_cache.get(str(employee_dir))
+        cached = _prompt_cache.get(str(agent_dir))
         return cached[0] if cached else None
 
     @staticmethod
@@ -222,40 +169,3 @@ class PromptAssembler:
         if path.is_file():
             return path.read_text(encoding="utf-8").strip()
         return ""
-
-    @staticmethod
-    def _read_json_layer(
-        path: Path,
-        header: str,
-        formatter: Callable,
-    ) -> str:
-        if not path.is_file():
-            return ""
-        import json
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return ""
-        body = formatter(data)
-        if not body:
-            return ""
-        return header + body
-
-    @staticmethod
-    def _format_capabilities(data: list) -> str:
-        lines: list[str] = []
-        for item in data:
-            lines.append(f"- **{item['name']}**: {item['description']}")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _format_work_styles(data: list) -> str:
-        return "标签: " + ", ".join(data)
-
-    @staticmethod
-    def _format_delivery(data: list) -> str:
-        lines: list[str] = []
-        for item in data:
-            pipeline_str = " → ".join(item["pipeline"])
-            lines.append(f"- **{item['task_type']}**: {pipeline_str}")
-        return "\n".join(lines)

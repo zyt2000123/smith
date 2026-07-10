@@ -229,18 +229,11 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 5) 
 
     store = FileMemoryStore(memory_dir)
     idx = None
-    embed_fn = None
     try:
-        from .search import SearchIndex, create_jina_embed_fn
-        from engine.llm.model_config import resolve_llm_config
+        from .search import SearchIndex
 
-        cfg = resolve_llm_config(agent_dir.name)
-        if cfg.get("api_key") and cfg.get("base_url"):
-            embed_fn = await create_jina_embed_fn(
-                cfg["api_key"], cfg["base_url"], cfg.get("embedding_model", "jina-embeddings-v3"),
-            )
         idx = SearchIndex(memory_dir)
-        await idx.open(embed_fn)
+        await idx.open()
         store.attach_search_index(idx)
 
         entries = await store.search(query)
@@ -259,12 +252,6 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 5) 
         if idx is not None:
             try:
                 await idx.close()
-            except Exception:
-                pass
-        client = getattr(embed_fn, "_client", None)
-        if client is not None:
-            try:
-                await client.aclose()
             except Exception:
                 pass
 
@@ -304,18 +291,11 @@ async def save_conversation_memory(
 
     store = FileMemoryStore(memory_dir)
 
-    # Attach search index for hybrid FTS5 + vector indexing
     try:
-        from .search import SearchIndex, create_jina_embed_fn
-        from engine.llm.model_config import resolve_llm_config
-        cfg = resolve_llm_config(agent_dir.name)
-        embed_fn = None
-        if cfg.get("api_key") and cfg.get("base_url"):
-            embed_fn = await create_jina_embed_fn(
-                cfg["api_key"], cfg["base_url"], cfg.get("embedding_model", "jina-embeddings-v3"),
-            )
+        from .search import SearchIndex
+
         idx = SearchIndex(memory_dir)
-        await idx.open(embed_fn)
+        await idx.open()
         store.attach_search_index(idx)
     except Exception:
         pass  # ponytail: search indexing is best-effort

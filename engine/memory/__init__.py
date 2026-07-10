@@ -21,7 +21,7 @@ except ModuleNotFoundError:
     pass
 
 try:
-    from .search import SearchIndex, create_jina_embed_fn
-    __all__ += ["SearchIndex", "create_jina_embed_fn"]
+    from .search import SearchIndex
+    __all__ += ["SearchIndex"]
 except ModuleNotFoundError:
     pass
