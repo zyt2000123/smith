@@ -40,7 +40,15 @@ COMPACT_USER_PROMPT = (
 
 
 def estimate_tokens(text: str) -> int:
-    return len(text) // 3
+    """粗略 token 估算。CJK 汉字约 1 字符/token，其余约 3 字符/token。
+
+    旧版统一 len//3 对中文低估 2~3 倍，导致 compact 总在超出上下文窗口
+    之后才触发。宁可略微高估提前压缩，也不要漏判把窗口撑爆。
+    """
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
+    return cjk + (len(text) - cjk) // 3
 
 
 def prune_tool_outputs(
@@ -84,16 +92,16 @@ def prune_tool_outputs(
     return pruned_chars
 
 
-def _total_chars(conversation: list[dict]) -> int:
-    return sum(len(m.get("content", "")) for m in conversation if isinstance(m.get("content"), str))
-
-
-def _estimate_tokens_from_chars(char_count: int) -> int:
-    return max(char_count // 3, 1) if char_count > 0 else 0
+def _conversation_tokens(conversation: list[dict]) -> int:
+    return sum(
+        estimate_tokens(m["content"])
+        for m in conversation
+        if isinstance(m.get("content"), str)
+    )
 
 
 def needs_compaction(conversation: list[dict], context_limit: int = 120000) -> bool:
-    return _estimate_tokens_from_chars(_total_chars(conversation)) > context_limit * CONTEXT_TRIGGER_RATIO
+    return _conversation_tokens(conversation) > context_limit * CONTEXT_TRIGGER_RATIO
 
 
 async def compress(conversation: list[dict], llm: "LLMClient" = None) -> list[dict]:
@@ -121,6 +129,21 @@ async def compact_history(conversation: list[dict], llm: "LLMClient") -> list[di
     for msg in conversation:
         role = msg.get("role", "")
         content = msg.get("content", "")
+        if role == "system":
+            continue
+        if role == "tool":
+            # 工具结果是任务的关键证据，必须进摘要输入；
+            # 旧版整体丢弃 tool 消息 → 工具密集任务压缩一次即失忆。
+            if isinstance(content, str) and content:
+                summary_messages.append({"role": "user", "content": f"[工具结果] {content[:1500]}"})
+            continue
+        if role == "assistant" and not content and msg.get("tool_calls"):
+            # 带工具调用但无正文的 assistant 轮：记下调用了哪些工具。
+            names = ", ".join(
+                tc.get("function", {}).get("name", "?") for tc in msg["tool_calls"]
+            )
+            summary_messages.append({"role": "assistant", "content": f"[调用工具] {names}"})
+            continue
         if role in ("user", "assistant") and content:
             summary_messages.append({"role": role, "content": content[:2000]})
 

@@ -1,16 +1,20 @@
 from fastapi import APIRouter, Depends
 from sse_starlette.sse import EventSourceResponse
 
-from ..domain.team import TeamGroupCreate, TeamGroupOut, TeamMessageCreate, TeamMessageOut
+from ..schemas.team import TeamGroupCreate, TeamGroupOut, TeamMessageCreate, TeamMessageOut
 from ..services.team_service import TeamService
 from ..infrastructure.repositories.team_repo import TeamRepo
-from ..infrastructure.repositories.employee_repo import EmployeeRepo
+from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
 
-router = APIRouter(prefix="/api/teams", tags=["teams"])
+router = APIRouter(
+    prefix="/api/teams",
+    tags=["legacy-teams"],
+    include_in_schema=False,
+)
 
 
 def get_team_service() -> TeamService:
-    return TeamService(TeamRepo(), EmployeeRepo())
+    return TeamService(TeamRepo(), AgentProfileRepo())
 
 
 @router.post("", response_model=TeamGroupOut, status_code=201)

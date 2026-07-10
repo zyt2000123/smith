@@ -1,8 +1,0 @@
-[
-  {"name": "component-development", "description": "React/Vue 组件开发，含状态管理和生命周期处理"},
-  {"name": "responsive-layout", "description": "响应式布局实现，覆盖移动端到桌面端"},
-  {"name": "design-to-code", "description": "设计稿精确还原，逐像素比对"},
-  {"name": "performance-tuning", "description": "前端性能优化：代码分割、懒加载、渲染优化"},
-  {"name": "accessibility", "description": "无障碍实现：语义化 HTML、ARIA、键盘导航"},
-  {"name": "css-engineering", "description": "CSS 架构设计：模块化、主题切换、动画"}
-]

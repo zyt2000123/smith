@@ -4,21 +4,21 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from common.config import EMPLOYEES_DIR
 from engine.skill.registry import SkillRegistry
 
-from ..domain.skill import SkillSummaryOut
-from ..infrastructure.repositories.employee_repo import EmployeeRepo
+from ..schemas.skill import SkillSummaryOut
+from ..infrastructure.profile_files import agent_profile_dir
+from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
 
 
 class SkillService:
 
-    def __init__(self, employee_repo: EmployeeRepo) -> None:
-        self.employee_repo = employee_repo
+    def __init__(self, agent_profile_repo: AgentProfileRepo) -> None:
+        self.agent_profile_repo = agent_profile_repo
 
-    async def list_skills(self, employee_id: str) -> list[SkillSummaryOut]:
-        await self._ensure_employee(employee_id)
-        registry = self._load_registry(employee_id)
+    async def list_skills(self, agent_id: str) -> list[SkillSummaryOut]:
+        await self._ensure_profile(agent_id)
+        registry = self._load_registry(agent_id)
 
         summaries: list[SkillSummaryOut] = []
         for item in sorted(registry.list_summaries(), key=lambda value: value["name"]):
@@ -36,14 +36,14 @@ class SkillService:
             )
         return summaries
 
-    async def ensure_skill_exists(self, employee_id: str, skill_name: str) -> SkillSummaryOut:
-        await self._ensure_employee(employee_id)
-        registry = self._load_registry(employee_id)
+    async def ensure_skill_exists(self, agent_id: str, skill_name: str) -> SkillSummaryOut:
+        await self._ensure_profile(agent_id)
+        registry = self._load_registry(agent_id)
         body = registry.get(skill_name)
         if body is None:
             raise HTTPException(404, f"Skill '{skill_name}' not found")
 
-        source = "builtin" if registry.is_builtin(skill_name) else "employee"
+        source = "builtin" if registry.is_builtin(skill_name) else "agent"
         return SkillSummaryOut(
             name=body.meta.name,
             description=body.meta.description,
@@ -52,17 +52,17 @@ class SkillService:
             argument_hint=body.meta.argument_hint,
         )
 
-    async def _ensure_employee(self, employee_id: str) -> None:
-        if await self.employee_repo.get(employee_id) is None:
-            raise HTTPException(404, "Employee not found")
+    async def _ensure_profile(self, agent_id: str) -> None:
+        if await self.agent_profile_repo.get(agent_id) is None:
+            raise HTTPException(404, "Agent profile not found")
 
     @staticmethod
-    def _load_registry(employee_id: str) -> SkillRegistry:
+    def _load_registry(agent_id: str) -> SkillRegistry:
         registry = SkillRegistry()
         agents_dir = Path(__file__).resolve().parents[3] / "agents"
         registry.load_builtin(agents_dir / "skills")
 
-        employee_skills_dir = EMPLOYEES_DIR / employee_id / "skills"
-        if employee_skills_dir.is_dir():
-            registry.load_employee_skills(employee_skills_dir)
+        agent_skills_dir = agent_profile_dir(agent_id) / "skills"
+        if agent_skills_dir.is_dir():
+            registry.load_agent_skills(agent_skills_dir)
         return registry

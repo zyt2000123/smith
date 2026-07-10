@@ -1,15 +1,16 @@
-import {spawn, type ChildProcess} from "node:child_process";
-import {createServer} from "node:net";
+import { type ChildProcess, spawn } from "node:child_process";
+import { createServer } from "node:net";
 import path from "node:path";
-import {fileURLToPath} from "node:url";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_SERVER_URL = "http://127.0.0.1:8140";
 const REQUIRED_PATHS = [
   "/api/config/llm",
-  "/api/employees",
+  "/api/agent",
+  "/api/agent/ensure",
   "/api/plugins",
-  "/api/employees/{employee_id}/skills",
-  "/api/employees/{employee_id}/sessions/{session_id}/messages/stream",
+  "/api/agent/skills",
+  "/api/agent/sessions/{session_id}/messages/stream",
 ] as const;
 let ownedServer: ChildProcess | null = null;
 
@@ -59,7 +60,7 @@ async function compatibilityIssue(baseUrl: string): Promise<string | null> {
       return `openapi responded with HTTP ${response.status}`;
     }
 
-    const payload = await response.json() as {paths?: Record<string, unknown>};
+    const payload = (await response.json()) as { paths?: Record<string, unknown> };
     const paths = payload.paths ?? {};
     const missingPaths = REQUIRED_PATHS.filter((route) => !(route in paths));
     if (missingPaths.length === 0) {
@@ -95,9 +96,7 @@ async function findAvailablePort(startPort: number, maxPort = startPort + 20): P
     }
   }
 
-  throw new Error(
-    `Could not find a free local port between ${startPort} and ${maxPort}.`,
-  );
+  throw new Error(`Could not find a free local port between ${startPort} and ${maxPort}.`);
 }
 
 export async function ensureLocalServer(): Promise<{
@@ -108,51 +107,45 @@ export async function ensureLocalServer(): Promise<{
   const baseUrl = process.env.SMITH_SERVER_URL ?? DEFAULT_SERVER_URL;
   const envOverride = Boolean(process.env.SMITH_SERVER_URL);
   const parsedUrl = new URL(baseUrl);
-  const preferredPort = Number.parseInt(
-    parsedUrl.port || (parsedUrl.protocol === "https:" ? "443" : "80"),
-    10,
-  );
+  const preferredPort = Number.parseInt(parsedUrl.port || (parsedUrl.protocol === "https:" ? "443" : "80"), 10);
 
   const healthy = await isHealthy(baseUrl);
   if (healthy) {
     const issue = await compatibilityIssue(baseUrl);
     if (!issue) {
-      return {baseUrl, started: false};
+      return { baseUrl, started: false };
     }
 
     if (envOverride) {
-      throw new Error(
-        `Configured SMITH_SERVER_URL points to an incompatible server: ${issue}`,
-      );
+      throw new Error(`Configured SMITH_SERVER_URL points to an incompatible server: ${issue}`);
     }
   }
 
   if (envOverride) {
-    throw new Error(
-      `Configured SMITH_SERVER_URL is unreachable: ${baseUrl}`,
-    );
+    throw new Error(`Configured SMITH_SERVER_URL is unreachable: ${baseUrl}`);
   }
 
-  const launchPort = healthy
-    ? await findAvailablePort(preferredPort + 1)
-    : preferredPort;
+  const launchPort = healthy ? await findAvailablePort(preferredPort + 1) : preferredPort;
   const launchUrl = new URL(baseUrl);
   launchUrl.port = String(launchPort);
   const launchedBaseUrl = launchUrl.toString().replace(/\/$/, "");
 
   const serverDir = path.join(resolveRepoRoot(), "server");
-  ownedServer = spawn(
-    "uv",
-    ["run", "uvicorn", "app.main:app", "--port", String(launchPort)],
-    {
-      cwd: serverDir,
-      stdio: "ignore",
-      env: {
-        ...process.env,
-        PYTHONUNBUFFERED: "1",
-      },
+  ownedServer = spawn("uv", ["run", "uvicorn", "app.main:app", "--port", String(launchPort)], {
+    cwd: serverDir,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      PYTHONUNBUFFERED: "1",
     },
-  );
+  });
+
+  // spawn failures (e.g. `uv` missing from PATH) are emitted async; without a
+  // listener the "error" event becomes an uncaught exception and crashes the shell.
+  let spawnError: Error | undefined;
+  ownedServer.once("error", (error) => {
+    spawnError = error;
+  });
 
   registerCleanup();
 
@@ -171,7 +164,11 @@ export async function ensureLocalServer(): Promise<{
     }
 
     if (ownedServer.exitCode !== null) {
-      throw new Error("Local server exited before becoming healthy.");
+      throw new Error(
+        spawnError
+          ? `Could not launch the local Smith server: ${spawnError.message}`
+          : "Local server exited before becoming healthy.",
+      );
     }
 
     await sleep(500);

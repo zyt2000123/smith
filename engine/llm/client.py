@@ -111,12 +111,15 @@ class LLMClient:
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 400:
+            status = exc.response.status_code
+            if status == 400:
                 import logging
                 logging.getLogger("llm").error("400 response: %s", exc.response.text[:500])
-            if _attempt < max_retries - 1:
+            # 4xx（除 429）是确定性客户端错误，重试无意义；仅 429 与 5xx 值得重试。
+            retryable = status == 429 or status >= 500
+            if retryable and _attempt < max_retries - 1:
                 return await self._request(body, _attempt + 1)
-            raise RuntimeError(f"LLM request failed after {max_retries} attempts: {exc}") from exc
+            raise RuntimeError(f"LLM request failed after {_attempt + 1} attempts: {exc}") from exc
         except httpx.TransportError as exc:
             if _attempt < max_retries - 1:
                 return await self._request(body, _attempt + 1)

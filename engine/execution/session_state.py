@@ -14,7 +14,7 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 @dataclass
 class SessionCheckpoint:
-    employee_id: str
+    agent_id: str
     session_id: str
     task_type: str
     skill_chain_index: int  # -1 for DIRECT
@@ -32,8 +32,8 @@ class SessionCheckpoint:
 class SessionStateManager:
     """Persist and restore session execution state."""
 
-    def __init__(self, employee_dir: Path):
-        self._state_dir = employee_dir / "sessions" / ".state"
+    def __init__(self, agent_dir: Path):
+        self._state_dir = agent_dir / "sessions" / ".state"
         self._state_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, session_id: str) -> Path:

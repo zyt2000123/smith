@@ -16,16 +16,16 @@ log = logging.getLogger(__name__)
 async def handle(event: dict) -> None:
     """Entry point called by the plugin trigger.
 
-    ``event`` must contain ``employee_dir`` (Path or str) pointing to the
-    employee's data directory under ~/.agent-smith/employees/<id>/.
+    ``event`` must contain ``agent_dir`` (Path or str) pointing to the
+    agent's data directory (the on-disk agent profile dir).
     """
-    employee_dir = Path(event.get("employee_dir", ""))
-    if not employee_dir.is_dir():
-        log.warning("daily-report: employee_dir not found: %s", employee_dir)
+    agent_dir = Path(event.get("agent_dir", ""))
+    if not agent_dir.is_dir():
+        log.warning("daily-report: agent_dir not found: %s", agent_dir)
         return
 
     today = date.today().isoformat()
-    recent_file = employee_dir / "memory" / "recent.jsonl"
+    recent_file = agent_dir / "memory" / "recent.jsonl"
     if not recent_file.exists():
         log.info("daily-report: no recent.jsonl, skipping")
         return
@@ -71,7 +71,7 @@ async def handle(event: dict) -> None:
         *([f"- {b}" for b in blockers] if blockers else ["- (none)"]),
     ]
 
-    report_dir = employee_dir / "memory" / "agent"
+    report_dir = agent_dir / "memory" / "agent"
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"daily-report-{today}.md"
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

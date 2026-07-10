@@ -19,7 +19,9 @@
 
 ### 1.1 目的
 
-定义 Agent-Smith Agent 的记忆子系统：它要解决什么问题、如何设计、**为什么这样设计而不是别的方案**、做了哪些取舍、参考了哪些已有设计。
+定义 Smith 这个单常驻 Agent 的记忆子系统：它要解决什么问题、如何设计、**为什么这样设计而不是别的方案**、做了哪些取舍、参考了哪些已有设计。
+
+目录心智以 `docs/13-单常驻Agent架构重梳理.md` 为准：目标记忆目录是 `~/.agent-smith/agent/memory/`。代码参数已命名为 `agent_dir`；磁盘上的 `employees/<id>` 仍是迁移期兼容路径，不再代表“数字员工”产品模型。
 
 ### 1.2 问题陈述
 
@@ -124,7 +126,7 @@ Dream 的命名与机制参考 Stanford Generative Agents（Park et al., 2023）
 
 ### 4.1 写路径
 
-**触发**：`reply()` 与 `reply_stream()` 在对话收尾时调用 `save_conversation_memory(employee_dir, user_msg, reply, had_tools)`。流式路径通过执行事件流（`TOOL_CALL_START` / `SKILL_START`）跟踪 `had_tools`。
+**触发**：`reply()` 与 `reply_stream()` 在对话收尾时调用 `save_conversation_memory(agent_dir, user_msg, reply, had_tools)`。流式路径通过执行事件流（`TOOL_CALL_START` / `SKILL_START`）跟踪 `had_tools`。
 
 **门槛**：`had_tools=False` 直接返回——只有"干过活"的对话才值得记（FR-1）。设计判断：闲聊记忆是纯噪音，它会稀释检索质量并抬高编译成本。
 
@@ -135,6 +137,8 @@ Dream 的命名与机制参考 Stanford Generative Agents（Park et al., 2023）
 **条目文件格式**：
 
 ```markdown
+# 目标位置：~/.agent-smith/agent/memory/agent/<id>.md
+# 当前兼容位置：~/.agent-smith/employees/<id>/memory/agent/<id>.md
 ---
 id: a1b2c3d4e5f6
 scope: agent
@@ -220,7 +224,7 @@ query ──┬─▶ FTS5 BM25 取 2k 条
 prompt 记忆段 = 编译摘要 + query-time 检索块：
 
 1. `assemble_memory()`：按 facts → longterm → week → today 顺序拼接编译产物（总量有界：4 层 × ≤600 字符）；无编译产物时回退到 raw（recent.jsonl 末 10 条 + 条目摘要 ≤20 条 × 150 字符）
-2. `search_relevant_memories(employee_dir, user_message, top_k=5)`：按**当前用户消息**做混合检索，格式化为 `## Relevant Memories` 块（单条截 200 字符），经 `assemble(retrieved_memory=...)` 追加到记忆段
+2. `search_relevant_memories(agent_dir, user_message, top_k=5)`：按**当前用户消息**做混合检索，格式化为 `## Relevant Memories` 块（单条截 200 字符），经 `assemble(retrieved_memory=...)` 追加到记忆段。参数 `agent_dir` 语义上即 Smith 的 profile dir。
 
 两者互补：编译摘要回答"这个用户总体是谁"（**画像**），检索块回答"和这句话有关的旧经验是什么"（**情景**）。只有摘要则记忆与任务无关，只有检索则丢失全局画像——双轨是刻意的（DR-03）。
 
@@ -288,12 +292,12 @@ class MemoryStore(Protocol):
     async def remove(self, entry_id) -> bool
 
 # 引擎内部关键入口
-save_conversation_memory(employee_dir, user_msg, reply, had_tools) -> None      # 写路径总入口
-search_relevant_memories(employee_dir, query, top_k=5) -> str                   # query-time 注入块
+save_conversation_memory(agent_dir, user_msg, reply, had_tools) -> None         # 写路径总入口
+search_relevant_memories(agent_dir, query, top_k=5) -> str                      # query-time 注入块
 assemble_memory(memory_dir) -> str                                              # 编译摘要拼接
 run_compilation(memory_dir, llm) -> dict                                        # 四层编译
 DreamConsolidator(store).preview() / .apply()                                   # 整理
-UserPreferenceLearner(employee_dir).observe(user_msg, reply) -> list[str]       # 偏好学习
+UserPreferenceLearner(agent_dir).observe(user_msg, reply) -> list[str]          # 偏好学习
 SearchIndex(memory_dir).open(embed_fn) / .index_entry() / .search() / .close()  # 索引
 ```
 
@@ -457,6 +461,7 @@ SearchIndex(memory_dir).open(embed_fn) / .index_entry() / .search() / .close()  
 | 编译触发绑定对话计数（每 5 次） | 低频使用的 Agent 编译滞后 | 增加基于时间的触发（如每日首次对话强制编译） |
 | ~~`memory_ops` 工具与 store 目录布局不一致~~（已修复 2026-07-05） | 工具已按 scope 写子目录、跨目录检索、补 `last_accessed`，互通性测试 5/5 通过 | 残余：工具写入不进 search.sqlite 索引——为 `memory_ops.add` 补索引写入 |
 | 编译层字符限幅为提示词软约束 | LLM 超限时注入量轻微超预期 | `assemble_memory` 增加代码级截断，使 NFR-2 完全由代码保证 |
+| 记忆目录仍依赖 `employees/<id>` 旧 profile path | 文档和代码心智容易回到数字员工模型 | 目标路径改为 `~/.agent-smith/agent/memory/`，代码层增加 `agent_dir` 适配并逐步迁移 |
 
 ---
 

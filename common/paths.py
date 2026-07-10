@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+LEGACY_PROFILES_DIRNAME = "employees"  # ponytail: 磁盘遗留目录名，为不搬动实盘数据而保留
+
 
 @dataclass(frozen=True)
 class AppPaths:
@@ -22,7 +24,7 @@ class AppPaths:
 
     @property
     def legacy_agent_profiles_dir(self) -> Path:
-        return self.data_dir / "employees"
+        return self.data_dir / LEGACY_PROFILES_DIRNAME
 
     @property
     def sqlite_path(self) -> Path:

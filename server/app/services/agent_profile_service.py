@@ -1,53 +1,57 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import HTTPException
 
-from common.config import TEMPLATES_DIR
-from common.filesystem import init_employee_files, delete_employee_files
+from common.config import SMITH_PROFILE_DIR
 
-from ..domain.employee import EmployeeCreate, EmployeeUpdate, EmployeeOut
-from ..infrastructure.repositories.employee_repo import EmployeeRepo
+from ..schemas.agent_profile import AgentProfileCreate, AgentProfileUpdate, AgentProfileOut
+from ..infrastructure.profile_files import (
+    delete_agent_profile_files,
+    init_agent_profile_files,
+)
+from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
+from .template_service import ACTIVE_TEMPLATE_IDS
 
 
-class EmployeeService:
+class AgentProfileService:
 
-    def __init__(self, repo: EmployeeRepo) -> None:
+    def __init__(self, repo: AgentProfileRepo) -> None:
         self.repo = repo
 
-    async def list_employees(self) -> list[EmployeeOut]:
+    async def list_profiles(self) -> list[AgentProfileOut]:
         rows = await self.repo.list_all()
-        return [EmployeeOut(**r) for r in rows]
+        return [AgentProfileOut(**r) for r in rows]
 
-    async def get_employee(self, employee_id: str) -> EmployeeOut:
-        row = await self.repo.get(employee_id)
+    async def get_profile(self, agent_id: str) -> AgentProfileOut:
+        row = await self.repo.get(agent_id)
         if row is None:
-            raise HTTPException(404, "Employee not found")
-        return EmployeeOut(**row)
+            raise HTTPException(404, "Agent profile not found")
+        return AgentProfileOut(**row)
 
-    async def create_employee(self, body: EmployeeCreate) -> EmployeeOut:
-        template_dir = TEMPLATES_DIR / body.role
+    async def create_profile(self, body: AgentProfileCreate) -> AgentProfileOut:
+        if body.role not in ACTIVE_TEMPLATE_IDS:
+            allowed = ", ".join(sorted(ACTIVE_TEMPLATE_IDS))
+            raise HTTPException(400, f"Unsupported agent role. Allowed: {allowed}")
         data = body.model_dump()
         row = await self.repo.create(data)
-        init_employee_files(
+        init_agent_profile_files(
             row["id"],
-            template_dir=template_dir,
+            profile_seed_dir=SMITH_PROFILE_DIR,
             name=body.name,
             role=body.role,
             description=body.description,
         )
-        return EmployeeOut(**row)
+        return AgentProfileOut(**row)
 
-    async def update_employee(self, employee_id: str, body: EmployeeUpdate) -> EmployeeOut:
+    async def update_profile(self, agent_id: str, body: AgentProfileUpdate) -> AgentProfileOut:
         updates = body.model_dump(exclude_none=True)
-        row = await self.repo.update(employee_id, updates)
+        row = await self.repo.update(agent_id, updates)
         if row is None:
-            raise HTTPException(404, "Employee not found")
-        return EmployeeOut(**row)
+            raise HTTPException(404, "Agent profile not found")
+        return AgentProfileOut(**row)
 
-    async def delete_employee(self, employee_id: str) -> None:
-        deleted = await self.repo.delete(employee_id)
+    async def delete_profile(self, agent_id: str) -> None:
+        deleted = await self.repo.delete(agent_id)
         if not deleted:
-            raise HTTPException(404, "Employee not found")
-        delete_employee_files(employee_id)
+            raise HTTPException(404, "Agent profile not found")
+        delete_agent_profile_files(agent_id)

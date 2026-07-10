@@ -8,6 +8,7 @@ if TYPE_CHECKING:
 
 DEFAULT_MAX_REACT_ITERS = 60
 MAX_FAILED_TOOL_RECOVERY_ITERS = 20
+MAX_PREFLIGHT_CHALLENGE_ITERS = 20
 MAX_INCOMPLETE_FINAL_REPAIRS = 2
 TOOL_FAILURE_HINT = (
     "Multiple tool calls have failed consecutively. Change your approach - "
@@ -20,6 +21,9 @@ INCOMPLETE_FINAL_AFTER_TOOL_HINT = (
 )
 TOOL_FAILURE_BUDGET_MESSAGE = (
     "Tool failure recovery budget reached before a final answer."
+)
+PREFLIGHT_BUDGET_MESSAGE = (
+    "Tool preflight challenge budget reached before an operation could run."
 )
 TOOL_CALL_BUDGET_MESSAGE = (
     "Tool-call budget reached before a final answer."

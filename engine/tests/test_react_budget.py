@@ -5,7 +5,13 @@ import asyncio
 from engine.execution.agent_loop import _react_event_loop, _react_loop, _react_stream_loop
 from engine.execution.events import EventType
 from engine.llm.client import ChatResponse, ToolCallData
-from engine.react_budget import MAX_FAILED_TOOL_RECOVERY_ITERS, TOOL_FAILURE_BUDGET_MESSAGE
+from engine.react_budget import (
+    MAX_FAILED_TOOL_RECOVERY_ITERS,
+    MAX_PREFLIGHT_CHALLENGE_ITERS,
+    PREFLIGHT_BUDGET_MESSAGE,
+    TOOL_FAILURE_BUDGET_MESSAGE,
+)
+from engine.safety.fact_gate import FactGate, FactGateContext
 from engine.skill.executor import execute_skill
 from engine.skill.loader import SkillBody, SkillMeta
 from engine.tool.registry import ToolRegistry
@@ -103,6 +109,99 @@ def test_react_event_loop_failed_tool_round_can_still_stream_final_text():
         if event.type == EventType.TEXT_DELTA
     )
     assert text == "recovered"
+
+
+def test_react_event_loop_returns_preflight_to_model_without_executing_or_failing():
+    async def run():
+        executions: list[str] = []
+        registry = ToolRegistry()
+
+        async def edit_file(path: str):
+            executions.append(path)
+            return "edited"
+
+        registry.register("edit_file", "Edit a file", {}, edit_file)
+        first_call = ToolCallData(
+            id="edit-1",
+            name="edit_file",
+            arguments={"path": "engine/example.py"},
+        )
+        same_round_call = ToolCallData(
+            id="edit-2",
+            name="edit_file",
+            arguments={"path": "engine/example.py"},
+        )
+        retry_call = ToolCallData(
+            id="edit-3",
+            name="edit_file",
+            arguments={"path": "engine/example.py"},
+        )
+        llm = FakeLLM([
+            ChatResponse(tool_calls=[first_call, same_round_call]),
+            ChatResponse(tool_calls=[retry_call]),
+            ChatResponse(text="done"),
+        ])
+        gate = FactGate(FactGateContext("session-1", "turn-1"))
+        events = []
+        async for event in _react_event_loop(
+            llm,
+            [{"role": "user", "content": "edit the file"}],
+            registry,
+            max_iters=2,
+            fact_gate=gate,
+        ):
+            events.append(event)
+        return events, llm, executions
+
+    events, llm, executions = asyncio.run(run())
+
+    results = [event for event in events if event.type == EventType.TOOL_CALL_RESULT]
+    assert results[0].data["preflight"] is True
+    assert results[0].data["blocked"] is False
+    assert results[0].data["error"] is False
+    assert results[1].data["preflight"] is True
+    assert results[2].data["preflight"] is False
+    assert executions == ["engine/example.py"]
+    assert any(
+        message.get("role") == "tool" and str(message.get("content", "")).startswith("[PREFLIGHT]")
+        for message in llm.chat_calls[1]["messages"]
+    )
+    assert not any(
+        message.get("role") == "system" and "failed consecutively" in str(message.get("content", ""))
+        for call in llm.chat_calls
+        for message in call["messages"]
+    )
+
+
+def test_preflight_budget_counts_rounds_that_also_have_successful_tools() -> None:
+    async def run() -> str:
+        registry = ToolRegistry()
+
+        async def read_file(path: str):
+            return f"read {path}"
+
+        async def write_file(path: str):
+            return f"wrote {path}"
+
+        registry.register("read_file", "Read", {}, read_file)
+        registry.register("write_file", "Write", {}, write_file)
+        responses = []
+        for index in range(MAX_PREFLIGHT_CHALLENGE_ITERS):
+            responses.append(ChatResponse(tool_calls=[
+                ToolCallData(id=f"read-{index}", name="read_file", arguments={"path": f"input-{index}.txt"}),
+                ToolCallData(id=f"write-{index}", name="write_file", arguments={"path": f"output-{index}.txt"}),
+            ]))
+        llm = FakeLLM(responses)
+        gate = FactGate(FactGateContext("session-1", "turn-1"))
+        return await _react_loop(
+            llm,
+            [{"role": "user", "content": "change many files"}],
+            registry,
+            max_iters=MAX_PREFLIGHT_CHALLENGE_ITERS + 5,
+            fact_gate=gate,
+        )
+
+    assert asyncio.run(run()).startswith(PREFLIGHT_BUDGET_MESSAGE)
 
 
 def test_react_event_loop_uses_decision_response_as_final_text():

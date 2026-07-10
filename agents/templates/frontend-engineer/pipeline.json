@@ -1,6 +1,0 @@
-[
-  {"task_type": "feature", "pipeline": ["read-design-spec", "check-existing-components", "scaffold-component", "implement-logic", "style-and-responsive", "accessibility-pass", "visual-diff", "write-tests", "pr-with-screenshots"]},
-  {"task_type": "bugfix", "pipeline": ["reproduce-in-browser", "locate-component", "identify-root-cause", "fix-and-verify", "add-regression-test", "pr-with-before-after"]},
-  {"task_type": "review", "pipeline": ["check-visual-fidelity", "verify-accessibility", "review-component-api", "check-performance-impact", "validate-responsive"]},
-  {"task_type": "refactor", "pipeline": ["identify-smell", "plan-changes", "refactor-with-tests", "verify-visual-parity", "update-storybook"]}
-]

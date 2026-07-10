@@ -1,8 +1,0 @@
-[
-  {"name": "ci-cd-pipeline", "description": "CI/CD 管道设计与优化：构建、测试、部署自动化"},
-  {"name": "infrastructure-as-code", "description": "基础设施即代码：Terraform/Pulumi/CloudFormation 管理"},
-  {"name": "container-management", "description": "容器化与编排：Docker 构建优化、Kubernetes 运维"},
-  {"name": "monitoring-observability", "description": "可观测性体系：日志聚合、指标采集、分布式追踪、告警配置"},
-  {"name": "incident-response", "description": "故障响应：快速定位、回滚恢复、事后复盘"},
-  {"name": "security-hardening", "description": "安全加固：密钥管理、网络策略、镜像扫描、权限收敛"}
-]

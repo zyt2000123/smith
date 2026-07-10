@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-"""Version-controlled skill storage for employee-installed skills.
+"""Version-controlled skill storage for agent-installed skills.
 
-Each employee's skills live under ~/.agent-smith/employees/<id>/skills/.
+Each agent's skills live under the agent profile's skills dir (…/<id>/skills/).
 Layout per skill:
 
     skills/<name>/SKILL.md          # current version
@@ -23,10 +23,10 @@ _MAX_VERSIONS = 10
 
 
 class SkillStore:
-    """Version-controlled skill storage for employee-installed skills."""
+    """Version-controlled skill storage for agent-installed skills."""
 
     def __init__(self, skills_dir: Path) -> None:
-        self._dir = skills_dir  # ~/.agent-smith/employees/<id>/skills/
+        self._dir = skills_dir  # agent profile skills dir: …/<id>/skills/
 
     # ------------------------------------------------------------------
     # Internal helpers

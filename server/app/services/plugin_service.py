@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from fastapi import HTTPException
+
 from engine.plugin.registry import PluginRegistry, PluginManifest
 from engine.plugin.loader import load_handler
 from engine.plugin.trigger import PollingTrigger, WebhookTrigger, CronTrigger, TriggerBase
@@ -50,6 +52,35 @@ class PluginService:
 
     def get_plugin(self, name: str) -> PluginManifest | None:
         return self._registry.get(name)
+
+    async def receive_webhook(
+        self,
+        name: str,
+        payload: dict,
+        *,
+        github_event: str | None = None,
+    ) -> dict:
+        if self.get_plugin(name) is None:
+            raise HTTPException(404, f"Plugin '{name}' not found")
+
+        event_payload = dict(payload)
+        if github_event:
+            event_payload["_github_event"] = github_event
+
+        result = await self.handle_webhook(name, event_payload)
+        if result.get("status") == "error":
+            raise HTTPException(400, result.get("error", "handler error"))
+        return result
+
+    async def enable_plugin_or_404(self, name: str) -> dict:
+        if not await self.enable_plugin(name):
+            raise HTTPException(404, f"Plugin '{name}' not found")
+        return {"status": "enabled", "plugin": name}
+
+    async def disable_plugin_or_404(self, name: str) -> dict:
+        if not await self.disable_plugin(name):
+            raise HTTPException(404, f"Plugin '{name}' not found")
+        return {"status": "disabled", "plugin": name}
 
     async def enable_plugin(self, name: str) -> bool:
         manifest = self._registry.get(name)

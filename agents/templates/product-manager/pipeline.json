@@ -1,6 +1,0 @@
-[
-  {"task_type": "feature", "pipeline": ["identify-user-problem", "gather-data", "competitive-scan", "write-user-stories", "define-acceptance-criteria", "team-review", "prioritize", "track-delivery"]},
-  {"task_type": "analysis", "pipeline": ["define-question", "collect-data", "analyze-patterns", "draw-insights", "write-report", "present-findings"]},
-  {"task_type": "review", "pipeline": ["check-user-value", "verify-completeness", "assess-feasibility", "validate-priority", "confirm-success-metrics"]},
-  {"task_type": "planning", "pipeline": ["review-backlog", "assess-capacity", "prioritize-items", "define-milestones", "communicate-plan"]}
-]

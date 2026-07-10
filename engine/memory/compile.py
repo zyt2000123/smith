@@ -13,16 +13,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from ._files import atomic_write_text
 
 if TYPE_CHECKING:
     from engine.llm.client import LLMClient
 
 MAX_RECENT_CHARS = 8000
+MAX_DURABLE_CHARS = 10_000
 MIN_WINDOW_DAYS = 7
 MAX_WINDOW_DAYS = 14
+
+logger = logging.getLogger(__name__)
 
 
 def _fingerprint(keys: list[str]) -> str:
@@ -37,7 +44,7 @@ def _read_fp(path: Path) -> str:
 
 
 def _write_fp(path: Path, fp: str) -> None:
-    path.write_text(fp, encoding="utf-8")
+    atomic_write_text(path, fp)
 
 
 def _load_recent(memory_dir: Path) -> list[dict]:
@@ -121,7 +128,7 @@ async def compile_recent(memory_dir: Path, llm: "LLMClient") -> bool:
     else:
         summary = source
 
-    out.write_text(f"## Recent Activity\n\n{summary}\n", encoding="utf-8")
+    atomic_write_text(out, f"## Recent Activity\n\n{summary}\n")
     _write_fp(fp_file, fp)
     return True
 
@@ -142,7 +149,8 @@ Rules:
 6. Do NOT record language, tone, verbosity, or interaction preferences (managed separately).
 7. Do NOT repeat the same fact in different phrasings.
 8. Keep the Markdown structure; add new headings if needed.
-9. Output ONLY the updated memory content.
+9. Keep the complete output, including headings, within {max_chars} characters.
+10. Output ONLY the updated memory content.
 
 Existing memory:
 {existing}
@@ -171,9 +179,16 @@ async def compile_durable(memory_dir: Path, llm: "LLMClient") -> bool:
     summary = await _llm_summarize(llm, _DURABLE_MERGE_PROMPT.format(
         existing=existing or "(empty — first compilation)",
         new_events=new_source,
+        max_chars=MAX_DURABLE_CHARS,
     ))
 
-    out.write_text(f"## Durable Memory\n\n{summary}\n", encoding="utf-8")
+    durable = f"## Durable Memory\n\n{summary}\n"
+    if len(durable) > MAX_DURABLE_CHARS:
+        logger.warning("durable memory exceeded %s characters; truncating", MAX_DURABLE_CHARS)
+        durable = durable[:MAX_DURABLE_CHARS].rstrip()
+        if len(durable) < MAX_DURABLE_CHARS:
+            durable += "\n"
+    atomic_write_text(out, durable)
     _write_fp(fp_file, fp)
     return True
 
@@ -195,8 +210,14 @@ async def compact_episode(
     episodes_dir = memory_dir / "episodes"
     episodes_dir.mkdir(parents=True, exist_ok=True)
 
-    slug = topic.lower().replace(" ", "-")[:60]
-    out = episodes_dir / f"{slug}.md"
+    slug = re.sub(r"[^\w\u4e00-\u9fff-]+", "-", topic.lower()).strip("-_")[:60]
+    if not slug:
+        return None
+
+    episodes_root = episodes_dir.resolve()
+    out = (episodes_dir / f"{slug}.md").resolve()
+    if not out.is_relative_to(episodes_root):
+        raise ValueError("episode path escaped its storage directory")
 
     source = _entries_to_source(related_entries)
     summary = await _llm_summarize(llm, (
@@ -205,7 +226,7 @@ async def compact_episode(
         f"Max 800 chars.\n\n{source}"
     ))
 
-    out.write_text(f"# {topic}\n\n{summary}\n", encoding="utf-8")
+    atomic_write_text(out, f"# {topic}\n\n{summary}\n")
     return out
 
 
@@ -238,7 +259,13 @@ def assemble_memory(memory_dir: Path) -> str:
 async def run_compilation(memory_dir: Path, llm: "LLMClient") -> dict:
     """Run compilation pipeline. Returns {layer: recompiled_bool}."""
     memory_dir.mkdir(parents=True, exist_ok=True)
-    return {
-        "recent": await compile_recent(memory_dir, llm),
-        "durable": await compile_durable(memory_dir, llm),
-    }
+    results = {"recent": False, "durable": False}
+    try:
+        results["recent"] = await compile_recent(memory_dir, llm)
+    except Exception:
+        logger.warning("recent-memory compilation failed", exc_info=True)
+    try:
+        results["durable"] = await compile_durable(memory_dir, llm)
+    except Exception:
+        logger.warning("durable-memory compilation failed", exc_info=True)
+    return results

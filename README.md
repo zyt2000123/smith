@@ -54,7 +54,7 @@ server/ ──→ engine/ ──→ common/
 |---|---|
 | `common/` | 基础设施 — 配置加载、SQLite WAL、文件系统、日志 |
 | `engine/` | Agent 框架 — 执行引擎、LLM 调用、记忆、技能、工具、Hook 系统、安全护栏 |
-| `agents/` | 内容层 — Smith 模板、17 个技能、9 个工具、安全规则 |
+| `agents/` | 内容层 — Smith 模板、18 个技能、14 个工具、安全规则 |
 | `server/` | 平台层 — FastAPI 后端 + CLI 入口 |
 | `shell/` | 终端壳 — Ink/React TUI，自动拉起后端 |
 
@@ -74,7 +74,7 @@ server/ ──→ engine/ ──→ common/
   → 安全护栏（24 条正则规则拦截危险命令）
 ```
 
-三条路由：Bug Fix（debug → planning → testing → validation → review）、Feature（planning → architecture → testing → validation → review）、Direct（跳过技能链，直接 ReAct）。
+三条路由：Bug Fix（debug → planning → testing → validation → review）、Feature（full-stack-product → planning → architecture → testing → validation → review）、Direct（跳过技能链，直接 ReAct）。
 
 ### 技能系统
 
@@ -83,7 +83,7 @@ server/ ──→ engine/ ──→ common/
 | 类型 | 数量 | 作用 | 示例 |
 |---|---|---|---|
 | 流程型 | 9 个 | 控制"怎么做" | planning、sde-debug、code-review、testing-strategy |
-| 领域型 | 8 个 | 提供"知道什么" | frontend、backend、product、devops、testing、data-analysis |
+| 领域/通才型 | 9 个 | 提供"知道什么"和跨领域判断 | full-stack-product、frontend、backend、product、devops、testing、data-analysis |
 
 每个技能是一个 `SKILL.md`（YAML frontmatter + Markdown），支持版本管理和 rollback。新增技能只需在 `agents/skills/` 下加目录，不改任何代码。
 
@@ -125,13 +125,13 @@ Agent-Smith/
 ├── common/                  # 基础设施
 │   ├── config.py            #   路径常量
 │   ├── config_loader.py     #   四层 LLM 配置合并
-│   ├── database.py          #   SQLite WAL（6 表）
-│   └── filesystem.py        #   文件操作
+│   ├── database.py          #   SQLite 连接
+│   └── yaml_utils.py        #   YAML / JSON 读写
 │
 ├── engine/                  # Agent 执行框架
 │   ├── execution/           #   任务路由 + 技能链 + ReAct + 门禁 + 回退 + 压缩
 │   ├── llm/                 #   LLM 调用（OpenAI 兼容，流式 + tool_call）
-│   ├── prompt/              #   11 层 System Prompt 组装
+│   ├── prompt/              #   9 层 System Prompt 组装
 │   ├── tool/                #   工具协议 + 注册 + 输出截断
 │   ├── skill/               #   技能加载 + 版本管理
 │   ├── memory/              #   记忆存储 + Dream + 偏好学习
@@ -141,17 +141,19 @@ Agent-Smith/
 │   └── safety/              #   安全护栏（24 条规则，7 类）
 │
 ├── agents/                  # 内容定义
-│   ├── templates/           #   Smith 模板（personal-assistant）
-│   ├── skills/              #   17 个内置技能（9 流程型 + 8 领域型）
-│   ├── tools/               #   9 个工具 provider
+│   ├── smith/               #   Smith 内置身份种子（role/config/style/workflow）
+│   ├── skills/              #   18 个内置技能（流程型 + 领域/通才型）
+│   ├── tools/               #   14 个工具 provider
 │   └── safety/              #   安全规则
 │
 ├── server/                  # 平台后端
 │   └── app/
 │       ├── main.py          #   FastAPI 入口
-│       ├── cli.py           #   CLI 入口
+│       ├── cli.py           #   CLI 兼容入口 / re-export 门面
+│       ├── cli_*.py         #   CLI 内部模块（身份、shell、命令、chat）
+│       ├── schemas/         #   Pydantic 请求/响应模型
 │       ├── routers/         #   12 个路由（薄壳）
-│       ├── services/        #   11 个服务（编排层）
+│       ├── services/        #   服务编排层（Agent facade + legacy 兼容）
 │       └── infrastructure/  #   Repository 持久化
 │
 ├── shell/                   # Ink 终端壳
@@ -163,11 +165,12 @@ Agent-Smith/
 ```
 ~/.agent-smith/
 ├── config.yaml              # 平台级配置（LLM key/url/model）
-├── agents/<id>/             # Agent 实例
+├── agent/                   # Smith 的唯一运行时档案
 │   ├── role.md / ...        # 从模板复制，可编辑
 │   ├── memory/              # 记忆积累
 │   ├── skills/              # 自装技能
 │   └── sessions/            # 会话数据
+├── employees/               # legacy compatibility：旧 profile path
 ├── snapshots/               # 文件修改快照
 ├── tool-output/             # 截断的工具输出完整文件
 └── sqlite/agent-smith.sqlite

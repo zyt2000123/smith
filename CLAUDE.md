@@ -70,8 +70,9 @@ Plus `shell/` as the terminal frontend (Ink/React, calls server via HTTP).
 Rules:
 
 - `engine/` must not know FastAPI, HTTP, or agent instance management
-- `server/routers/` stays thin — extract params, call service, return result
-- `agents/templates/personal-assistant/` is where Smith's identity lives
+- `server/app/routers/` stays thin — extract params, call service, return result
+- `server/app/` is the FastAPI application package; keep this conventional layout
+- `agents/smith/` is where Smith's built-in identity seed lives
 - New capabilities → add skills or knowledge docs, not new agents
 
 ## 6. Files That Matter
@@ -79,18 +80,18 @@ Rules:
 | Area | Key Files |
 |---|---|
 | CLI entry | `server/app/cli.py` |
-| Agent lifecycle | `server/app/services/employee_service.py` (pending rename to agent_service) |
+| Agent lifecycle | `server/app/services/agent_profile_service.py` |
 | Chat + execution | `server/app/services/session_service.py` |
 | ReAct loop | `engine/execution/agent_loop.py` |
 | Task routing | `engine/execution/task_router.py` |
 | Skill chain | `engine/execution/skill_chain.py` |
 | Prompt assembly | `engine/prompt/assembler.py` |
-| Smith template | `agents/templates/personal-assistant/` |
+| Smith profile seed | `agents/smith/` |
 | Terminal shell | `shell/src/index.tsx` |
 
-## 7. Template System
+## 7. Smith Profile System
 
-Only `personal-assistant` is active — it defines Smith. The other 8 templates in `agents/templates/` are frozen legacy from the old multi-agent design. Their useful content (toolbox.md, expertise.json) may be extracted into knowledge docs later, but the templates themselves are not loaded or referenced.
+Only one built-in Smith identity exists. Its source files live in `agents/smith/`; the legacy `personal-assistant` id remains only as a compatibility role/template id for existing API and data paths. Legacy multi-agent templates and bundled skills have been removed; optional skills can still be installed into Smith's runtime profile.
 
 ## 8. Implementation Guidance
 
@@ -98,7 +99,7 @@ Only `personal-assistant` is active — it defines Smith. The other 8 templates 
 - Keep changes local; preserve compatibility unless asked to break it
 - New domain expertise → knowledge docs injected via assembler, not new templates
 - New task workflows → SKILL.md files, not new agents
-- The frozen templates stay in the repo but are not part of the product surface
+- Smith identity changes belong in `agents/smith/`; capabilities belong in skills
 
 ## 9. Testing And Verification
 

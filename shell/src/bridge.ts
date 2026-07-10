@@ -8,9 +8,10 @@ import {
   createSession,
   disablePlugin,
   enablePlugin,
-  ensureSmithAgent,
+  ensureAgentProfile,
   getLlmConfig,
   type LlmConfigInput,
+  listMessages,
   listPlugins,
   listSessions,
   listSkills,
@@ -19,9 +20,21 @@ import {
 } from "./api.js";
 import { ensureLocalServer } from "./dev-server.js";
 import type { AppStore } from "./store.js";
+import { createTurnEntry } from "./transcript.js";
 
 export class NodeBridge {
+  private abortController: AbortController | null = null;
+
   constructor(private store: StoreApi<AppStore>) {}
+
+  cancelRequest(): void {
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+      this.s.closeTurn();
+      this.s.set({ busy: false, statusLine: "Cancelled." });
+    }
+  }
 
   private get s() {
     return this.store.getState();
@@ -48,7 +61,7 @@ export class NodeBridge {
         return;
       }
 
-      await this.hydrateShell(server.baseUrl, server.note ? [server.note] : []);
+      await this.hydrateShell(server.baseUrl);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       this.s.set({
@@ -61,15 +74,15 @@ export class NodeBridge {
   }
 
   async hydrateShell(baseUrl: string, bootNotes: string[] = []): Promise<void> {
-    const agent = await ensureSmithAgent(baseUrl);
+    const agent = await ensureAgentProfile(baseUrl);
     const warnings: string[] = [];
     const [sessions, plugins, skills] = await Promise.all([
-      listSessions(baseUrl, agent.id).catch((e: unknown) => {
+      listSessions(baseUrl).catch((e: unknown) => {
         warnings.push(`Sessions unavailable: ${e instanceof Error ? e.message : e}`);
         return [];
       }),
       listPlugins(baseUrl),
-      listSkills(baseUrl, agent.id).catch((e: unknown) => {
+      listSkills(baseUrl).catch((e: unknown) => {
         warnings.push(`Skills unavailable: ${e instanceof Error ? e.message : e}`);
         return [];
       }),
@@ -100,7 +113,7 @@ export class NodeBridge {
 
   async refreshSkills(): Promise<void> {
     const { baseUrl, agent } = this.s;
-    if (baseUrl && agent) this.s.set({ skills: await listSkills(baseUrl, agent.id) });
+    if (baseUrl && agent) this.s.set({ skills: await listSkills(baseUrl) });
   }
 
   async togglePlugin(name: string, enable: boolean): Promise<void> {
@@ -111,6 +124,39 @@ export class NodeBridge {
     this.s.set({ panel: "plugins", statusLine: `${enable ? "Enabled" : "Disabled"} plugin ${name}.` });
   }
 
+  async resumeSession(session: import("./api.js").Session): Promise<void> {
+    const { baseUrl } = this.s;
+    try {
+      const msgs = await listMessages(baseUrl, session.id);
+      const entries = [];
+      for (let i = 0; i < msgs.length; i++) {
+        const msg = msgs[i]!;
+        if (msg.role === "user") {
+          const turn = createTurnEntry(msg.content);
+          const next = msgs[i + 1];
+          if (next?.role === "assistant") {
+            turn.assistantText = next.content;
+            turn.streaming = false;
+            i++;
+          } else {
+            turn.streaming = false;
+          }
+          entries.push(turn);
+        }
+      }
+      this.s.set({
+        currentSession: session,
+        transcript: entries,
+        tokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+        panel: "chat",
+        statusLine: `Resumed ${session.id} (${msgs.length} messages).`,
+      });
+    } catch {
+      this.s.set({ currentSession: session, panel: "chat" });
+      this.s.pushSystemLine(`Resumed ${session.id} (history unavailable).`);
+    }
+  }
+
   async sendMessage(text: string, skillName?: string): Promise<void> {
     const { baseUrl, agent, currentSession } = this.s;
     if (!baseUrl || !agent) {
@@ -119,32 +165,37 @@ export class NodeBridge {
     }
 
     this.s.set({ busy: true, panel: "chat", statusLine: "Processing…" });
+    this.abortController = new AbortController();
+    const { signal } = this.abortController;
     let session = currentSession;
     try {
       if (!session) {
         const title = text.trim().split(/\n+/)[0]?.slice(0, 40) || "Smith Session";
-        session = await createSession(baseUrl, agent.id, title);
+        session = await createSession(baseUrl, title);
         this.s.set({ currentSession: session });
       }
 
       this.s.pushTurn(text);
-      for await (const event of streamMessage(baseUrl, agent.id, session.id, text, { skillName })) {
+      for await (const event of streamMessage(baseUrl, session.id, text, { skillName, signal })) {
         this.s.applyEvent(event);
         if (event.type === "done") this.s.set({ statusLine: "Ready. Type the next task or /help." });
       }
       this.s.closeTurn();
 
-      const updated = await listSessions(baseUrl, agent.id);
+      const updated = await listSessions(baseUrl);
       this.s.set({ sessions: updated });
       if (!currentSession) {
         const matched = updated.find((s) => s.id === session!.id);
         if (matched) this.s.set({ currentSession: matched });
       }
     } catch (error) {
+      // User-initiated cancel: cancelRequest already closed the turn and set the status line.
+      if (signal.aborted) return;
       this.s.closeTurn();
       this.s.pushSystemLine(`[error] ${error instanceof Error ? error.message : error}`, "error");
       this.s.set({ statusLine: `Request failed: ${error instanceof Error ? error.message : error}` });
     } finally {
+      this.abortController = null;
       this.s.set({ busy: false });
     }
   }

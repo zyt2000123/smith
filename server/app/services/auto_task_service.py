@@ -5,12 +5,14 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
-from engine.execution.agent_loop import reply as engine_reply
+from engine.execution.agent_loop import reply_with_runtime as engine_reply_with_runtime
+from engine.execution.runtime import EngineRequest
 
-from ..domain.auto_task import AutoTaskCreate, AutoTaskUpdate, AutoTaskOut, AutoTaskRunOut
+from ..schemas.auto_task import AutoTaskCreate, AutoTaskUpdate, AutoTaskOut, AutoTaskRunOut
 from ..infrastructure.repositories.auto_task_repo import AutoTaskRepo
-from ..infrastructure.repositories.employee_repo import EmployeeRepo
+from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
 from ..infrastructure.repositories.session_repo import SessionRepo
+from .engine_runtime import build_engine_runtime
 from ..utils.cron import next_cron_time, next_interval_time
 
 log = logging.getLogger(__name__)
@@ -21,32 +23,32 @@ class AutoTaskService:
     def __init__(
         self,
         auto_task_repo: AutoTaskRepo,
-        employee_repo: EmployeeRepo,
+        agent_profile_repo: AgentProfileRepo,
         session_repo: SessionRepo,
     ) -> None:
         self.repo = auto_task_repo
-        self.employee_repo = employee_repo
+        self.agent_profile_repo = agent_profile_repo
         self.session_repo = session_repo
 
     # ── CRUD ──
 
     async def create_auto_task(
-        self, employee_id: str, body: AutoTaskCreate
+        self, agent_id: str, body: AutoTaskCreate
     ) -> AutoTaskOut:
-        emp = await self.employee_repo.get(employee_id)
+        emp = await self.agent_profile_repo.get(agent_id)
         if emp is None:
-            raise HTTPException(404, "Employee not found")
+            raise HTTPException(404, "Agent profile not found")
 
         next_run = self._calc_next_run(body.trigger_type, body.trigger_config)
 
-        row = await self.repo.create(employee_id, {
+        row = await self.repo.create(agent_id, {
             **body.model_dump(),
             "next_run_at": next_run,
         })
         return AutoTaskOut(**row)
 
-    async def list_auto_tasks(self, employee_id: str) -> list[AutoTaskOut]:
-        rows = await self.repo.list_by_employee(employee_id)
+    async def list_auto_tasks(self, agent_id: str) -> list[AutoTaskOut]:
+        rows = await self.repo.list_by_agent(agent_id)
         return [AutoTaskOut(**r) for r in rows]
 
     async def get_auto_task(self, task_id: str) -> AutoTaskOut:
@@ -90,19 +92,19 @@ class AutoTaskService:
     async def run_auto_task(self, task: dict) -> AutoTaskRunOut:
         """Execute: create a session, send the instruction to engine, save the run."""
         task_id = task["id"]
-        employee_id = task["employee_id"]
+        agent_id = task["agent_id"]
 
         # Mark running
         await self.repo.update(task_id, {"status": "running"})
         run = await self.repo.create_run(task_id)
 
         try:
-            emp = await self.employee_repo.get(employee_id)
+            emp = await self.agent_profile_repo.get(agent_id)
             emp_name = emp["name"] if emp else "Agent"
 
             # Create a session for this run
             session = await self.session_repo.create(
-                employee_id, f"[自动] {task['title']}"
+                agent_id, f"[自动] {task['title']}"
             )
 
             # Save the instruction as a user message
@@ -111,9 +113,17 @@ class AutoTaskService:
             )
 
             # Call engine
-            reply_text = await engine_reply(
-                employee_id, emp_name, task["instruction"]
+            runtime, services = build_engine_runtime(
+                agent_id,
+                emp_name,
+                session_id=session["id"],
             )
+            result = await engine_reply_with_runtime(
+                EngineRequest(message=task["instruction"]),
+                runtime,
+                services,
+            )
+            reply_text = result.text
 
             # Save the reply
             await self.session_repo.add_message(

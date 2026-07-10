@@ -1,10 +1,6 @@
 """task_router 单测：上下文线索路由 + Evaluation-Sensitive 检测。"""
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from execution.task_router import (  # noqa: E402
+from engine.execution.task_router import (
     TaskType,
     detect_eval_sensitive,
     route_task,

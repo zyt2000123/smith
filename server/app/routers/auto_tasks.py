@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 
-from ..domain.auto_task import (
+from ..schemas.auto_task import (
     AutoTaskCreate,
     AutoTaskUpdate,
     AutoTaskOut,
@@ -8,37 +8,39 @@ from ..domain.auto_task import (
 )
 from ..services.auto_task_service import AutoTaskService
 from ..infrastructure.repositories.auto_task_repo import AutoTaskRepo
-from ..infrastructure.repositories.employee_repo import EmployeeRepo
+from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
 from ..infrastructure.repositories.session_repo import SessionRepo
 
 router = APIRouter(
-    prefix="/api/employees/{employee_id}/auto-tasks", tags=["auto-tasks"]
+    prefix="/api/agents/{agent_id}/auto-tasks",
+    tags=["legacy-auto-tasks"],
+    include_in_schema=False,
 )
 
 
 def get_service() -> AutoTaskService:
-    return AutoTaskService(AutoTaskRepo(), EmployeeRepo(), SessionRepo())
+    return AutoTaskService(AutoTaskRepo(), AgentProfileRepo(), SessionRepo())
 
 
 @router.get("", response_model=list[AutoTaskOut])
 async def list_auto_tasks(
-    employee_id: str, svc: AutoTaskService = Depends(get_service)
+    agent_id: str, svc: AutoTaskService = Depends(get_service)
 ):
-    return await svc.list_auto_tasks(employee_id)
+    return await svc.list_auto_tasks(agent_id)
 
 
 @router.post("", response_model=AutoTaskOut, status_code=201)
 async def create_auto_task(
-    employee_id: str,
+    agent_id: str,
     body: AutoTaskCreate,
     svc: AutoTaskService = Depends(get_service),
 ):
-    return await svc.create_auto_task(employee_id, body)
+    return await svc.create_auto_task(agent_id, body)
 
 
 @router.put("/{task_id}", response_model=AutoTaskOut)
 async def update_auto_task(
-    employee_id: str,
+    agent_id: str,
     task_id: str,
     body: AutoTaskUpdate,
     svc: AutoTaskService = Depends(get_service),
@@ -48,7 +50,7 @@ async def update_auto_task(
 
 @router.post("/{task_id}/trigger", response_model=AutoTaskRunOut)
 async def trigger_auto_task(
-    employee_id: str,
+    agent_id: str,
     task_id: str,
     svc: AutoTaskService = Depends(get_service),
 ):
@@ -57,7 +59,7 @@ async def trigger_auto_task(
 
 @router.delete("/{task_id}", status_code=204)
 async def delete_auto_task(
-    employee_id: str,
+    agent_id: str,
     task_id: str,
     svc: AutoTaskService = Depends(get_service),
 ):
@@ -66,7 +68,7 @@ async def delete_auto_task(
 
 @router.get("/{task_id}/runs", response_model=list[AutoTaskRunOut])
 async def list_runs(
-    employee_id: str,
+    agent_id: str,
     task_id: str,
     svc: AutoTaskService = Depends(get_service),
 ):

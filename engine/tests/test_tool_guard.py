@@ -73,7 +73,7 @@ def test_uv_add_in_user_project_allowed():
 
 
 def test_rm_platform_data_blocked():
-    assert not _check("rm -rf ~/.agent-smith/employees").allowed
+    assert not _check("rm -rf ~/.agent-smith/agent").allowed
 
 
 def test_path_tools_are_guarded():

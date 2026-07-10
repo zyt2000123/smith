@@ -1,36 +1,37 @@
-# Agent 模板与技能规范
+# Smith 身份与技能规范
 
-本文档描述 Agent-Smith 的角色模板文件格式、内置技能规范、工具 Provider 接口、安全规则和技能自进化机制。
+本文档描述 Agent-Smith 的 Smith 内置身份种子、内置技能规范、工具 Provider 接口、安全规则和技能自进化机制。
 
 ---
 
-## 1. 角色模板文件格式
+## 1. Smith 身份文件格式
 
-每个角色模板是 `agents/templates/<role-name>/` 目录下的 9 个文件，完整定义一个 Agent 的身份、行为和能力边界。
+Agent-Smith 只有一个内置身份：Smith。出厂身份种子位于 `agents/smith/`，只定义基础人格、全局工作规约、用户上下文和运行配置。
+
+具体能力不再通过新增 Agent 模板扩展，而是通过 `agents/skills/*/SKILL.md` 按需加载。
 
 ### 1.1 config.yaml — 元信息
 
 ```yaml
-name: 后端工程师
-role: backend-engineer
-description: 负责服务端 API 开发、数据模型设计和系统集成
+name: 个人助手
+role: personal-assistant
+description: 面向个人工作流的常驻本地 Agent，负责理解目标、整理上下文、检索信息、规划执行并交付可落地结果
 llm:
-  model: null  # null 表示继承上层配置（平台级 → 模板级 → Agent 级 → 会话级）
+  model: null
 knowledge:
-  - api-design
-  - database-modeling
-  - authentication
-  - caching-strategies
-  - message-queues
+  - personal-workflow
+  - local-context
 tools:
   enabled:
     - read_file
     - write_file
+    - edit_file
+    - grep
     - shell
-    - search_knowledge
+    - web_search
     - web_fetch
-    - skill_load
-    - memory_ops
+    - git_ops
+    - todo
 ```
 
 关键字段说明：
@@ -38,7 +39,7 @@ tools:
 | 字段 | 类型 | 含义 |
 |------|------|------|
 | `name` | string | 显示名称（中文） |
-| `role` | string | 角色标识（kebab-case，同目录名） |
+| `role` | string | 固定为 `personal-assistant` |
 | `description` | string | 一句话职责描述 |
 | `llm.model` | string \| null | LLM 模型名，null 继承上层 |
 | `knowledge` | list[string] | 知识领域标签，用于知识库检索 |
@@ -46,90 +47,47 @@ tools:
 
 ### 1.2 role.md — "我是谁"
 
-定义 Agent 的核心身份：
+定义 Smith 的核心身份：
 
 - **Core Mission** — 一句话使命宣言
 - **Non-Negotiable Principles** — 不可协商的原则（通常 4-5 条）
 - **Done Criteria** — 什么算"完成"的可验证标准
 - **Anti-Goals** — 明确列出"不做什么"，划定职责边界
 
-示例（后端工程师）：
-```markdown
-# Core Mission
-设计和实现可靠、安全、高性能的服务端系统，为前端和外部系统提供稳定的 API 和数据服务。
-
-# Non-Negotiable Principles
-1. API 契约即文档：接口先定义后实现，变更必须向后兼容
-2. 数据完整性第一：所有写操作必须有事务保护和幂等设计
-3. 安全无例外：输入校验、权限检查、SQL 参数化，无一可省
-...
-
-# Anti-Goals
-- 不做前端页面开发和 UI 调整
-- 不做基础设施层面的运维（交给 DevOps）
-```
+重要边界：Smith 不根据任务切换成其他 Agent；具体能力通过 skill 按需加载。
 
 ### 1.3 style.md — "我怎么工作"
 
-定义 Agent 的工作风格和决策方式：
+定义 Smith 的沟通风格和判断习惯：
 
 - **Working Style** — 工作风格描述（自底向上/自顶向下等）
 - **Decision Heuristics** — `When <场景>: <决策>` 格式的启发式规则
 - **Good Habits** — 推荐的好习惯
 - **Anti-Patterns** — 明确禁止的反模式
 
-### 1.4 workflow.md — "我按什么流程交付"
+### 1.4 workflow.md — 全局工作规约
 
-完整的工作流 SOP，包含：
+`workflow.md` 不承载具体场景的完整 SOP，而是约束 Smith 什么时候调用 skill、什么时候调用工具、什么时候停下来确认。
 
-**任务路由**（3 条路由 + 直接回复）：
+典型内容：
 
-| 路由 | 触发条件 | 技能链 |
-|------|---------|--------|
-| Bug Fix | 异常日志、错误响应、数据不一致 | `sde-debug → planning → testing-strategy → change-validation → code-review` |
-| Feature | 新功能、数据模型变更、服务集成 | `planning → architecture(仅大型变更) → testing-strategy → change-validation → code-review` |
-| Refactor | 性能优化、架构调整、技术债清理 | `planning → testing-strategy → change-validation → code-review` |
-| 简单问答 | 不涉及代码变更的咨询 | 直接回复 |
+- 直接回答、本地上下文、产品/全栈任务、Bug、代码修改、审查、外部事实的路由原则
+- 工具调用规约：每次工具调用必须回答一个明确问题
+- skill 使用规约：只使用当前已加载的 skill，没有匹配项时走通用流程
+- 公共步骤：Align → Gather → Advance → Verify → Deliver
+- 停下来确认的条件
 
-**强制技能链硬规则**：
-- Bug Fix **必须**使用 sde-debug 和 testing-strategy，不可跳过
-- architecture 仅在变更涉及 3+ 文件或跨模块时触发
-- code-review **始终**是最后一步，不可跳过
-- testing-strategy 必须在 change-validation 之前完成
+### 1.5 toolbox.md — 工具使用原则
 
-**公共 5 步骤**（所有路由共享）：
+`toolbox.md` 只写工具使用原则；实际工具列表由 ToolRegistry 动态注入，避免模板中写了已不存在或未启用的工具。
 
-1. **Understand（理解）** → 门禁：能准确复述需求 + 识别至少 3 个边界条件 + 明确数据流向
-2. **Investigate（调查）** → 门禁：已确认可复用资源 + 技术方案可行 + 依赖已明确
-3. **Implement（实现）** → 门禁：实现方案与规划一致 + 接口契约完整 + lint 零错误
-4. **Verify（验证）** → 门禁：测试全部通过 + 无 N+1 查询 + 无回归 + 迁移可回滚
-5. **Deliver（交付）** → 门禁：测试实际运行并通过 + API 文档已更新 + 迁移回滚已验证
+核心原则：
 
-**回退策略**：
-```
-Implementation 失败 → 回退到 Planning，重新评估方案
-Verify 失败 → 回退到 Implementation，修复后重新验证
-同一失败出现 2 次 → 换策略（不同技术方案/架构）
-换策略后仍失败 → 上报用户，附带已尝试方案和失败原因
-```
-
-### 1.5 toolbox.md — "我能用什么工具"
-
-工具清单，按用途分组，附最佳实践：
-```markdown
-## Code Editing
-- **read_file** — 阅读现有服务代码、配置、迁移文件
-- **write_file** — 创建新的模型、服务、路由、测试文件
-- **shell** — 运行测试、数据库迁移、代码检查
-
-## Investigation
-- **search_knowledge** — 查询 API 文档、数据库 schema、架构决策记录
-- **web_fetch** — 获取第三方服务文档和技术方案
-
-## Workflow
-- **skill_load** — 加载 planning / code-review / sde-debug / architecture 技能
-- **memory_ops** — 记录架构决策、接口变更历史、已知问题
-```
+- 能直接回答的问题不调用工具
+- 涉及本地文件/仓库/配置时先读现状再判断
+- 写入前确认当前内容和相邻风格
+- 命令失败后先分析错误，不连续重复同一失败命令
+- Git 操作只围绕当前任务，避免混入无关改动
 
 ### 1.6 context.md — 用户偏好
 
@@ -147,56 +105,27 @@ Verify 失败 → 回退到 Implementation，修复后重新验证
 (Auto-filled through interaction)
 ```
 
-### 1.7 expertise.json — 核心能力列表
+### 1.7 已移除的旧结构化人格文件
 
-```json
-[
-  {"name": "api-development", "description": "RESTful/GraphQL API 设计与实现，含版本管理和文档生成"},
-  {"name": "database-design", "description": "关系型和文档型数据库建模、迁移管理、查询优化"},
-  ...
-]
-```
+以下文件不再属于 Smith 身份种子：
 
-### 1.8 traits.json — 工作风格标签
+- `expertise.json`
+- `traits.json`
+- `pipeline.json`
 
-```json
-["system-thinking", "data-first", "contract-driven", "defensive-coding", "observability-aware"]
-```
-
-### 1.9 pipeline.json — 交付管线
-
-按任务类型定义有序执行步骤：
-
-```json
-[
-  {"task_type": "feature", "pipeline": ["define-api-contract", "design-data-model", "write-migration", "implement-repository", "implement-service", "implement-controller", "write-tests", "update-api-docs", "pr-with-test-report"]},
-  {"task_type": "bugfix", "pipeline": ["reproduce-with-logs", "trace-request-flow", "identify-root-cause", "fix-and-add-test", "verify-no-regression", "pr-with-evidence"]},
-  {"task_type": "review", "pipeline": ["check-api-contract", "review-sql-queries", "verify-error-handling", "check-security", "validate-test-coverage"]},
-  {"task_type": "migration", "pipeline": ["backup-strategy", "write-migration", "test-rollback", "migrate-staging", "verify-data-integrity", "migrate-production"]}
-]
-```
+旧文件承担的能力画像、风格标签和交付管线职责已经迁移到 skill metadata 和 `SKILL.md` 中。
 
 ---
 
-## 2. 内置角色模板
+## 2. 内置 Smith 身份与通才 skill
 
-9 个内置模板，位于 `agents/templates/` 目录下：
+当前只有一个内置身份目录：
 
-| 模板目录 | 角色名称 | shell-native 默认 | 特化领域 |
-|----------|---------|-------------------|---------|
-| `personal-assistant` | 个人助手 | Yes | 目标澄清、本地执行、信息检索、写作整理、长期上下文维护 |
-| `backend-engineer` | 后端工程师 | Yes | API 开发、数据库设计、安全、缓存策略、消息队列 |
-| `frontend-engineer` | 前端工程师 | Yes | React 模式、CSS 布局、无障碍、性能优化、设计系统 |
-| `devops-engineer` | 运维工程师 | Yes | CI/CD 管道、容器编排、IaC、监控告警、云服务 |
-| `test-engineer` | 测试工程师 | Yes | 测试模式、测试框架、边界分析、Mock 策略、CI 测试 |
-| `data-analyst` | 数据分析师 | Yes | SQL 分析、统计方法、数据可视化、业务指标、数据质量 |
-| `product-manager` | 产品经理 | Yes, 可按配置收窄 | 用户研究、产品策略、需求撰写、数据分析、竞品分析 |
-| `content-ops` | 内容运营 | Yes, 可按配置收窄 | 技术文档、内容策略、风格指南、信息架构、SEO 基础 |
-| `ui-designer` | UI 设计师 | Yes, 可按配置收窄 | 设计系统、交互模式、视觉层级、无障碍标准、响应式设计 |
+| 身份目录 | 兼容 role id | 用途 |
+|----------|------------|------|
+| `agents/smith/` | `personal-assistant` | 唯一常驻 Agent 的基础身份、风格、上下文和运行配置 |
 
-**shell-native 默认**：Agent-Smith 的 Agent 定位是本地终端原生执行体，默认具备 shell 能力；产品/内容/设计类模板也不再从产品定义上禁止 shell。是否收窄某个 Agent 的工具集，应通过 `employees/<id>/config.yaml` 的 `tools.enabled/disabled` 或更细粒度 guard 配置完成，而不是把「角色类型」和「本地执行权限」绑定死。
-
-**共性**：所有模板共享同一工作流骨架（5 步：Understand → Investigate → Implement → Verify → Deliver）和强制技能链，差异仅在领域专有内容（知识标签、专家能力、风格标签、管线步骤）。
+仓库默认不附带内置 skill；需要的能力可安装到 Smith 的运行时档案中，也可按需加入 `agents/skills/` 作为内置内容。
 
 ---
 
@@ -247,45 +176,11 @@ output: "numbered implementation plan with verification points"
 
 ---
 
-## 4. 内置技能
+## 4. 技能加载
 
-6 个内置技能，位于 `agents/skills/` 目录下，只读不可修改：
+`agents/skills/` 是可选的内置技能入口，仓库默认不附带技能。Smith 还会加载 `~/.agent-smith/agent/skills/` 下的用户技能；同名用户技能覆盖内置技能。
 
-| 技能 | 触发时机 | 核心作用 |
-|------|---------|---------|
-| `planning` | `task_start`（任务开始） | 需求澄清 → 范围界定 → 步骤分解（3-7 步） → 风险识别 → 计划确认 |
-| `architecture` | `large_change`（3+ 文件跨 2+ 模块） | 一致性 / 可维护性 / 可扩展性 / 安全性 / 性能 五维评审，输出 ADR |
-| `sde-debug` | `on_error`（遇到错误） | 复现 → 假设（2-3 个） → 验证 → 修复。铁律：不确认根因不修复 |
-| `testing-strategy` | `pre_implement`（实现前） | 测试金字塔选择 + 关键用例 + 边界用例 + 显式"不测试"项 |
-| `change-validation` | `pre_review`（Review 前） | 构建 / 测试 / 回归 / 约定 / 安全 五项检查，输出 PASS/FAIL 报告 |
-| `code-review` | `pre_commit`（提交前） | 正确性 / 安全 / 性能 / 可读性 四维审查，四级严重性（critical/major/minor/nit） |
-
-### 技能间的调用顺序
-
-技能通过 `engine/execution/skill_chain.py` 按链式顺序执行。典型调用链：
-
-```
-Feature:  planning → [architecture] → testing-strategy → change-validation → code-review
-Bug Fix:  sde-debug → planning → testing-strategy → change-validation → code-review
-Refactor: planning → testing-strategy → change-validation → code-review
-```
-
-### sde-debug 铁律
-
-```
-不修复没有确认根因的问题。"能跑了"不等于"修好了"。
-```
-
-每个结论都需要对应的证据（日志片段、变量值、测试结果）。"我觉得"不是证据。
-
-### code-review 严重性级别
-
-| 级别 | 含义 | 示例 |
-|------|------|------|
-| `critical` | 必须修复才能合并 | Bug、安全漏洞、数据丢失风险 |
-| `major` | 强烈建议修复 | 性能问题、错误处理缺失 |
-| `minor` | 建议改进 | 命名、注释、代码风格 |
-| `nit` | 可选优化 | 个人偏好级别的建议 |
+Feature / Bug Fix 只执行当前实际加载且匹配预定义链路的技能。如果没有匹配技能，运行时直接回落到普通 ReAct。
 
 ---
 
@@ -329,8 +224,8 @@ async def execute(*, param1: str, param2: int = 0) -> str:
 | `search_knowledge` | `query`, `top_k`, `category` | 知识库搜索（当前为 Stub，待连接 Hub 向量/全文索引） |
 | `web_fetch` | `url`, `timeout` | 仅允许 http/https，50KB 内容上限，默认 15s 超时（最大 30s），阻止 file/ftp/data scheme |
 | `skill_load` | `name` | 按名称加载 `agents/skills/<name>/SKILL.md`，找不到时列出可用技能 |
-| `skill_manage` | `action`, `employee_id`, `skill_name`, ... | 7 个操作：list/get/create/edit/patch/versions/rollback。内置技能只读 |
-| `memory_ops` | `action`, `employee_id`, `query`/`content`/`evidence`/`memory_id` | 4 个操作：search/add/update/remove。强制要求 evidence，自动拒绝含敏感信息（API key、密码等）的记忆 |
+| `skill_manage` | `action`, `agent_id`, `skill_name`, ... | 7 个操作：list/get/create/edit/patch/versions/rollback。内置技能只读 |
+| `memory_ops` | `action`, `agent_id`, `query`/`content`/`evidence`/`memory_id` | 4 个操作：search/add/update/remove。强制要求 evidence，自动拒绝含敏感信息（API key、密码等）的记忆 |
 | `git_ops` | `action`, `cwd`, `branch`, `message`, `files`, ... | 8 个操作：status/diff/branch_create/commit/push/worktree_create/worktree_remove/discover。提交前自动检查敏感文件（.env, .pem, .key, .ssh/ 等） |
 
 ### 工具输出截断
@@ -411,10 +306,10 @@ async def execute(*, param1: str, param2: int = 0) -> str:
 
 | 操作 | 必填参数 | 说明 |
 |------|---------|------|
-| `list` | `employee_id` | 列出所有技能（内置 + Agent），含来源标记 |
-| `get` | `employee_id`, `skill_name` | 读取技能内容（优先 Agent 版本，其次内置） |
-| `create` | `employee_id`, `skill_name`, `content` | 创建新 Agent 技能（不可与内置技能同名） |
-| `edit` | `employee_id`, `skill_name`, `content` | 全文替换 Agent 技能（自动存版本） |
-| `patch` | `employee_id`, `skill_name`, `section`, `section_content` | 按 Markdown 章节局部替换（自动存版本） |
-| `versions` | `employee_id`, `skill_name` | 列出版本快照清单 |
-| `rollback` | `employee_id`, `skill_name`, `version_id` | 回滚到指定版本 |
+| `list` | `agent_id` | 列出所有技能（内置 + Agent），含来源标记 |
+| `get` | `agent_id`, `skill_name` | 读取技能内容（优先 Agent 版本，其次内置） |
+| `create` | `agent_id`, `skill_name`, `content` | 创建新 Agent 技能（不可与内置技能同名） |
+| `edit` | `agent_id`, `skill_name`, `content` | 全文替换 Agent 技能（自动存版本） |
+| `patch` | `agent_id`, `skill_name`, `section`, `section_content` | 按 Markdown 章节局部替换（自动存版本） |
+| `versions` | `agent_id`, `skill_name` | 列出版本快照清单 |
+| `rollback` | `agent_id`, `skill_name`, `version_id` | 回滚到指定版本 |

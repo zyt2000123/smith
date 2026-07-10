@@ -7,12 +7,9 @@ import re
 import tempfile
 from pathlib import Path
 
-import sys
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from tool.interface import ToolCall  # noqa: E402
-from tool.registry import ToolRegistry  # noqa: E402
+from engine.execution.agent_loop import _enabled_tools_from_config
+from engine.tool.interface import ToolCall
+from engine.tool.registry import ToolRegistry
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +61,91 @@ def test_duplicate_tool_registration_is_rejected():
         raise AssertionError("duplicate tool registration was accepted")
 
 
+def test_tool_allowlist_filters_schema_prompt_and_execution():
+    async def run():
+        registry = ToolRegistry()
+        registry.register("allowed", "", {}, lambda: "OK")
+        registry.register("disabled", "", {}, lambda: "NOPE")
+
+        unknown = registry.set_enabled(["allowed", "missing"])
+        schemas = registry.get_schemas()
+        tools = registry.list_tools()
+        allowed = await registry.execute(ToolCall(id="1", name="allowed", arguments={}))
+        disabled = await registry.execute(ToolCall(id="2", name="disabled", arguments={}))
+        return unknown, schemas, tools, allowed, disabled
+
+    unknown, schemas, tools, allowed, disabled = asyncio.run(run())
+
+    assert unknown == ["missing"]
+    assert [s["function"]["name"] for s in schemas] == ["allowed"]
+    assert [t.name for t in tools] == ["allowed"]
+    assert not allowed.is_error
+    assert disabled.is_error
+    assert "Tool disabled" in disabled.content
+
+
+def test_web_tool_aliases_execute_canonical_tools():
+    async def run():
+        registry = ToolRegistry()
+        registry.register("web_search", "", {}, lambda query: f"searched {query}")
+        registry.register("web_fetch", "", {}, lambda url: f"fetched {url}")
+        unknown_config = registry.set_enabled(["websearch", "webfetch"])
+        schemas = registry.get_schemas()
+
+        search = await registry.execute(
+            ToolCall(id="1", name="websearch", arguments={"query": "docs"})
+        )
+        fetch = await registry.execute(
+            ToolCall(id="2", name="webfetch", arguments={"url": "https://example.com"})
+        )
+        unknown = await registry.execute(
+            ToolCall(id="3", name="web_lookup", arguments={"query": "docs"})
+        )
+        return unknown_config, schemas, search, fetch, unknown
+
+    unknown_config, schemas, search, fetch, unknown = asyncio.run(run())
+
+    assert unknown_config == []
+    assert [s["function"]["name"] for s in schemas] == ["web_search", "web_fetch"]
+    assert not search.is_error
+    assert search.content == "searched docs"
+    assert not fetch.is_error
+    assert fetch.content == "fetched https://example.com"
+    assert unknown.is_error
+    assert "Unknown tool: web_lookup" in unknown.content
+
+
+def test_agent_tool_config_hides_internal_and_stale_tools_by_default():
+    registry = ToolRegistry()
+    for name in [
+        "read_file",
+        "write_file",
+        "skill_load",
+        "skill_manage",
+        "memory_ops",
+        "todo",
+    ]:
+        registry.register(name, "", {}, lambda: "OK")
+
+    enabled = _enabled_tools_from_config(
+        {
+            "tools": {
+                "enabled": [
+                    "read_file",
+                    "skill_load",
+                    "skill_manage",
+                    "memory_ops",
+                    "search_knowledge",
+                    "todo",
+                ]
+            }
+        },
+        registry,
+    )
+
+    assert enabled == ["read_file", "todo"]
+
+
 def test_read_file_can_page_large_files():
     read_file = _load_tool_module("read_file")
     large_text = "".join(f"line {i}\n" for i in range(7000))
@@ -90,6 +172,20 @@ def test_web_fetch_rejects_local_network_targets():
     assert "scheme 'file'" in web_fetch._validate_url("file:///etc/passwd")
 
 
+def test_web_fetch_plain_html_fallback_extracts_text():
+    web_fetch = _load_tool_module("web_fetch")
+
+    text = web_fetch._html_to_text(
+        "<html><head><title>Title</title><style>.x{}</style></head>"
+        "<body><h1>Hello</h1><script>alert(1)</script><p>World&nbsp;again</p></body></html>"
+    )
+
+    assert "Hello" in text
+    assert "World again" in text
+    assert "alert" not in text
+    assert "<h1>" not in text
+
+
 def test_memory_ops_reuses_store_crud_layout():
     memory_ops = _load_tool_module("memory_ops")
     old_home = os.environ.get("HOME")
@@ -97,7 +193,7 @@ def test_memory_ops_reuses_store_crud_layout():
     async def run():
         added = await memory_ops.execute(
             action="add",
-            employee_id="emp",
+            agent_id="emp",
             content="alpha memory content",
             evidence="unit test evidence",
             scope="project",
@@ -106,12 +202,12 @@ def test_memory_ops_reuses_store_crud_layout():
         assert match, added
         memory_id = match.group(1)
 
-        found = await memory_ops.execute(action="search", employee_id="emp", query="alpha")
+        found = await memory_ops.execute(action="search", agent_id="emp", query="alpha")
         assert f"[{memory_id}] (project)" in found
 
         updated = await memory_ops.execute(
             action="update",
-            employee_id="emp",
+            agent_id="emp",
             memory_id=memory_id,
             content="beta memory content",
             evidence="updated evidence",
@@ -120,7 +216,7 @@ def test_memory_ops_reuses_store_crud_layout():
 
         removed = await memory_ops.execute(
             action="remove",
-            employee_id="emp",
+            agent_id="emp",
             memory_id=memory_id,
         )
         assert removed.startswith("OK: removed memory")

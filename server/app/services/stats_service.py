@@ -2,21 +2,23 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from common.database import get_db
+from fastapi import HTTPException
+
+from ..infrastructure.database import get_app_db
 
 
 class StatsService:
 
-    async def get_employee_stats(self, employee_id: str) -> dict:
-        """Return work statistics for employee homepage."""
-        db = await get_db()
+    async def get_agent_stats(self, agent_id: str) -> dict:
+        """Return work statistics for agent homepage."""
+        db = await get_app_db()
 
-        # Basic employee info (created_at for days_active)
+        # Basic agent info (created_at for days_active)
         rows = await db.execute_fetchall(
-            "SELECT created_at FROM employees WHERE id=?", (employee_id,)
+            "SELECT created_at FROM agent_profiles WHERE id=?", (agent_id,)
         )
         if not rows:
-            return None
+            raise HTTPException(404, "Agent profile not found")
         created_at = rows[0]["created_at"]
         try:
             created_dt = datetime.fromisoformat(created_at)
@@ -26,36 +28,36 @@ class StatsService:
 
         # Total sessions
         rows = await db.execute_fetchall(
-            "SELECT count(*) as cnt FROM sessions WHERE employee_id=?",
-            (employee_id,),
+            "SELECT count(*) as cnt FROM sessions WHERE agent_id=?",
+            (agent_id,),
         )
         total_sessions = rows[0]["cnt"]
 
-        # Total messages (user role only) across all sessions of this employee
+        # Total messages (user role only) across all sessions of this agent
         rows = await db.execute_fetchall(
             "SELECT count(*) as cnt FROM messages "
             "WHERE role='user' AND session_id IN "
-            "(SELECT id FROM sessions WHERE employee_id=?)",
-            (employee_id,),
+            "(SELECT id FROM sessions WHERE agent_id=?)",
+            (agent_id,),
         )
         total_messages = rows[0]["cnt"]
 
         # Task counts
         rows = await db.execute_fetchall(
-            "SELECT count(*) as cnt FROM tasks WHERE employee_id=?",
-            (employee_id,),
+            "SELECT count(*) as cnt FROM tasks WHERE agent_id=?",
+            (agent_id,),
         )
         total_tasks = rows[0]["cnt"]
 
         rows = await db.execute_fetchall(
-            "SELECT count(*) as cnt FROM tasks WHERE employee_id=? AND status='completed'",
-            (employee_id,),
+            "SELECT count(*) as cnt FROM tasks WHERE agent_id=? AND status='completed'",
+            (agent_id,),
         )
         completed_tasks = rows[0]["cnt"]
 
         rows = await db.execute_fetchall(
-            "SELECT count(*) as cnt FROM tasks WHERE employee_id=? AND type='automation'",
-            (employee_id,),
+            "SELECT count(*) as cnt FROM tasks WHERE agent_id=? AND type='automation'",
+            (agent_id,),
         )
         auto_tasks = rows[0]["cnt"]
 
@@ -65,9 +67,9 @@ class StatsService:
             "  (SELECT content FROM messages m WHERE m.session_id=s.id ORDER BY m.created_at DESC LIMIT 1) as last_message_preview, "
             "  (SELECT created_at FROM messages m WHERE m.session_id=s.id ORDER BY m.created_at DESC LIMIT 1) as last_message_at, "
             "  (SELECT count(*) FROM messages m WHERE m.session_id=s.id) as message_count "
-            "FROM sessions s WHERE s.employee_id=? "
+            "FROM sessions s WHERE s.agent_id=? "
             "ORDER BY s.created_at DESC LIMIT 10",
-            (employee_id,),
+            (agent_id,),
         )
         recent_activity = []
         for r in rows:
@@ -87,9 +89,9 @@ class StatsService:
         rows = await db.execute_fetchall(
             "SELECT date(m.created_at) as day, count(*) as count "
             "FROM messages m "
-            "WHERE m.session_id IN (SELECT id FROM sessions WHERE employee_id=?) "
+            "WHERE m.session_id IN (SELECT id FROM sessions WHERE agent_id=?) "
             "GROUP BY day ORDER BY day DESC LIMIT 30",
-            (employee_id,),
+            (agent_id,),
         )
         activity_heatmap = {r["day"]: r["count"] for r in rows}
 
@@ -97,10 +99,10 @@ class StatsService:
         rows = await db.execute_fetchall(
             "SELECT m.content FROM messages m "
             "WHERE m.role='assistant' "
-            "AND m.session_id IN (SELECT id FROM sessions WHERE employee_id=?) "
+            "AND m.session_id IN (SELECT id FROM sessions WHERE agent_id=?) "
             "AND (m.content LIKE '%tool_use%' OR m.content LIKE '%function_call%' "
             "     OR m.content LIKE '%\"tool\"%' OR m.content LIKE '%tool_calls%')",
-            (employee_id,),
+            (agent_id,),
         )
         tool_usage: dict[str, int] = {}
         import json as _json
@@ -122,7 +124,7 @@ class StatsService:
                 pass
 
         return {
-            "employee_id": employee_id,
+            "agent_id": agent_id,
             "days_active": days_active,
             "total_sessions": total_sessions,
             "total_messages": total_messages,

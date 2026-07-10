@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
 
 TOOL_META = {
     "name": "web_fetch",
@@ -40,6 +42,69 @@ MAX_CHARS = 40_000
 MAX_TIMEOUT = 60
 BLOCKED_SCHEMES = {"file", "ftp", "data"}
 BLOCKED_HOSTS = {"localhost"}
+HTML_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
+HTML_BLOCK_TAGS = {
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "br",
+    "dd",
+    "div",
+    "dl",
+    "dt",
+    "figcaption",
+    "figure",
+    "footer",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "table",
+    "td",
+    "th",
+    "tr",
+    "ul",
+}
+HTML_SKIP_TAGS = {"script", "style", "svg", "noscript", "template"}
+
+
+class _PlainTextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in HTML_SKIP_TAGS:
+            self._skip_depth += 1
+            return
+        if tag in HTML_BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in HTML_SKIP_TAGS and self._skip_depth:
+            self._skip_depth -= 1
+            return
+        if tag in HTML_BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip_depth:
+            self.parts.append(data)
 
 
 def _blocked_ip_reason(host: str) -> str | None:
@@ -96,6 +161,22 @@ def _validate_url(url: str) -> str | None:
     return None
 
 
+def _html_to_text(raw: str) -> str:
+    parser = _PlainTextExtractor()
+    try:
+        parser.feed(raw)
+        parser.close()
+    except Exception:
+        return ""
+
+    text = "".join(parser.parts).replace("\xa0", " ")
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    lines = [line.strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line).strip()
+
+
 async def execute(*, url: str, timeout: int = 30) -> str:
     timeout = min(max(1, timeout), MAX_TIMEOUT)
 
@@ -107,7 +188,10 @@ async def execute(*, url: str, timeout: int = 30) -> str:
         return await _fetch_browser(url, timeout)
     except Exception as e:
         raw = await _fetch_plain(url, timeout)
-        return f"[browser fetch failed: {type(e).__name__}: {e}; fell back to plain HTTP]\n{raw}"
+        return (
+            f"[browser fetch failed: {type(e).__name__}: {e}; "
+            f"fell back to plain HTTP]\n{raw}"
+        )
 
 
 async def _fetch_browser(url: str, timeout: int) -> str:
@@ -147,8 +231,21 @@ async def _fetch_plain(url: str, timeout: int) -> str:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = resp.read(MAX_CHARS + 1)
                 truncated = len(data) > MAX_CHARS
-                text = data[:MAX_CHARS].decode("utf-8", errors="replace")
-                return f"[status={resp.status}{', truncated' if truncated else ''}]\n{text}"
+                charset = resp.headers.get_content_charset() or "utf-8"
+                raw = data[:MAX_CHARS].decode(charset, errors="replace")
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                is_html = (
+                    any(kind in content_type for kind in HTML_CONTENT_TYPES)
+                    or raw.lstrip().startswith("<")
+                )
+                body = _html_to_text(raw) if is_html else raw.strip()
+                if not body:
+                    body = raw.strip()
+                body_type = "text extracted from html" if is_html else "text"
+                return (
+                    f"[status={resp.status}, fallback plain HTTP, {body_type}"
+                    f"{', truncated' if truncated else ''}]\n{body}"
+                )
         except urllib.error.HTTPError as e:
             return f"HTTP Error: {e.code} {e.reason}"
         except urllib.error.URLError as e:
