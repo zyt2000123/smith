@@ -5,29 +5,31 @@ import uuid
 import socket
 from datetime import datetime, timezone
 
-from common.database import get_db
+from common.config import LEGACY_AGENT_PROFILES_DIR
+
+from ..database import get_app_db
 
 
-class EmployeeRepo:
+class AgentProfileRepo:
 
     async def list_all(self) -> list[dict]:
-        db = await get_db()
+        db = await get_app_db()
         rows = await db.execute_fetchall(
-            "SELECT * FROM employees ORDER BY created_at DESC"
+            "SELECT * FROM agent_profiles ORDER BY created_at DESC"
         )
         return [self._row_to_dict(r) for r in rows]
 
-    async def get(self, employee_id: str) -> dict | None:
-        db = await get_db()
+    async def get(self, agent_id: str) -> dict | None:
+        db = await get_app_db()
         rows = await db.execute_fetchall(
-            "SELECT * FROM employees WHERE id=?", (employee_id,)
+            "SELECT * FROM agent_profiles WHERE id=?", (agent_id,)
         )
         if not rows:
             return None
         return self._row_to_dict(rows[0])
 
     async def create(self, data: dict) -> dict:
-        db = await get_db()
+        db = await get_app_db()
         eid = uuid.uuid4().hex[:8]
         device = data.get("device") or socket.gethostname()
         now = datetime.now(timezone.utc).isoformat()
@@ -36,7 +38,7 @@ class EmployeeRepo:
         )
 
         await db.execute(
-            "INSERT INTO employees "
+            "INSERT INTO agent_profiles "
             "(id, name, role, device, online, description, knowledge, "
             "environment, accent, config_path, created_at) "
             "VALUES (?,?,?,?,1,?,?,?,?,?,?)",
@@ -49,7 +51,7 @@ class EmployeeRepo:
                 knowledge_json,
                 data.get("environment", "本地"),
                 data.get("accent", ""),
-                f"~/.agent-smith/employees/{eid}",
+                str(LEGACY_AGENT_PROFILES_DIR / eid),
                 now,
             ),
         )
@@ -57,12 +59,12 @@ class EmployeeRepo:
 
         return (await self.get(eid))  # type: ignore[return-value]
 
-    async def update(self, employee_id: str, updates: dict) -> dict | None:
-        existing = await self.get(employee_id)
+    async def update(self, agent_id: str, updates: dict) -> dict | None:
+        existing = await self.get(agent_id)
         if existing is None:
             return None
 
-        db = await get_db()
+        db = await get_app_db()
         set_parts: list[str] = []
         params: list = []
 
@@ -82,22 +84,22 @@ class EmployeeRepo:
         if not set_parts:
             return existing
 
-        params.append(employee_id)
+        params.append(agent_id)
         await db.execute(
-            f"UPDATE employees SET {', '.join(set_parts)} WHERE id=?", params
+            f"UPDATE agent_profiles SET {', '.join(set_parts)} WHERE id=?", params
         )
         await db.commit()
 
-        return await self.get(employee_id)
+        return await self.get(agent_id)
 
-    async def delete(self, employee_id: str) -> bool:
-        db = await get_db()
+    async def delete(self, agent_id: str) -> bool:
+        db = await get_app_db()
         rows = await db.execute_fetchall(
-            "SELECT id FROM employees WHERE id=?", (employee_id,)
+            "SELECT id FROM agent_profiles WHERE id=?", (agent_id,)
         )
         if not rows:
             return False
-        await db.execute("DELETE FROM employees WHERE id=?", (employee_id,))
+        await db.execute("DELETE FROM agent_profiles WHERE id=?", (agent_id,))
         await db.commit()
         return True
 

@@ -218,12 +218,12 @@ class FileMemoryStore:
 # ---------------------------------------------------------------------------
 
 
-async def search_relevant_memories(employee_dir: Path, query: str, top_k: int = 5) -> str:
+async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 5) -> str:
     """Hybrid-search memories relevant to *query*, formatted for prompt injection.
 
     Best-effort: returns "" on any failure so prompt assembly never blocks.
     """
-    memory_dir = employee_dir / "memory"
+    memory_dir = agent_dir / "memory"
     if not memory_dir.is_dir() or not query.strip():
         return ""
 
@@ -232,11 +232,9 @@ async def search_relevant_memories(employee_dir: Path, query: str, top_k: int = 
     embed_fn = None
     try:
         from .search import SearchIndex, create_jina_embed_fn
-        import sys as _sys
-        _sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
-        from common.config_loader import resolve_llm_config
+        from engine.llm.model_config import resolve_llm_config
 
-        cfg = resolve_llm_config(employee_dir.name)
+        cfg = resolve_llm_config(agent_dir.name)
         if cfg.get("api_key") and cfg.get("base_url"):
             embed_fn = await create_jina_embed_fn(
                 cfg["api_key"], cfg["base_url"], cfg.get("embedding_model", "jina-embeddings-v3"),
@@ -279,7 +277,7 @@ _DREAM_INTERVAL = 5  # run dream every N conversations
 
 
 async def save_conversation_memory(
-    employee_dir: Path, user_msg: str, reply: str, had_tools: bool
+    agent_dir: Path, user_msg: str, reply: str, had_tools: bool
 ) -> None:
     """Save a memory entry after a conversation that involved tool usage."""
     if not had_tools:
@@ -287,7 +285,7 @@ async def save_conversation_memory(
 
     import json
 
-    memory_dir = employee_dir / "memory"
+    memory_dir = agent_dir / "memory"
     conversations_dir = memory_dir / "conversations"
     conversations_dir.mkdir(parents=True, exist_ok=True)
 
@@ -309,10 +307,8 @@ async def save_conversation_memory(
     # Attach search index for hybrid FTS5 + vector indexing
     try:
         from .search import SearchIndex, create_jina_embed_fn
-        import sys as _sys
-        _sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
-        from common.config_loader import resolve_llm_config
-        cfg = resolve_llm_config(employee_dir.name)
+        from engine.llm.model_config import resolve_llm_config
+        cfg = resolve_llm_config(agent_dir.name)
         embed_fn = None
         if cfg.get("api_key") and cfg.get("base_url"):
             embed_fn = await create_jina_embed_fn(
@@ -350,11 +346,9 @@ async def save_conversation_memory(
         # ponytail: compilation is best-effort after Dream cleaning
         try:
             from .compile import run_compilation
-            import sys as _sys
-            _sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
-            from common.config_loader import resolve_llm_config
+            from engine.llm.model_config import resolve_llm_config
             from engine.llm.model_config import build_llm_client
-            llm_cfg = resolve_llm_config(employee_dir.name)
+            llm_cfg = resolve_llm_config(agent_dir.name)
             if llm_cfg.get("api_key"):
                 llm = build_llm_client(llm_cfg)
                 try:
