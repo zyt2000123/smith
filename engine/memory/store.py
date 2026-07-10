@@ -243,3 +243,31 @@ async def save_conversation_memory(
                     await llm.close()
         except Exception:
             pass
+
+    # Low-frequency Dream consolidation (separate counter)
+    from .dream import DREAM_INTERVAL
+    dream_counter = memory_dir / ".dream_counter"
+    d_count = 0
+    if dream_counter.is_file():
+        try:
+            d_count = int(dream_counter.read_text().strip())
+        except (ValueError, OSError):
+            d_count = 0
+    d_count += 1
+    dream_counter.write_text(str(d_count), encoding="utf-8")
+
+    if d_count >= DREAM_INTERVAL:
+        dream_counter.write_text("0", encoding="utf-8")
+        try:
+            from .dream import run_dream
+            from engine.llm.model_config import resolve_llm_config, build_llm_client
+
+            llm_cfg = resolve_llm_config(agent_dir.name)
+            if llm_cfg.get("api_key"):
+                llm = build_llm_client(llm_cfg)
+                try:
+                    await run_dream(memory_dir, llm)
+                finally:
+                    await llm.close()
+        except Exception:
+            pass

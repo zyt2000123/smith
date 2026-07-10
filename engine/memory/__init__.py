@@ -9,8 +9,8 @@ __all__ = [
 ]
 
 try:
-    from .dream import DreamConsolidator, DreamReport
-    __all__ += ["DreamConsolidator", "DreamReport"]
+    from .dream import run_dream, DreamReport
+    __all__ += ["run_dream", "DreamReport"]
 except ModuleNotFoundError:
     pass
 
