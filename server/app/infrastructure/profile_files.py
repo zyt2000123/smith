@@ -10,6 +10,14 @@ def agent_profile_dir(agent_id: str) -> Path:
     return LEGACY_AGENT_PROFILES_DIR / agent_id
 
 
+def _safe_child(agent_id: str, filename: str) -> Path:
+    base = agent_profile_dir(agent_id).resolve()
+    p = (base / filename).resolve()
+    if not p.is_relative_to(base):
+        raise ValueError("path traversal")
+    return p
+
+
 def init_agent_profile_files(
     agent_id: str,
     *,
@@ -40,14 +48,14 @@ def delete_agent_profile_files(agent_id: str) -> None:
 
 
 def read_agent_profile_file(agent_id: str, filename: str) -> str | None:
-    p = agent_profile_dir(agent_id) / filename
+    p = _safe_child(agent_id, filename)
     if p.is_file():
         return p.read_text(encoding="utf-8")
     return None
 
 
 def write_agent_profile_file(agent_id: str, filename: str, content: str) -> None:
-    p = agent_profile_dir(agent_id) / filename
+    p = _safe_child(agent_id, filename)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
 
