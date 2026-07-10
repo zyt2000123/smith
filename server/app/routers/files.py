@@ -1,40 +1,45 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from common.filesystem import read_employee_file, write_employee_file, employee_dir, list_employee_files
+from ..services.profile_file_service import ProfileFileService
 
-router = APIRouter(prefix="/api/employees/{employee_id}/files", tags=["files"])
-
-ALLOWED_FILES = {"role.md", "style.md", "workflow.md", "config.yaml"}
+router = APIRouter(
+    prefix="/api/agents/{agent_id}/files",
+    tags=["legacy-files"],
+    include_in_schema=False,
+)
 
 
 class FileContent(BaseModel):
     content: str
 
 
+def get_profile_file_service() -> ProfileFileService:
+    return ProfileFileService()
+
+
 @router.get("")
-async def list_files(employee_id: str):
-    d = employee_dir(employee_id)
-    if not d.exists():
-        raise HTTPException(404, "Employee not found")
-    return list_employee_files(employee_id)
+async def list_files(
+    agent_id: str,
+    svc: ProfileFileService = Depends(get_profile_file_service),
+):
+    return await svc.list_files(agent_id)
 
 
 @router.get("/{filename}")
-async def get_file(employee_id: str, filename: str):
-    if filename not in ALLOWED_FILES:
-        raise HTTPException(400, f"File not allowed. Allowed: {ALLOWED_FILES}")
-    content = read_employee_file(employee_id, filename)
-    if content is None:
-        raise HTTPException(404, "File not found")
-    return {"filename": filename, "content": content}
+async def get_file(
+    agent_id: str,
+    filename: str,
+    svc: ProfileFileService = Depends(get_profile_file_service),
+):
+    return await svc.get_file(agent_id, filename)
 
 
 @router.put("/{filename}")
-async def update_file(employee_id: str, filename: str, body: FileContent):
-    if filename not in ALLOWED_FILES:
-        raise HTTPException(400, f"File not allowed. Allowed: {ALLOWED_FILES}")
-    if not employee_dir(employee_id).exists():
-        raise HTTPException(404, "Employee not found")
-    write_employee_file(employee_id, filename, body.content)
-    return {"filename": filename, "content": body.content}
+async def update_file(
+    agent_id: str,
+    filename: str,
+    body: FileContent,
+    svc: ProfileFileService = Depends(get_profile_file_service),
+):
+    return await svc.update_file(agent_id, filename, body.content)

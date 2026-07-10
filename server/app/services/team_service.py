@@ -6,19 +6,24 @@ from typing import AsyncGenerator
 
 from fastapi import HTTPException
 
-from engine.execution.agent_loop import reply as engine_reply, reply_stream as engine_reply_stream
+from engine.execution.agent_loop import (
+    reply_stream_with_runtime as engine_reply_stream_with_runtime,
+    reply_with_runtime as engine_reply_with_runtime,
+)
+from engine.execution.runtime import EngineRequest
 from engine.prompt.assembler import build_team_context
 
-from ..domain.team import TeamGroupOut, TeamMessageOut
+from ..schemas.team import TeamGroupOut, TeamMessageOut
 from ..infrastructure.repositories.team_repo import TeamRepo
-from ..infrastructure.repositories.employee_repo import EmployeeRepo
+from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
+from .engine_runtime import build_engine_runtime
 
 
 class TeamService:
 
-    def __init__(self, team_repo: TeamRepo, employee_repo: EmployeeRepo) -> None:
+    def __init__(self, team_repo: TeamRepo, agent_profile_repo: AgentProfileRepo) -> None:
         self.team_repo = team_repo
-        self.employee_repo = employee_repo
+        self.agent_profile_repo = agent_profile_repo
 
     # ── Groups ──────────────────────────────────────────────
 
@@ -27,9 +32,9 @@ class TeamService:
     ) -> TeamGroupOut:
         # Validate all member IDs exist
         for mid in member_ids:
-            emp = await self.employee_repo.get(mid)
+            emp = await self.agent_profile_repo.get(mid)
             if emp is None:
-                raise HTTPException(404, f"Employee not found: {mid}")
+                raise HTTPException(404, f"Agent profile not found: {mid}")
         row = await self.team_repo.create_group(name, description, member_ids)
         return TeamGroupOut(**row)
 
@@ -60,9 +65,9 @@ class TeamService:
     async def send_message(
         self, group_id: str, content: str
     ) -> list[TeamMessageOut]:
-        """Send a user message to the team, then route to @mentioned employees.
+        """Send a user message to the team, then route to @mentioned agents.
 
-        Returns the list of all new messages (user + employee replies).
+        Returns the list of all new messages (user + agent replies).
         """
         group = await self.team_repo.get_group(group_id)
         if group is None:
@@ -76,9 +81,9 @@ class TeamService:
         )
         result = [TeamMessageOut(**user_msg)]
 
-        # Route to each mentioned employee (or all members if no mentions)
+        # Route to each mentioned agent (or all members if no mentions)
         targets = mentions if mentions else group["member_ids"]
-        replies = await self._route_to_employees(group, targets, content)
+        replies = await self._route_to_agents(group, targets, content)
         result.extend(replies)
 
         return result
@@ -104,11 +109,11 @@ class TeamService:
             ),
         }
 
-        # Route to mentioned employees (or all if no mentions)
+        # Route to mentioned agents (or all if no mentions)
         targets = mentions if mentions else group["member_ids"]
 
         for emp_id in targets:
-            emp = await self.employee_repo.get(emp_id)
+            emp = await self.agent_profile_repo.get(emp_id)
             if emp is None:
                 continue
             emp_name = emp["name"]
@@ -122,17 +127,19 @@ class TeamService:
             yield {
                 "event": "agent_start",
                 "data": json.dumps(
-                    {"employee_id": emp_id, "name": emp_name}, ensure_ascii=False
+                    {"agent_id": emp_id, "name": emp_name}, ensure_ascii=False
                 ),
             }
 
+            runtime, services = build_engine_runtime(emp_id, emp_name)
+            request = EngineRequest(message=augmented)
             full_reply: list[str] = []
-            async for chunk in engine_reply_stream(emp_id, emp_name, augmented):
+            async for chunk in engine_reply_stream_with_runtime(request, runtime, services):
                 full_reply.append(chunk)
                 yield {
                     "event": "message",
                     "data": json.dumps(
-                        {"employee_id": emp_id, "text": chunk}, ensure_ascii=False
+                        {"agent_id": emp_id, "text": chunk}, ensure_ascii=False
                     ),
                 }
 
@@ -143,7 +150,7 @@ class TeamService:
             yield {
                 "event": "agent_done",
                 "data": json.dumps(
-                    {"id": saved["id"], "employee_id": emp_id, "name": emp_name},
+                    {"id": saved["id"], "agent_id": emp_id, "name": emp_name},
                     ensure_ascii=False,
                 ),
             }
@@ -152,10 +159,10 @@ class TeamService:
 
     # ── Internal helpers ────────────────────────────────────
 
-    async def _route_to_employees(
+    async def _route_to_agents(
         self, group: dict, target_ids: list[str], user_content: str
     ) -> list[TeamMessageOut]:
-        """Call engine reply for each target employee and save their responses."""
+        """Call engine reply for each target agent and save their responses."""
         results: list[TeamMessageOut] = []
 
         recent = await self.team_repo.get_messages(group["id"], limit=20)
@@ -164,12 +171,18 @@ class TeamService:
         augmented = f"{team_ctx}\n\n---\n\n{user_content}"
 
         for emp_id in target_ids:
-            emp = await self.employee_repo.get(emp_id)
+            emp = await self.agent_profile_repo.get(emp_id)
             if emp is None:
                 continue
             emp_name = emp["name"]
 
-            reply_text = await engine_reply(emp_id, emp_name, augmented)
+            runtime, services = build_engine_runtime(emp_id, emp_name)
+            result = await engine_reply_with_runtime(
+                EngineRequest(message=augmented),
+                runtime,
+                services,
+            )
+            reply_text = result.text
 
             saved = await self.team_repo.add_message(
                 group["id"], emp_id, emp_name, reply_text, [],
@@ -181,13 +194,13 @@ class TeamService:
     async def _resolve_member_names(self, member_ids: list[str]) -> list[str]:
         names: list[str] = []
         for mid in member_ids:
-            emp = await self.employee_repo.get(mid)
+            emp = await self.agent_profile_repo.get(mid)
             names.append(emp["name"] if emp else mid)
         return names
 
     @staticmethod
     def _extract_mentions(content: str, member_ids: list[str]) -> list[str]:
-        """Extract @employee_id mentions from message content."""
+        """Extract @agent_id mentions from message content."""
         found: list[str] = []
         for mid in member_ids:
             if f"@{mid}" in content:

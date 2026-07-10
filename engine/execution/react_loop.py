@@ -10,6 +10,8 @@ from engine.react_budget import (
     INCOMPLETE_FINAL_AFTER_TOOL_HINT,
     MAX_FAILED_TOOL_RECOVERY_ITERS,
     MAX_INCOMPLETE_FINAL_REPAIRS,
+    MAX_PREFLIGHT_CHALLENGE_ITERS,
+    PREFLIGHT_BUDGET_MESSAGE,
     TOOL_CALL_BUDGET_MESSAGE,
     TOOL_FAILURE_BUDGET_MESSAGE,
     TOOL_FAILURE_HINT,
@@ -17,6 +19,7 @@ from engine.react_budget import (
     looks_like_incomplete_final_after_tool,
 )
 from engine.safety.tool_policy import ToolPolicy
+from engine.safety.fact_gate import FactGate, current_fact_gate
 from engine.tool.interface import ToolCall
 
 from .compression import compress
@@ -79,10 +82,19 @@ async def react_loop(
     tool_registry: "ToolRegistry",
     tool_guard: "ToolGuard | None" = None,
     max_iters: int = DEFAULT_MAX_REACT_ITERS,
+    *,
+    fact_gate: FactGate | None = None,
 ) -> str:
     """Run the canonical ReAct event loop and collect final assistant text."""
     chunks: list[str] = []
-    async for event in react_event_loop(llm, messages, tool_registry, tool_guard, max_iters):
+    async for event in react_event_loop(
+        llm,
+        messages,
+        tool_registry,
+        tool_guard,
+        max_iters,
+        fact_gate=fact_gate,
+    ):
         if event.type == EventType.TEXT_DELTA:
             chunks.append(str(event.data.get("text", "")))
     return "".join(chunks)
@@ -94,9 +106,18 @@ async def react_stream_loop(
     tool_registry: "ToolRegistry",
     tool_guard: "ToolGuard | None" = None,
     max_iters: int = DEFAULT_MAX_REACT_ITERS,
+    *,
+    fact_gate: FactGate | None = None,
 ) -> AsyncGenerator[str, None]:
     """Run the canonical ReAct event loop and expose text deltas only."""
-    async for event in react_event_loop(llm, messages, tool_registry, tool_guard, max_iters):
+    async for event in react_event_loop(
+        llm,
+        messages,
+        tool_registry,
+        tool_guard,
+        max_iters,
+        fact_gate=fact_gate,
+    ):
         if event.type == EventType.TEXT_DELTA:
             text = event.data.get("text", "")
             if text:
@@ -109,14 +130,22 @@ async def react_event_loop(
     tool_registry: "ToolRegistry",
     tool_guard: "ToolGuard | None" = None,
     max_iters: int = DEFAULT_MAX_REACT_ITERS,
+    *,
+    fact_gate: FactGate | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """ReAct loop: model response, tool calls, results, and next turn in one history."""
     tools = tool_registry.get_schemas() or None
-    conversation = list(messages)
-    policy = ToolPolicy(tool_guard)
+    # 逐条浅拷贝：prune/compress 会原地改写 content，
+    # 不复制会污染调用方传入的 history dict（跨请求复用时留脏数据）。
+    conversation = [dict(m) for m in messages]
+    policy = ToolPolicy(
+        tool_guard,
+        fact_gate=fact_gate if fact_gate is not None else current_fact_gate(),
+    )
     consecutive_errors = 0
     productive_iters = 0
     recovery_iters = 0
+    preflight_iters = 0
     had_successful_tool = False
     incomplete_final_repairs = 0
 
@@ -148,6 +177,7 @@ async def react_event_loop(
                 yield ExecutionEvent(EventType.TEXT_DELTA, {"text": response.text})
             return
 
+        policy.begin_round()
         conversation.append({
             "role": "assistant",
             "content": response.text,
@@ -163,6 +193,7 @@ async def react_event_loop(
 
         round_had_success = False
         round_had_failure = False
+        round_had_preflight = False
         for tc in response.tool_calls:
             call = ToolCall(id=tc.id, name=tc.name, arguments=tc.arguments)
             yield ExecutionEvent(EventType.TOOL_CALL_START, {"name": tc.name, "id": tc.id, "arguments": tc.arguments})
@@ -170,9 +201,22 @@ async def react_event_loop(
             decision = policy.evaluate(call)
             if not decision.allowed:
                 conversation.append({"role": "tool", "tool_call_id": call.id, "content": decision.observation})
+                if decision.challenged:
+                    yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
+                        "id": tc.id,
+                        "error": False,
+                        "blocked": False,
+                        "preflight": True,
+                        "reason": decision.reason,
+                        "level": decision.level.value,
+                    })
+                    round_had_preflight = True
+                    continue
                 yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
                     "id": tc.id,
+                    "error": False,
                     "blocked": True,
+                    "preflight": False,
                     "reason": decision.reason,
                     "level": decision.level.value,
                     "needs_confirmation": decision.needs_confirmation,
@@ -189,6 +233,8 @@ async def react_event_loop(
             yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
                 "id": tc.id,
                 "error": result.is_error,
+                "blocked": False,
+                "preflight": False,
                 "content": result.content[:200],
             })
             if result.is_error:
@@ -202,6 +248,15 @@ async def react_event_loop(
                 had_successful_tool = True
                 consecutive_errors = 0
 
+        if round_had_preflight:
+            preflight_iters += 1
+            if preflight_iters >= MAX_PREFLIGHT_CHALLENGE_ITERS:
+                yield ExecutionEvent(
+                    EventType.TEXT_DELTA,
+                    {"text": budget_exhausted_message(PREFLIGHT_BUDGET_MESSAGE)},
+                )
+                return
+
         if round_had_success:
             productive_iters += 1
             continue
@@ -214,6 +269,9 @@ async def react_event_loop(
                     {"text": budget_exhausted_message(TOOL_FAILURE_BUDGET_MESSAGE)},
                 )
                 return
+
+        if round_had_preflight:
+            continue
 
     yield ExecutionEvent(
         EventType.TEXT_DELTA,

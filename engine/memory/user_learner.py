@@ -4,6 +4,8 @@ import json
 import re
 from pathlib import Path
 
+from ._files import atomic_write_text
+
 
 # Confidence threshold: must see a pattern N times before writing it
 _CONFIDENCE_THRESHOLD = 3
@@ -166,10 +168,9 @@ class UserPreferenceLearner:
         return {}
 
     def _save_state(self, state: dict) -> None:
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._state_path.write_text(
+        atomic_write_text(
+            self._state_path,
             json.dumps(state, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
         )
 
     # --- context.md writing ---
@@ -196,7 +197,7 @@ class UserPreferenceLearner:
         marker = f"- {field_label}: {_PLACEHOLDER}"
         if marker in content:
             content = content.replace(marker, f"- {field_label}: {value}", 1)
-            self._context_path.write_text(content, encoding="utf-8")
+            atomic_write_text(self._context_path, content)
             return True
 
         # If the field already has a value (not placeholder), check if we
@@ -211,7 +212,7 @@ class UserPreferenceLearner:
                 # Shouldn't happen (caught above), but handle anyway
                 new_line = f"- {field_label}: {value}"
                 content = content.replace(match.group(0), new_line, 1)
-                self._context_path.write_text(content, encoding="utf-8")
+                atomic_write_text(self._context_path, content)
                 return True
             # Already has a real value — don't overwrite user content
             return False
@@ -219,7 +220,7 @@ class UserPreferenceLearner:
         # Field not found at all — append to Preferences section if it exists
         if "# Preferences" in content or "# 偏好" in content:
             content = content.rstrip() + f"\n- {field_label}: {value}\n"
-            self._context_path.write_text(content, encoding="utf-8")
+            atomic_write_text(self._context_path, content)
             return True
 
         return False

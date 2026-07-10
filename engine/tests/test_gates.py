@@ -1,12 +1,8 @@
 """UnderstandingGate / ContractAlignmentGate 单测 + 技能链接线检查。"""
 import asyncio
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from execution.gate import ContractAlignmentGate, UnderstandingGate  # noqa: E402
-from execution.skill_chain import SkillChain  # noqa: E402
+from engine.execution.gate import ContractAlignmentGate, UnderstandingGate
+from engine.execution.skill_chain import SkillChain
 
 
 def _check(gate, output, context=None):
@@ -50,7 +46,7 @@ def test_contract_alignment_fails_without_verdict():
 def test_feature_chain_wiring():
     names = [n.skill_name for n in SkillChain.feature_chain().nodes]
     assert names == [
-        "understand", "planning", "architecture", "testing-strategy",
+        "understand", "full-stack-product", "planning", "architecture", "testing-strategy",
         "contract-alignment", "change-validation", "code-review",
     ]
     assert SkillChain.feature_chain().backtrack_map["contract-alignment"] == "planning"
@@ -62,6 +58,25 @@ def test_bugfix_chain_wiring():
         "understand", "sde-debug", "planning", "testing-strategy",
         "contract-alignment", "change-validation", "code-review",
     ]
+
+
+def test_skill_chain_keeps_only_loaded_skills_and_valid_backtracks():
+    chain = SkillChain.feature_chain().for_available_skills(
+        {"planning", "change-validation", "code-review"}
+    )
+
+    assert chain is not None
+    assert [node.skill_name for node in chain.nodes] == [
+        "planning", "change-validation", "code-review",
+    ]
+    assert chain.backtrack_map == {
+        "change-validation": "planning",
+        "code-review": "change-validation",
+    }
+
+
+def test_skill_chain_is_disabled_when_no_skills_are_loaded():
+    assert SkillChain.feature_chain().for_available_skills(set()) is None
 
 
 if __name__ == "__main__":

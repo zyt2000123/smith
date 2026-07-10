@@ -14,12 +14,18 @@ Steps:
 from __future__ import annotations
 
 import re
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ._files import atomic_write_text
+
 if TYPE_CHECKING:
     from engine.llm.client import LLMClient
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +112,8 @@ async def run_dream(memory_dir: Path, llm: "LLMClient") -> DreamReport:
         report.skipped = "no durable.md"
         return report
 
-    content = durable_path.read_text(encoding="utf-8").strip()
+    original_content = durable_path.read_text(encoding="utf-8")
+    content = original_content.strip()
     if not content or len(content) < 100:
         report.skipped = "durable.md too short to consolidate"
         return report
@@ -124,11 +131,13 @@ async def run_dream(memory_dir: Path, llm: "LLMClient") -> DreamReport:
         consolidated = resp.text.strip()
 
         if consolidated and len(consolidated) > 50:
-            durable_path.write_text(consolidated + "\n", encoding="utf-8")
+            atomic_write_text(durable_path.with_name("durable.md.bak"), original_content)
+            atomic_write_text(durable_path, consolidated + "\n")
             report.consolidated = True
         else:
             report.skipped = "LLM returned insufficient output"
     except Exception as e:
         report.errors.append(f"consolidation: {type(e).__name__}: {e}")
+        logger.warning("dream consolidation failed", exc_info=True)
 
     return report

@@ -4,47 +4,15 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from common.database import get_db
-
-
-_TEAM_SCHEMA = """
-CREATE TABLE IF NOT EXISTS team_groups (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    member_ids TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS team_messages (
-    id TEXT PRIMARY KEY,
-    group_id TEXT NOT NULL REFERENCES team_groups(id) ON DELETE CASCADE,
-    sender_id TEXT NOT NULL,
-    sender_name TEXT NOT NULL DEFAULT '',
-    content TEXT NOT NULL,
-    mentions TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-"""
-
-_tables_ready = False
+from ..database import get_app_db
 
 
 class TeamRepo:
 
-    async def _ensure_tables(self) -> None:
-        global _tables_ready
-        if _tables_ready:
-            return
-        db = await get_db()
-        await db.executescript(_TEAM_SCHEMA)
-        _tables_ready = True
-
     # ── Groups ──────────────────────────────────────────────
 
     async def create_group(self, name: str, description: str, member_ids: list[str]) -> dict:
-        await self._ensure_tables()
-        db = await get_db()
+        db = await get_app_db()
         gid = uuid.uuid4().hex[:8]
         now = datetime.now(timezone.utc).isoformat()
         members_json = json.dumps(member_ids, ensure_ascii=False)
@@ -64,8 +32,7 @@ class TeamRepo:
         }
 
     async def get_group(self, group_id: str) -> dict | None:
-        await self._ensure_tables()
-        db = await get_db()
+        db = await get_app_db()
         rows = await db.execute_fetchall(
             "SELECT * FROM team_groups WHERE id=?", (group_id,)
         )
@@ -74,16 +41,14 @@ class TeamRepo:
         return self._group_to_dict(rows[0])
 
     async def list_groups(self) -> list[dict]:
-        await self._ensure_tables()
-        db = await get_db()
+        db = await get_app_db()
         rows = await db.execute_fetchall(
             "SELECT * FROM team_groups ORDER BY created_at DESC"
         )
         return [self._group_to_dict(r) for r in rows]
 
     async def delete_group(self, group_id: str) -> bool:
-        await self._ensure_tables()
-        db = await get_db()
+        db = await get_app_db()
         rows = await db.execute_fetchall(
             "SELECT id FROM team_groups WHERE id=?", (group_id,)
         )
@@ -103,8 +68,7 @@ class TeamRepo:
         content: str,
         mentions: list[str],
     ) -> dict:
-        await self._ensure_tables()
-        db = await get_db()
+        db = await get_app_db()
         mid = uuid.uuid4().hex[:12]
         now = datetime.now(timezone.utc).isoformat()
         mentions_json = json.dumps(mentions, ensure_ascii=False)
@@ -127,8 +91,7 @@ class TeamRepo:
         }
 
     async def get_messages(self, group_id: str, limit: int = 50) -> list[dict]:
-        await self._ensure_tables()
-        db = await get_db()
+        db = await get_app_db()
         rows = await db.execute_fetchall(
             "SELECT * FROM team_messages WHERE group_id=? "
             "ORDER BY created_at ASC LIMIT ?",

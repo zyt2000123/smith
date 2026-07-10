@@ -20,30 +20,30 @@ from app.cli import (
 )
 
 
-class FakeEmployeeService:
-    def __init__(self, employees: list[SimpleNamespace]) -> None:
-        self.employees = employees
+class FakeAgentProfileService:
+    def __init__(self, agents: list[SimpleNamespace]) -> None:
+        self.agents = agents
         self.create_calls = 0
 
-    async def list_employees(self) -> list[SimpleNamespace]:
-        return list(self.employees)
+    async def list_profiles(self) -> list[SimpleNamespace]:
+        return list(self.agents)
 
-    async def create_employee(self, body) -> SimpleNamespace:
+    async def create_profile(self, body) -> SimpleNamespace:
         self.create_calls += 1
-        employee = SimpleNamespace(
+        agent = SimpleNamespace(
             id=f"emp-{self.create_calls}",
             name=body.name,
             role=body.role,
             online=True,
             description=body.description,
         )
-        self.employees.append(employee)
-        return employee
+        self.agents.append(agent)
+        return agent
 
 
 @pytest.mark.asyncio
 async def test_ensure_builtin_agent_is_idempotent() -> None:
-    svc = FakeEmployeeService([
+    svc = FakeAgentProfileService([
         SimpleNamespace(
             id="existing-smith",
             name="Smith",
@@ -59,12 +59,12 @@ async def test_ensure_builtin_agent_is_idempotent() -> None:
     assert first.id == "existing-smith"
     assert second.id == "existing-smith"
     assert svc.create_calls == 0
-    assert sorted(employee.name for employee in svc.employees) == ["Smith"]
+    assert sorted(agent.name for agent in svc.agents) == ["Smith"]
 
 
 @pytest.mark.asyncio
 async def test_resolve_agent_prefers_builtin_alias_target() -> None:
-    svc = FakeEmployeeService([
+    svc = FakeAgentProfileService([
         SimpleNamespace(
             id="custom-assistant",
             name="Custom",
@@ -81,9 +81,9 @@ async def test_resolve_agent_prefers_builtin_alias_target() -> None:
         ),
     ])
 
-    employee = await resolve_agent(svc, "assistant", ensure_builtin=False)
+    agent = await resolve_agent(svc, "assistant", ensure_builtin=False)
 
-    assert employee.id == "smith-id"
+    assert agent.id == "smith-id"
 
 
 def test_chat_parser_defaults_to_builtin_agent() -> None:

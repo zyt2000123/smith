@@ -3,20 +3,20 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from common.database import get_db
+from ..database import get_app_db
 
 
 class SessionRepo:
 
-    async def list_by_employee(self, employee_id: str) -> list[dict]:
-        db = await get_db()
+    async def list_by_agent(self, agent_id: str) -> list[dict]:
+        db = await get_app_db()
         rows = await db.execute_fetchall(
-            "SELECT s.id, s.employee_id, s.title, s.created_at, "
+            "SELECT s.id, s.agent_id, s.title, s.created_at, "
             "  (SELECT content FROM messages m WHERE m.session_id=s.id ORDER BY m.created_at DESC LIMIT 1) as last_message_preview, "
             "  (SELECT created_at FROM messages m WHERE m.session_id=s.id ORDER BY m.created_at DESC LIMIT 1) as last_message_at, "
             "  (SELECT count(*) FROM messages m WHERE m.session_id=s.id) as message_count "
-            "FROM sessions s WHERE s.employee_id=? ORDER BY s.created_at DESC",
-            (employee_id,),
+            "FROM sessions s WHERE s.agent_id=? ORDER BY s.created_at DESC",
+            (agent_id,),
         )
         result = []
         for r in rows:
@@ -27,27 +27,27 @@ class SessionRepo:
             result.append(d)
         return result
 
-    async def create(self, employee_id: str, title: str) -> dict:
-        db = await get_db()
+    async def create(self, agent_id: str, title: str) -> dict:
+        db = await get_app_db()
         sid = uuid.uuid4().hex[:12]
         now = datetime.now(timezone.utc).isoformat()
         await db.execute(
-            "INSERT INTO sessions (id, employee_id, title, created_at) VALUES (?,?,?,?)",
-            (sid, employee_id, title, now),
+            "INSERT INTO sessions (id, agent_id, title, created_at) VALUES (?,?,?,?)",
+            (sid, agent_id, title, now),
         )
         await db.commit()
-        return {"id": sid, "employee_id": employee_id, "title": title, "created_at": now}
+        return {"id": sid, "agent_id": agent_id, "title": title, "created_at": now}
 
-    async def exists(self, session_id: str, employee_id: str) -> bool:
-        db = await get_db()
+    async def exists(self, session_id: str, agent_id: str) -> bool:
+        db = await get_app_db()
         rows = await db.execute_fetchall(
-            "SELECT id FROM sessions WHERE id=? AND employee_id=?",
-            (session_id, employee_id),
+            "SELECT id FROM sessions WHERE id=? AND agent_id=?",
+            (session_id, agent_id),
         )
         return bool(rows)
 
     async def get_messages(self, session_id: str, limit: int = 0, offset: int = 0) -> list[dict]:
-        db = await get_db()
+        db = await get_app_db()
         if limit > 0:
             rows = await db.execute_fetchall(
                 "SELECT * FROM messages WHERE session_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?",
@@ -61,7 +61,7 @@ class SessionRepo:
         return [dict(r) for r in rows]
 
     async def add_message(self, session_id: str, role: str, content: str) -> dict:
-        db = await get_db()
+        db = await get_app_db()
         mid = uuid.uuid4().hex[:12]
         now = datetime.now(timezone.utc).isoformat()
         await db.execute(

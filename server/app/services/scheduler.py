@@ -7,7 +7,7 @@ import logging
 
 from .auto_task_service import AutoTaskService
 from ..infrastructure.repositories.auto_task_repo import AutoTaskRepo
-from ..infrastructure.repositories.employee_repo import EmployeeRepo
+from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
 from ..infrastructure.repositories.session_repo import SessionRepo
 
 log = logging.getLogger(__name__)
@@ -16,7 +16,7 @@ TICK_INTERVAL = 60  # seconds
 
 
 def _build_service() -> AutoTaskService:
-    return AutoTaskService(AutoTaskRepo(), EmployeeRepo(), SessionRepo())
+    return AutoTaskService(AutoTaskRepo(), AgentProfileRepo(), SessionRepo())
 
 
 async def run_scheduler() -> None:

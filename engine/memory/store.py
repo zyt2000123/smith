@@ -8,11 +8,16 @@ sole event source. See compile.py for the compilation pipeline.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ._files import atomic_write_text
 from .interface import MemoryEntry
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +44,16 @@ class FileMemoryStore:
                 for f in sorted(scope_dir.glob("*.md")):
                     files.append((f, scope))
         return files
+
+    @staticmethod
+    def _entry_path(scope_dir: Path, entry_id: str) -> Path | None:
+        """Return a legacy entry path only when *entry_id* is a plain filename."""
+        if not entry_id or Path(entry_id).name != entry_id:
+            return None
+
+        scope_root = scope_dir.resolve()
+        path = (scope_dir / f"{entry_id}.md").resolve()
+        return path if path.is_relative_to(scope_root) else None
 
     async def search(self, query: str) -> list[MemoryEntry]:
         """Keyword scan over legacy .md entries."""
@@ -70,15 +85,22 @@ class FileMemoryStore:
         target_dir = self._project_dir if scope == "project" else self._agent_dir
         target_dir.mkdir(parents=True, exist_ok=True)
         text = f"---\nid: {entry.id}\nscope: {entry.scope}\ncreated_at: {entry.created_at}\nlast_accessed: {entry.last_accessed}\n---\n{entry.content}\n\nEvidence: {entry.evidence}\n"
-        (target_dir / f"{entry.id}.md").write_text(text, encoding="utf-8")
+        path = self._entry_path(target_dir, entry.id)
+        if path is None:
+            raise ValueError("generated memory entry id is not a safe filename")
+        atomic_write_text(path, text)
         return entry
 
     async def update(self, entry_id: str, content: str | None = None, evidence: str | None = None) -> bool:
         """Update a legacy .md entry."""
+        if Path(entry_id).name != entry_id:
+            return False
         for scope_dir, scope in [(self._project_dir, "project"), (self._agent_dir, "agent")]:
             if not scope_dir.is_dir():
                 continue
-            path = scope_dir / f"{entry_id}.md"
+            path = self._entry_path(scope_dir, entry_id)
+            if path is None:
+                return False
             if path.is_file():
                 raw = path.read_text(encoding="utf-8")
                 entry = self._parse_file(path, raw, scope)
@@ -91,15 +113,22 @@ class FileMemoryStore:
                 entry.last_accessed = datetime.now(timezone.utc).isoformat()
                 target_dir = self._project_dir if entry.scope == "project" else self._agent_dir
                 text = f"---\nid: {entry.id}\nscope: {entry.scope}\ncreated_at: {entry.created_at}\nlast_accessed: {entry.last_accessed}\n---\n{entry.content}\n\nEvidence: {entry.evidence}\n"
-                (target_dir / f"{entry.id}.md").write_text(text, encoding="utf-8")
+                target = self._entry_path(target_dir, entry.id)
+                if target is None:
+                    return False
+                atomic_write_text(target, text)
                 return True
         return False
 
     async def remove(self, entry_id: str) -> bool:
+        if Path(entry_id).name != entry_id:
+            return False
         for scope_dir in (self._project_dir, self._agent_dir):
             if not scope_dir.is_dir():
                 continue
-            path = scope_dir / f"{entry_id}.md"
+            path = self._entry_path(scope_dir, entry_id)
+            if path is None:
+                return False
             if path.is_file():
                 path.unlink()
                 return True
@@ -118,10 +147,14 @@ class FileMemoryStore:
                 for line in parts[1].strip().splitlines():
                     key, _, val = line.partition(":")
                     val = val.strip()
-                    if key == "scope": scope = val
-                    elif key == "created_at": created_at = val
-                    elif key == "last_accessed": last_accessed = val
-                    elif key == "id": entry_id = val
+                    if key == "scope":
+                        scope = val
+                    elif key == "created_at":
+                        created_at = val
+                    elif key == "last_accessed":
+                        last_accessed = val
+                    elif key == "id":
+                        entry_id = val
                 body = parts[2].strip()
 
         evidence = ""
@@ -185,6 +218,7 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) 
         finally:
             await idx.close()
     except Exception:
+        logger.warning("episode-memory retrieval failed", exc_info=True)
         return ""
 
 
@@ -198,12 +232,7 @@ _COMPILE_INTERVAL = 5
 async def save_conversation_memory(
     agent_dir: Path, user_msg: str, reply: str, had_tools: bool
 ) -> None:
-    """Append to recent.jsonl and periodically trigger compilation.
-
-    Dream consolidation is temporarily disabled. The current DreamConsolidator
-    operates on legacy FileMemoryStore entries and will be redesigned to
-    maintain durable.md in a later migration.
-    """
+    """Append tool-assisted turns and periodically compile their memory views."""
     if not had_tools:
         return
 
@@ -226,10 +255,10 @@ async def save_conversation_memory(
         except (ValueError, OSError):
             count = 0
     count += 1
-    counter_file.write_text(str(count), encoding="utf-8")
+    atomic_write_text(counter_file, str(count))
 
     if count >= _COMPILE_INTERVAL:
-        counter_file.write_text("0", encoding="utf-8")
+        atomic_write_text(counter_file, "0")
         try:
             from .compile import run_compilation
             from engine.llm.model_config import resolve_llm_config, build_llm_client
@@ -242,7 +271,7 @@ async def save_conversation_memory(
                 finally:
                     await llm.close()
         except Exception:
-            pass
+            logger.warning("conversation-memory compilation failed", exc_info=True)
 
     # Low-frequency Dream consolidation (separate counter)
     from .dream import DREAM_INTERVAL
@@ -254,10 +283,10 @@ async def save_conversation_memory(
         except (ValueError, OSError):
             d_count = 0
     d_count += 1
-    dream_counter.write_text(str(d_count), encoding="utf-8")
+    atomic_write_text(dream_counter, str(d_count))
 
     if d_count >= DREAM_INTERVAL:
-        dream_counter.write_text("0", encoding="utf-8")
+        atomic_write_text(dream_counter, "0")
         try:
             from .dream import run_dream
             from engine.llm.model_config import resolve_llm_config, build_llm_client
@@ -270,4 +299,4 @@ async def save_conversation_memory(
                 finally:
                     await llm.close()
         except Exception:
-            pass
+            logger.warning("conversation-memory dream consolidation failed", exc_info=True)

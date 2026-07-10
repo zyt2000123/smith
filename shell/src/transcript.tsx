@@ -1,7 +1,8 @@
-import {Box, Text} from "ink";
-import {MarkdownText} from "@assistant-ui/react-ink-markdown";
+import { MarkdownText } from "@assistant-ui/react-ink-markdown";
+import { Box, Text, useWindowSize } from "ink";
+import Spinner from "ink-spinner";
 
-import type {StreamEvent} from "./api.js";
+import type { StreamEvent } from "./api.js";
 
 const ACCENT = "#ff4d94";
 const MUTED = "#8b8b91";
@@ -14,9 +15,18 @@ const SKILL = "#c678dd";
 const ASSISTANT = "#61afef";
 
 type SystemTone = "info" | "error";
-type ToolState = "running" | "success" | "error" | "blocked";
+type ToolState = "running" | "success" | "error" | "blocked" | "preflight";
 type SkillState = "running" | "done" | "error";
+type ToolCount = { total: number; ok: number; error: number; blocked: number; preflight: number };
 export type TranscriptViewMode = "compact" | "transcript";
+
+const TOOL_PRESENTATION: Record<ToolState, { color: string; marker: string; label: string }> = {
+  running: { color: WARNING, marker: "◐", label: "running" },
+  success: { color: SUCCESS, marker: "●", label: "success" },
+  error: { color: ERROR, marker: "✕", label: "error" },
+  blocked: { color: WARNING, marker: "⛔", label: "permission blocked" },
+  preflight: { color: WARNING, marker: "◆", label: "fact preflight" },
+};
 
 export type SystemEntry = {
   id: string;
@@ -67,7 +77,12 @@ type ToolGroupBlock = {
   name: string;
   items: ToolBlock[];
 };
-type RenderBlock = ThinkingBlock | ToolBlock | SkillBlock | ToolGroupBlock;
+type ToolSummaryBlock = {
+  id: string;
+  type: "tool_summary";
+  counts: Record<string, ToolCount>;
+};
+type RenderBlock = ThinkingBlock | ToolBlock | SkillBlock | ToolGroupBlock | ToolSummaryBlock;
 
 function createId(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -80,10 +95,10 @@ function truncate(text: string, max = 80): string {
   return `${text.slice(0, max - 1)}…`;
 }
 
-function truncateLines(text: string, max = 4): {text: string; hidden: number} {
+function truncateLines(text: string, max = 4): { text: string; hidden: number } {
   const lines = text.split("\n");
   if (lines.length <= max) {
-    return {text, hidden: 0};
+    return { text, hidden: 0 };
   }
   return {
     text: lines.slice(0, max).join("\n"),
@@ -110,16 +125,17 @@ function finishThinkingBlocks(blocks: TurnBlock[]): TurnBlock[] {
     return blocks.slice(0, -1);
   }
 
-  return [
-    ...blocks.slice(0, -1),
-    {...last, done: true},
-  ];
+  return [...blocks.slice(0, -1), { ...last, done: true }];
 }
 
-function updateLastTurn(
-  entries: TranscriptEntry[],
-  updater: (turn: TurnEntry) => TurnEntry,
-): TranscriptEntry[] {
+function toolStateFromResult(event: Extract<StreamEvent, { type: "tool_result" }>): ToolState {
+  if (event.preflight) return "preflight";
+  if (event.blocked) return "blocked";
+  if (event.error) return "error";
+  return "success";
+}
+
+function updateLastTurn(entries: TranscriptEntry[], updater: (turn: TurnEntry) => TurnEntry): TranscriptEntry[] {
   const index = findLastTurnIndex(entries);
   if (index === -1) {
     return entries;
@@ -135,11 +151,7 @@ function updateLastTurn(
     return entries;
   }
 
-  return [
-    ...entries.slice(0, index),
-    nextTurn,
-    ...entries.slice(index + 1),
-  ];
+  return [...entries.slice(0, index), nextTurn, ...entries.slice(index + 1)];
 }
 
 function nextSkillState(status: string): SkillState {
@@ -180,10 +192,7 @@ export function closeLatestTurn(entries: TranscriptEntry[]): TranscriptEntry[] {
   }));
 }
 
-export function applyStreamEvent(
-  entries: TranscriptEntry[],
-  event: StreamEvent,
-): TranscriptEntry[] {
+export function applyStreamEvent(entries: TranscriptEntry[], event: StreamEvent): TranscriptEntry[] {
   switch (event.type) {
     case "message":
       return updateLastTurn(entries, (turn) => ({
@@ -239,9 +248,7 @@ export function applyStreamEvent(
     case "tool_call":
       return updateLastTurn(entries, (turn) => {
         const blocks = finishThinkingBlocks(turn.blocks);
-        const existingIndex = blocks.findIndex(
-          (block) => block.type === "tool" && block.toolCallId === event.id,
-        );
+        const existingIndex = blocks.findIndex((block) => block.type === "tool" && block.toolCallId === event.id);
 
         if (existingIndex >= 0) {
           const existing = blocks[existingIndex];
@@ -256,7 +263,7 @@ export function applyStreamEvent(
             hint: event.hint || existing.hint,
             state: "running",
           };
-          return {...turn, blocks: nextBlocks};
+          return { ...turn, blocks: nextBlocks };
         }
 
         return {
@@ -279,10 +286,10 @@ export function applyStreamEvent(
     case "tool_result":
       return updateLastTurn(entries, (turn) => {
         const blocks = finishThinkingBlocks(turn.blocks);
-        const nextState: ToolState = event.blocked ? "blocked" : event.error ? "error" : "success";
-        const existingIndex = [...blocks].reverse().findIndex(
-          (block) => block.type === "tool" && block.toolCallId === event.id,
-        );
+        const nextState = toolStateFromResult(event);
+        const existingIndex = [...blocks]
+          .reverse()
+          .findIndex((block) => block.type === "tool" && block.toolCallId === event.id);
 
         if (existingIndex >= 0) {
           const realIndex = blocks.length - 1 - existingIndex;
@@ -297,7 +304,7 @@ export function applyStreamEvent(
             state: nextState,
             summary: event.summary || existing.summary,
           };
-          return {...turn, blocks: nextBlocks};
+          return { ...turn, blocks: nextBlocks };
         }
 
         return {
@@ -337,12 +344,11 @@ export function applyStreamEvent(
           };
         }
 
-        const realIndex = [...blocks].reverse().findIndex(
-          (block) =>
-            block.type === "skill" &&
-            block.name === (event.name || "skill") &&
-            block.state === "running",
-        );
+        const realIndex = [...blocks]
+          .reverse()
+          .findIndex(
+            (block) => block.type === "skill" && block.name === (event.name || "skill") && block.state === "running",
+          );
 
         if (realIndex >= 0) {
           const index = blocks.length - 1 - realIndex;
@@ -356,7 +362,7 @@ export function applyStreamEvent(
             ...existing,
             state,
           };
-          return {...turn, blocks: nextBlocks};
+          return { ...turn, blocks: nextBlocks };
         }
 
         return {
@@ -373,30 +379,29 @@ export function applyStreamEvent(
         };
       });
 
+    case "token_usage":
+      return entries;
+
     case "done":
       return closeLatestTurn(entries);
   }
 }
 
-function SystemMessage({entry}: {entry: SystemEntry}) {
+function SystemMessage({ entry }: { entry: SystemEntry }) {
   const trimmed = entry.text.trim();
   return (
     <Box marginBottom={1} paddingLeft={1}>
       {trimmed ? (
         <MarkdownText text={trimmed} />
       ) : (
-        <Text color={entry.tone === "error" ? ERROR : MUTED}>
-          {entry.text}
-        </Text>
+        <Text color={entry.tone === "error" ? ERROR : MUTED}>{entry.text}</Text>
       )}
     </Box>
   );
 }
 
-function ThinkingMessage(
-  {block, viewMode}: {block: ThinkingBlock; viewMode: TranscriptViewMode},
-) {
-  const {text, hidden} = truncateLines(block.text, viewMode === "transcript" ? 5 : 2);
+function ThinkingMessage({ block, viewMode }: { block: ThinkingBlock; viewMode: TranscriptViewMode }) {
+  const { text, hidden } = truncateLines(block.text, viewMode === "transcript" ? 5 : 2);
   return (
     <Box flexDirection="column" marginTop={1} paddingLeft={2}>
       <Text color={MUTED} italic>
@@ -404,7 +409,9 @@ function ThinkingMessage(
       </Text>
       <Text dimColor>{text || "working..."}</Text>
       {hidden > 0 ? (
-        <Text color={BORDER}>… {hidden} more line{hidden === 1 ? "" : "s"}</Text>
+        <Text color={BORDER}>
+          … {hidden} more line{hidden === 1 ? "" : "s"}
+        </Text>
       ) : null}
     </Box>
   );
@@ -418,20 +425,12 @@ function groupToolBlocks(blocks: TurnBlock[], viewMode: TranscriptViewMode): Ren
   const grouped: RenderBlock[] = [];
   for (const block of blocks) {
     const previous = grouped[grouped.length - 1];
-    if (
-      block.type === "tool" &&
-      previous?.type === "tool_group" &&
-      previous.name === block.name
-    ) {
+    if (block.type === "tool" && previous?.type === "tool_group" && previous.name === block.name) {
       previous.items.push(block);
       continue;
     }
 
-    if (
-      block.type === "tool" &&
-      previous?.type === "tool" &&
-      previous.name === block.name
-    ) {
+    if (block.type === "tool" && previous?.type === "tool" && previous.name === block.name) {
       grouped[grouped.length - 1] = {
         id: previous.id,
         type: "tool_group",
@@ -446,104 +445,175 @@ function groupToolBlocks(blocks: TurnBlock[], viewMode: TranscriptViewMode): Ren
   return grouped;
 }
 
-function ToolMessage(
-  {block, viewMode}: {block: ToolBlock; viewMode: TranscriptViewMode},
-) {
-  const color = block.state === "error"
-    ? ERROR
-    : block.state === "success"
-      ? SUCCESS
-      : block.state === "blocked"
-        ? WARNING
-        : WARNING;
-  const marker = block.state === "error"
-    ? "✕"
-    : block.state === "success"
-      ? "●"
-      : block.state === "blocked"
-        ? "⛔"
-        : "◐";
-  const stateText = block.state === "running"
-    ? "running"
-    : block.state === "blocked"
-      ? "permission blocked"
-      : block.state;
-  const {text, hidden} = truncateLines(block.summary, viewMode === "transcript" ? 5 : 3);
+function recordToolCount(counts: Record<string, ToolCount>, item: ToolBlock): void {
+  const count = counts[item.name] ?? { total: 0, ok: 0, error: 0, blocked: 0, preflight: 0 };
+  counts[item.name] = count;
+  count.total++;
+  if (item.state === "success") count.ok++;
+  else if (item.state === "error") count.error++;
+  else if (item.state === "blocked") count.blocked++;
+  else if (item.state === "preflight") count.preflight++;
+}
+
+function collapseCompletedTools(blocks: RenderBlock[]): RenderBlock[] {
+  const counts: Record<string, ToolCount> = {};
+  const kept: RenderBlock[] = [];
+  let collapsed = 0;
+
+  for (const block of blocks) {
+    if (block.type === "tool" && block.state !== "running") {
+      recordToolCount(counts, block);
+      collapsed++;
+    } else if (block.type === "tool_group" && !block.items.some((i) => i.state === "running")) {
+      for (const item of block.items) {
+        recordToolCount(counts, item);
+      }
+      collapsed++;
+    } else if (block.type === "thinking" && block.done) {
+      collapsed++;
+    } else {
+      kept.push(block);
+    }
+  }
+
+  if (collapsed < 2) return blocks;
+
+  const summary: ToolSummaryBlock = { id: "tool-summary", type: "tool_summary", counts };
+  return [summary, ...kept];
+}
+
+function ToolSummaryMessage({ block }: { block: ToolSummaryBlock }) {
+  const parts = Object.entries(block.counts).map(([name, c]) => {
+    const details = [
+      c.ok ? `${c.ok} ok` : "",
+      c.error ? `${c.error} err` : "",
+      c.blocked ? `${c.blocked} blocked` : "",
+      c.preflight ? `${c.preflight} preflight` : "",
+    ]
+      .filter(Boolean)
+      .join(", ");
+    return `${c.total}x ${name} (${details})`;
+  });
+  return (
+    <Box marginTop={1} paddingLeft={2}>
+      <Text color={SUCCESS}>✓ </Text>
+      <Text color={MUTED}>{parts.join("  ")}</Text>
+    </Box>
+  );
+}
+
+function toolSummaryColor(state: ToolState): string {
+  if (state === "error") return ERROR;
+  if (state === "blocked" || state === "preflight") return WARNING;
+  return MUTED;
+}
+
+function ToolMessage({ block, viewMode }: { block: ToolBlock; viewMode: TranscriptViewMode }) {
+  const presentation = TOOL_PRESENTATION[block.state];
+  const { text, hidden } = truncateLines(block.summary, viewMode === "transcript" ? 5 : 3);
 
   return (
     <Box flexDirection="column" marginTop={1} paddingLeft={2}>
       <Box>
-        <Text color={color}>{marker} </Text>
-        <Text color={color} bold>{block.name}</Text>
-        {block.hint ? <Text color={MUTED}>{" ("}{truncate(block.hint, 56)}{")"}</Text> : null}
-        <Text color={MUTED}>{"  "}{stateText}</Text>
+        <Text color={presentation.color}>{presentation.marker} </Text>
+        <Text color={presentation.color} bold>
+          {block.name}
+        </Text>
+        {block.hint ? (
+          <Text color={MUTED}>
+            {" ("}
+            {truncate(block.hint, 56)}
+            {")"}
+          </Text>
+        ) : null}
+        <Text color={MUTED}>
+          {"  "}
+          {presentation.label}
+        </Text>
       </Box>
       {block.summary ? (
         <>
-          <Text color={block.state === "error" ? ERROR : block.state === "blocked" ? WARNING : MUTED}>  {text}</Text>
-          {hidden > 0 ? <Text color={BORDER}>  … {hidden} more line{hidden === 1 ? "" : "s"}</Text> : null}
+          <Text color={toolSummaryColor(block.state)}> {text}</Text>
+          {hidden > 0 ? (
+            <Text color={BORDER}>
+              {" "}
+              … {hidden} more line{hidden === 1 ? "" : "s"}
+            </Text>
+          ) : null}
         </>
       ) : block.state === "running" ? (
-        <Text color={BORDER}>  waiting for result...</Text>
+        <Text color={BORDER}> waiting for result...</Text>
       ) : null}
     </Box>
   );
 }
 
-function ToolGroupMessage({group}: {group: ToolGroupBlock}) {
+function ToolGroupMessage({ group }: { group: ToolGroupBlock }) {
   const successCount = group.items.filter((item) => item.state === "success").length;
   const blockedCount = group.items.filter((item) => item.state === "blocked").length;
+  const preflightCount = group.items.filter((item) => item.state === "preflight").length;
   const errorCount = group.items.filter((item) => item.state === "error").length;
   const runningCount = group.items.filter((item) => item.state === "running").length;
   const lastHint = group.items[group.items.length - 1]?.hint || group.items[0]?.hint || "";
   const headline = [
     successCount ? `${successCount} ok` : "",
     blockedCount ? `${blockedCount} blocked` : "",
+    preflightCount ? `${preflightCount} preflight` : "",
     errorCount ? `${errorCount} error` : "",
     runningCount ? `${runningCount} running` : "",
-  ].filter(Boolean).join(", ");
+  ]
+    .filter(Boolean)
+    .join(", ");
 
   return (
     <Box flexDirection="column" marginTop={1} paddingLeft={2}>
       <Box>
         <Text color={INFO}>◦ </Text>
-        <Text color={INFO} bold>{group.items.length}x {group.name}</Text>
-        {lastHint ? <Text color={MUTED}>{" ("}{truncate(lastHint, 48)}{")"}</Text> : null}
+        <Text color={INFO} bold>
+          {group.items.length}x {group.name}
+        </Text>
+        {lastHint ? (
+          <Text color={MUTED}>
+            {" ("}
+            {truncate(lastHint, 48)}
+            {")"}
+          </Text>
+        ) : null}
       </Box>
-      <Text color={MUTED}>  {headline || "grouped tool activity"}</Text>
+      <Text color={MUTED}> {headline || "grouped tool activity"}</Text>
     </Box>
   );
 }
 
-function SkillMessage({block}: {block: SkillBlock}) {
+function SkillMessage({ block }: { block: SkillBlock }) {
   const color = block.state === "error" ? ERROR : SKILL;
   const statusText = block.state === "running" ? "running" : block.state;
 
   return (
     <Box marginTop={1} paddingLeft={2}>
       <Text color={color}>◦ </Text>
-      <Text color={color} bold>skill</Text>
+      <Text color={color} bold>
+        skill
+      </Text>
       <Text color={INFO}> {block.name}</Text>
-      <Text color={MUTED}>{"  "}{statusText}</Text>
+      <Text color={MUTED}>
+        {"  "}
+        {statusText}
+      </Text>
     </Box>
   );
 }
 
-function TurnView({entry}: {entry: TurnEntry}) {
-  return <TurnViewWithMode entry={entry} viewMode="compact" />;
-}
-
-function TurnViewWithMode(
-  {entry, viewMode}: {entry: TurnEntry; viewMode: TranscriptViewMode},
-) {
+function TurnViewWithMode({ entry, viewMode }: { entry: TurnEntry; viewMode: TranscriptViewMode }) {
   const hasAssistantBody = entry.assistantText.trim().length > 0;
   const assistantBody = hasAssistantBody ? entry.assistantText.trimEnd() : "";
-  const renderBlocks = groupToolBlocks(entry.blocks, viewMode);
+  const grouped = groupToolBlocks(entry.blocks, viewMode);
+  const renderBlocks = viewMode === "compact" ? collapseCompletedTools(grouped) : grouped;
 
   return (
     <Box flexDirection="column" marginBottom={2}>
-      <Text color={ACCENT} bold>user</Text>
-      <Box paddingLeft={1}>
+      <Box>
+        <Text color={ACCENT}>{"❯ "}</Text>
         <Text>{entry.userText}</Text>
       </Box>
 
@@ -555,19 +625,28 @@ function TurnViewWithMode(
             return <ToolMessage key={block.id} block={block} viewMode={viewMode} />;
           case "tool_group":
             return <ToolGroupMessage key={block.id} group={block} />;
+          case "tool_summary":
+            return <ToolSummaryMessage key={block.id} block={block} />;
           case "skill":
             return <SkillMessage key={block.id} block={block} />;
+          default:
+            return null;
         }
       })}
 
-      {(hasAssistantBody || entry.streaming) ? (
+      {hasAssistantBody || entry.streaming ? (
         <Box flexDirection="column" marginTop={1}>
-          <Text color={ASSISTANT} bold>smith</Text>
-          <Box paddingLeft={1}>
+          <Text color={ASSISTANT} bold>
+            smith
+          </Text>
+          <Box marginTop={1} paddingLeft={1}>
             {hasAssistantBody ? (
               <MarkdownText text={assistantBody} />
             ) : (
-              <Text color={MUTED}>Processing...</Text>
+              <Box>
+                <Spinner type="dots" />
+                <Text color={WARNING}> Processing…</Text>
+              </Box>
             )}
           </Box>
         </Box>
@@ -576,18 +655,36 @@ function TurnViewWithMode(
   );
 }
 
-export function Transcript(
-  {entries, viewMode}: {entries: TranscriptEntry[]; viewMode: TranscriptViewMode},
-) {
+function TurnDivider({ width }: { width: number }) {
+  const lineWidth = Math.max(1, width - 6);
+  return (
+    <Box marginBottom={2} paddingLeft={1} paddingRight={1}>
+      <Text color={BORDER}>{"─".repeat(lineWidth)}</Text>
+    </Box>
+  );
+}
+
+export function Transcript({ entries, viewMode }: { entries: TranscriptEntry[]; viewMode: TranscriptViewMode }) {
+  const { columns } = useWindowSize();
   const visibleEntries = entries.slice(viewMode === "transcript" ? -24 : -16);
+  let hasRenderedTurn = false;
 
   return (
     <Box flexDirection="column" marginTop={1}>
-      {visibleEntries.map((entry) => (
-        entry.kind === "system"
-          ? <SystemMessage key={entry.id} entry={entry} />
-          : <TurnViewWithMode key={entry.id} entry={entry} viewMode={viewMode} />
-      ))}
+      {visibleEntries.map((entry) => {
+        if (entry.kind === "system") {
+          return <SystemMessage key={entry.id} entry={entry} />;
+        }
+
+        const showDivider = hasRenderedTurn;
+        hasRenderedTurn = true;
+        return (
+          <Box key={entry.id} flexDirection="column">
+            {showDivider ? <TurnDivider width={columns} /> : null}
+            <TurnViewWithMode entry={entry} viewMode={viewMode} />
+          </Box>
+        );
+      })}
     </Box>
   );
 }

@@ -3,8 +3,8 @@ from __future__ import annotations
 """Skill management tool provider — list, read, create, edit, patch, and version skills.
 
 Built-in skills (under agents/skills/) are READ-ONLY.
-Only employee-installed skills (under ~/.agent-smith/employees/<id>/skills/)
-can be modified.
+Only agent-installed skills (under the agent profile's skills dir; see
+common.paths.LEGACY_PROFILES_DIRNAME) can be modified.
 """
 
 import os
@@ -16,8 +16,8 @@ import yaml
 TOOL_META = {
     "name": "skill_manage",
     "description": (
-        "Manage employee skills: list, get, create, edit, patch, versions, rollback. "
-        "Built-in skills are read-only; only employee-installed skills can be modified."
+        "Manage agent skills: list, get, create, edit, patch, versions, rollback. "
+        "Built-in skills are read-only; only agent-installed skills can be modified."
     ),
     "parameters": {
         "type": "object",
@@ -27,9 +27,9 @@ TOOL_META = {
                 "enum": ["list", "get", "create", "edit", "patch", "versions", "rollback"],
                 "description": "The skill management operation to perform",
             },
-            "employee_id": {
+            "agent_id": {
                 "type": "string",
-                "description": "Employee identifier (used to locate skills directory)",
+                "description": "Agent identifier (used to locate skills directory)",
             },
             "skill_name": {
                 "type": "string",
@@ -52,7 +52,7 @@ TOOL_META = {
                 "description": "Version id (required for rollback)",
             },
         },
-        "required": ["action", "employee_id"],
+        "required": ["action", "agent_id"],
     },
 }
 
@@ -60,9 +60,15 @@ TOOL_META = {
 _BUILTIN_SKILLS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills")
 
 
-def _employee_skills_dir(employee_id: str) -> Path:
-    safe_id = Path(employee_id).name
-    return Path.home() / ".agent-smith" / "employees" / safe_id / "skills"
+def _agent_skills_dir(agent_id: str) -> Path:
+    try:
+        from common.paths import LEGACY_PROFILES_DIRNAME
+    except ModuleNotFoundError:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from common.paths import LEGACY_PROFILES_DIRNAME
+    safe_id = Path(agent_id).name
+    return Path.home() / ".agent-smith" / LEGACY_PROFILES_DIRNAME / safe_id / "skills"
 
 
 def _is_builtin(skill_name: str) -> bool:
@@ -79,8 +85,8 @@ def _parse_frontmatter(raw: str) -> dict:
     return {}
 
 
-def _list_all_skills(employee_id: str) -> list[dict]:
-    """List builtin + employee-installed skills with metadata."""
+def _list_all_skills(agent_id: str) -> list[dict]:
+    """List builtin + agent-installed skills with metadata."""
     skills: list[dict] = []
 
     # Builtin
@@ -97,8 +103,8 @@ def _list_all_skills(employee_id: str) -> list[dict]:
                     "source": "builtin",
                 })
 
-    # Employee-installed
-    emp_dir = _employee_skills_dir(employee_id)
+    # Agent-installed
+    emp_dir = _agent_skills_dir(agent_id)
     if emp_dir.is_dir():
         for child in sorted(emp_dir.iterdir()):
             sf = child / "SKILL.md"
@@ -108,20 +114,20 @@ def _list_all_skills(employee_id: str) -> list[dict]:
                     "name": meta.get("name", child.name),
                     "description": meta.get("description", ""),
                     "version": meta.get("version", "0.1.0"),
-                    "source": "employee",
+                    "source": "agent",
                 })
 
     return skills
 
 
-def _get_skill_content(employee_id: str, skill_name: str) -> tuple[str, str]:
-    """Return (content, source) for a skill. Checks employee first, then builtin."""
+def _get_skill_content(agent_id: str, skill_name: str) -> tuple[str, str]:
+    """Return (content, source) for a skill. Checks agent first, then builtin."""
     safe = Path(skill_name).name
 
-    # Employee-installed first
-    emp_path = _employee_skills_dir(employee_id) / safe / "SKILL.md"
+    # Agent-installed first
+    emp_path = _agent_skills_dir(agent_id) / safe / "SKILL.md"
     if emp_path.is_file():
-        return emp_path.read_text(encoding="utf-8"), "employee"
+        return emp_path.read_text(encoding="utf-8"), "agent"
 
     # Builtin
     builtin_path = Path(_BUILTIN_SKILLS_DIR) / safe / "SKILL.md"
@@ -178,7 +184,7 @@ def _patch_section(raw: str, section_heading: str, new_content: str) -> str:
 async def execute(
     *,
     action: str,
-    employee_id: str,
+    agent_id: str,
     skill_name: str | None = None,
     content: str | None = None,
     section: str | None = None,
@@ -188,19 +194,19 @@ async def execute(
     # Lazy import to avoid circular deps at module level
     from engine.skill.store import SkillStore
 
-    emp_dir = _employee_skills_dir(employee_id)
+    emp_dir = _agent_skills_dir(agent_id)
     store = SkillStore(emp_dir)
 
     # ------------------------------------------------------------------
     # list
     # ------------------------------------------------------------------
     if action == "list":
-        skills = _list_all_skills(employee_id)
+        skills = _list_all_skills(agent_id)
         if not skills:
             return "No skills found."
         lines = [f"Found {len(skills)} skill(s):\n"]
         for s in skills:
-            tag = "[builtin]" if s["source"] == "builtin" else "[employee]"
+            tag = "[builtin]" if s["source"] == "builtin" else "[agent]"
             lines.append(f"- {tag} {s['name']} v{s['version']}: {s['description']}")
         return "\n".join(lines)
 
@@ -210,7 +216,7 @@ async def execute(
     if action == "get":
         if not skill_name:
             return "Error: 'skill_name' is required for get action"
-        raw, source = _get_skill_content(employee_id, skill_name)
+        raw, source = _get_skill_content(agent_id, skill_name)
         if not raw:
             return f"Error: skill '{skill_name}' not found"
         return f"# Skill: {skill_name} [{source}]\n\n{raw}"
@@ -250,7 +256,7 @@ async def execute(
         safe = Path(skill_name).name
         skill_file = emp_dir / safe / "SKILL.md"
         if not skill_file.is_file():
-            return f"Error: skill '{skill_name}' not found in employee skills. Use 'create' first."
+            return f"Error: skill '{skill_name}' not found in agent skills. Use 'create' first."
 
         # Auto-save version before editing
         old_content = skill_file.read_text(encoding="utf-8")
@@ -275,7 +281,7 @@ async def execute(
         safe = Path(skill_name).name
         skill_file = emp_dir / safe / "SKILL.md"
         if not skill_file.is_file():
-            return f"Error: skill '{skill_name}' not found in employee skills"
+            return f"Error: skill '{skill_name}' not found in agent skills"
 
         old_content = skill_file.read_text(encoding="utf-8")
 

@@ -1,6 +1,0 @@
-[
-  {"task_type": "documentation", "pipeline": ["identify-scope", "gather-source-material", "consult-sme", "draft-content", "style-check", "technical-review", "publish", "set-review-reminder"]},
-  {"task_type": "update", "pipeline": ["identify-outdated-content", "verify-current-state", "update-content", "check-links", "review-and-publish"]},
-  {"task_type": "review", "pipeline": ["check-accuracy", "verify-terminology", "validate-structure", "check-examples", "test-links"]},
-  {"task_type": "audit", "pipeline": ["inventory-all-content", "check-freshness", "identify-gaps", "prioritize-updates", "create-action-plan"]}
-]

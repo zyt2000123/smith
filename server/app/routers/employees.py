@@ -1,36 +1,40 @@
 from fastapi import APIRouter, Depends
 
-from ..domain.employee import EmployeeCreate, EmployeeUpdate, EmployeeOut
-from ..services.employee_service import EmployeeService
-from ..infrastructure.repositories.employee_repo import EmployeeRepo
+from ..schemas.agent_profile import AgentProfileCreate, AgentProfileUpdate, AgentProfileOut
+from ..services.agent_profile_service import AgentProfileService
+from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
 
-router = APIRouter(prefix="/api/employees", tags=["employees"])
-
-
-def get_employee_service() -> EmployeeService:
-    return EmployeeService(EmployeeRepo())
-
-
-@router.get("", response_model=list[EmployeeOut])
-async def list_employees(svc: EmployeeService = Depends(get_employee_service)):
-    return await svc.list_employees()
+router = APIRouter(
+    prefix="/api/agents",
+    tags=["legacy-agents"],
+    include_in_schema=False,
+)
 
 
-@router.post("", response_model=EmployeeOut, status_code=201)
-async def create_employee(body: EmployeeCreate, svc: EmployeeService = Depends(get_employee_service)):
-    return await svc.create_employee(body)
+def get_agent_profile_service() -> AgentProfileService:
+    return AgentProfileService(AgentProfileRepo())
 
 
-@router.get("/{employee_id}", response_model=EmployeeOut)
-async def get_employee(employee_id: str, svc: EmployeeService = Depends(get_employee_service)):
-    return await svc.get_employee(employee_id)
+@router.get("", response_model=list[AgentProfileOut])
+async def list_profiles(svc: AgentProfileService = Depends(get_agent_profile_service)):
+    return await svc.list_profiles()
 
 
-@router.put("/{employee_id}", response_model=EmployeeOut)
-async def update_employee(employee_id: str, body: EmployeeUpdate, svc: EmployeeService = Depends(get_employee_service)):
-    return await svc.update_employee(employee_id, body)
+@router.post("", response_model=AgentProfileOut, status_code=201)
+async def create_profile(body: AgentProfileCreate, svc: AgentProfileService = Depends(get_agent_profile_service)):
+    return await svc.create_profile(body)
 
 
-@router.delete("/{employee_id}", status_code=204)
-async def delete_employee(employee_id: str, svc: EmployeeService = Depends(get_employee_service)):
-    await svc.delete_employee(employee_id)
+@router.get("/{agent_id}", response_model=AgentProfileOut)
+async def get_profile(agent_id: str, svc: AgentProfileService = Depends(get_agent_profile_service)):
+    return await svc.get_profile(agent_id)
+
+
+@router.put("/{agent_id}", response_model=AgentProfileOut)
+async def update_profile(agent_id: str, body: AgentProfileUpdate, svc: AgentProfileService = Depends(get_agent_profile_service)):
+    return await svc.update_profile(agent_id, body)
+
+
+@router.delete("/{agent_id}", status_code=204)
+async def delete_profile(agent_id: str, svc: AgentProfileService = Depends(get_agent_profile_service)):
+    await svc.delete_profile(agent_id)

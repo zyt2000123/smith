@@ -3,7 +3,7 @@ from __future__ import annotations
 import re as _re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Collection
 
 from .gate import (
     ContractAlignmentGate,
@@ -55,6 +55,21 @@ class SkillChain:
         self.nodes = nodes
         self.backtrack_map: dict[str, str] = backtrack_map or {}
 
+    def for_available_skills(self, available: Collection[str]) -> SkillChain | None:
+        """Keep only nodes backed by a loaded skill, or disable the chain."""
+        available_names = set(available)
+        nodes = [node for node in self.nodes if node.skill_name in available_names]
+        if not nodes:
+            return None
+
+        node_names = {node.skill_name for node in nodes}
+        backtrack_map = {
+            source: target
+            for source, target in self.backtrack_map.items()
+            if source in node_names and target in node_names
+        }
+        return SkillChain(nodes=nodes, backtrack_map=backtrack_map)
+
     @staticmethod
     def feature_chain() -> SkillChain:
         """Predefined skill chain for feature development (QoderWake order)."""
@@ -70,6 +85,7 @@ class SkillChain:
         return SkillChain(
             nodes=[
                 SkillNode(skill_name="understand", gate=UnderstandingGate()),
+                SkillNode(skill_name="full-stack-product", gate=SkillRubricGate()),
                 SkillNode(skill_name="planning", gate=planning_gate_with_llm()),
                 SkillNode(skill_name="architecture", gate=DesignGate(), condition=_needs_architecture),
                 SkillNode(skill_name="testing-strategy", gate=TestGate()),

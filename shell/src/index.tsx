@@ -7,6 +7,7 @@ import { useStore } from "zustand";
 
 import type { PluginManifest, SkillSummary } from "./api.js";
 import { NodeBridge } from "./bridge.js";
+import { StatusHud } from "./hud.js";
 import { type AppStore, createAppStore, type Panel, type SetupDraft } from "./store.js";
 import { Transcript, type TranscriptViewMode } from "./transcript.js";
 
@@ -72,6 +73,7 @@ function buildSlashItems(skills: SkillSummary[], plugins: PluginManifest[]): Sla
       description: "Show commands.",
       category: "Commands",
     },
+    { id: "exit", kind: "command", title: "/exit", command: "/exit", description: "Quit Smith.", category: "Commands" },
     { id: "new", kind: "command", title: "/new", command: "/new", description: "Fresh session.", category: "Commands" },
     {
       id: "config",
@@ -106,11 +108,19 @@ function buildSlashItems(skills: SkillSummary[], plugins: PluginManifest[]): Sla
       category: "Commands",
     },
     {
+      id: "clear",
+      kind: "command",
+      title: "/clear",
+      command: "/clear",
+      description: "Clear conversation.",
+      category: "Commands",
+    },
+    {
       id: "compact",
       kind: "command",
       title: "/compact",
       command: "/compact",
-      description: "Compact view.",
+      description: "Compact & remove thinking.",
       category: "Commands",
     },
     {
@@ -128,7 +138,7 @@ function buildSlashItems(skills: SkillSummary[], plugins: PluginManifest[]): Sla
       id: `sk-${s.name}`,
       kind: "skill" as const,
       title: s.name,
-      command: `/skill ${s.name}`,
+      command: `/${s.name}`,
       description: s.description || "Run skill.",
       category: "Skills",
       skill: s,
@@ -176,40 +186,6 @@ function HeroPanel() {
   );
 }
 
-function StatusBar() {
-  const config = useS((s) => s.config);
-  const session = useS((s) => s.currentSession);
-  const plugins = useS((s) => s.plugins);
-  const viewMode = useS((s) => s.viewMode);
-  const panel = useS((s) => s.panel);
-  const SEP = <Text color={BORDER}>{" │ "}</Text>;
-  return (
-    <Box flexDirection="column">
-      <Box>
-        <Text color="#e5c07b">
-          [{truncate(config?.provider || "?", 12)}/{truncate(config?.model || "-", 16)}]
-        </Text>
-        {SEP}
-        <Text color="#98c379">{truncate(path.basename(process.cwd()), 18)}</Text>
-      </Box>
-      <Box>
-        <Text color={MUTED}>session </Text>
-        <Text color="#61afef">{session ? truncate(session.id, 10) : "new"}</Text>
-        {SEP}
-        <Text color={MUTED}>plugins </Text>
-        <Text color={INFO}>
-          {plugins.filter((p) => p.enabled).length}/{plugins.length}
-        </Text>
-        {SEP}
-        <Text color={MUTED}>view </Text>
-        <Text color={INFO}>{viewMode}</Text>
-        {SEP}
-        <Text color={ACCENT}>{panel}</Text>
-      </Box>
-    </Box>
-  );
-}
-
 function SetupPanel() {
   const config = useS((s) => s.config);
   const draft = useS((s) => s.setupDraft);
@@ -223,7 +199,7 @@ function SetupPanel() {
         {SETUP_FIELDS.map((f) => (
           <Text key={f} color={f === active ? ACCENT : INFO}>
             {f === active ? ">" : " "} {f === "api_key" && config?.has_api_key ? "api key (blank=keep)" : f}:{" "}
-            {fieldVal(draft, f) || "-"}
+            {f === "api_key" ? "•".repeat(fieldVal(draft, f).length) || "-" : fieldVal(draft, f) || "-"}
           </Text>
         ))}
       </Box>
@@ -306,10 +282,15 @@ function SlashMenu({ items, selectedIndex }: { items: SlashItem[]; selectedIndex
           return (
             <Box key={item.id} flexDirection="column" marginTop={showCat ? 1 : 0}>
               {showCat ? <Text color={MUTED}>{item.category}</Text> : null}
-              <Text color={i === selectedIndex ? ACCENT : INFO}>
-                {i === selectedIndex ? ">" : " "} {item.command}
-              </Text>
-              <Text color={MUTED}> {truncate(item.description, 88)}</Text>
+              <Box>
+                <Text color={i === selectedIndex ? ACCENT : INFO}>
+                  {i === selectedIndex ? ">" : " "} {item.command}
+                </Text>
+                <Text color={MUTED}>
+                  {"  "}
+                  {truncate(item.description, 60)}
+                </Text>
+              </Box>
             </Box>
           );
         })
@@ -333,9 +314,11 @@ function SmithApp() {
   const pendingSkill = useS((s) => s.pendingSkill);
   const viewMode = useS((s) => s.viewMode);
   const transcript = useS((s) => s.transcript);
+  const tokenUsage = useS((s) => s.tokenUsage);
   const skills = useS((s) => s.skills);
   const plugins = useS((s) => s.plugins);
   const config = useS((s) => s.config);
+  const currentSession = useS((s) => s.currentSession);
   const welcomeNotice = useS((s) => s.welcomeNotice);
   const setupIndex = useS((s) => s.setupIndex);
   const setupDraft = useS((s) => s.setupDraft);
@@ -375,6 +358,7 @@ function SmithApp() {
         case "/exit":
         case "/quit":
           exit();
+          setTimeout(() => process.exit(0), 100);
           return;
         case "/new":
           g().resetChat();
@@ -402,11 +386,30 @@ function SmithApp() {
         case "/sessions":
           g().set({ panel: "sessions", statusLine: `${sessions.length} session(s).` });
           return;
-        case "/compact":
-          g().set({ viewMode: "compact", panel: "chat", statusLine: "Compact view." });
+        case "/compact": {
+          const before = g().transcript.reduce((n, e) => n + (e.kind === "turn" ? e.blocks.length : 0), 0);
+          g().set({
+            viewMode: "compact",
+            panel: "chat",
+            transcript: g().transcript.map((e) =>
+              e.kind === "turn" ? { ...e, blocks: e.blocks.filter((b) => b.type !== "thinking") } : e,
+            ),
+          });
+          const after = g().transcript.reduce((n, e) => n + (e.kind === "turn" ? e.blocks.length : 0), 0);
+          g().set({ statusLine: `Compacted: removed ${before - after} thinking block(s).` });
           return;
+        }
         case "/transcript":
           g().set({ viewMode: "transcript", panel: "chat", statusLine: "Transcript view." });
+          return;
+        case "/clear":
+          g().set({
+            transcript: [],
+            currentSession: null,
+            tokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+            panel: "chat",
+            statusLine: "Conversation cleared. Next message starts a fresh session.",
+          });
           return;
         case "/plugin": {
           const [action, name] = rest;
@@ -432,8 +435,7 @@ function SmithApp() {
             g().set({ statusLine: `Not found: ${target}` });
             return;
           }
-          g().set({ currentSession: sess, panel: "chat" });
-          g().pushSystemLine(`Resumed ${sess.id}.`);
+          await bridge.resumeSession(sess);
           return;
         }
         case "/home":
@@ -441,21 +443,44 @@ function SmithApp() {
           return;
         case "/help":
           g().pushSystemLine(
-            "/new  /config  /sessions  /skills  /plugins  /resume <id>\n/compact  /transcript  /home  /exit\n/plugin <enable|disable> <name>",
+            [
+              "- `/new` — fresh session",
+              "- `/config` — edit LLM config",
+              "- `/sessions` — recent sessions",
+              "- `/skills` — inspect skills",
+              "- `/plugins` — inspect plugins",
+              "- `/resume <id>` — resume session",
+              "- `/compact` / `/transcript` — switch view",
+              "- `/plugin <enable|disable> <name>`",
+              "- `/home` — welcome · `/exit` — quit",
+            ].join("\n"),
           );
           g().set({ panel: "chat", statusLine: "Help." });
           return;
-        default:
+        default: {
+          const skillName = cmd?.slice(1);
+          const matched = skills.find((s) => s.name === skillName);
+          if (matched) {
+            const prompt = rest.join(" ").trim();
+            if (prompt) {
+              await bridge.sendMessage(prompt, matched.name);
+            } else {
+              g().set({ pendingSkill: matched, panel: "chat", statusLine: `Skill ${matched.name} armed.` });
+            }
+            return;
+          }
           g().set({ statusLine: `Unknown: ${cmd}` });
+        }
       }
     },
-    [config, exit, plugins.length, sessions, skills.length],
+    [config, exit, plugins.length, sessions, skills],
   );
 
   const handleChatSubmit = useCallback(
     async (value: string) => {
       const trimmed = value.trim();
       if (!trimmed || busy) return;
+      g().pushHistory(trimmed);
       const explicitSkill = parseSkill(trimmed, skills);
       g().set({ inputValue: "" });
 
@@ -572,7 +597,12 @@ function SmithApp() {
       return;
     }
     if (slashMenuOpen && slashItems.length > 0) {
-      if (key.downArrow || key.tab) {
+      if (key.tab) {
+        const sel = slashItems[slashIndex];
+        if (sel) g().set({ inputValue: sel.command });
+        return;
+      }
+      if (key.downArrow) {
         g().set({ slashIndex: (slashIndex + 1) % slashItems.length });
         return;
       }
@@ -582,12 +612,34 @@ function SmithApp() {
       }
     }
     if (key.escape) {
+      if (busy) {
+        bridge.cancelRequest();
+        return;
+      }
       if (slashMenuOpen) {
         g().set({ inputValue: "", slashIndex: 0 });
         return;
       }
       if (pendingSkill) {
         g().set({ pendingSkill: null, statusLine: "Cleared." });
+        return;
+      }
+    }
+    if (!slashMenuOpen && (key.upArrow || key.downArrow)) {
+      const hist = g().inputHistory;
+      if (hist.length > 0) {
+        const cur = g().historyIndex;
+        if (key.upArrow) {
+          const next = cur === -1 ? hist.length - 1 : Math.max(0, cur - 1);
+          g().set({ historyIndex: next, inputValue: hist[next] || "" });
+        } else {
+          const next = cur === -1 ? -1 : cur + 1;
+          if (next >= hist.length) {
+            g().set({ historyIndex: -1, inputValue: "" });
+          } else {
+            g().set({ historyIndex: next, inputValue: hist[next] || "" });
+          }
+        }
         return;
       }
     }
@@ -613,13 +665,6 @@ function SmithApp() {
       <Box paddingX={2} gap={1} marginBottom={1}>
         <Text color={ACCENT}>Agent-Smith</Text>
         <Text color={MUTED}>v{SHELL_VERSION}</Text>
-        {busy ? (
-          <>
-            <Text color={WARNING}> </Text>
-            <Spinner type="dots" />
-            <Text color={WARNING}> Processing…</Text>
-          </>
-        ) : null}
       </Box>
       <Box flexDirection="column" paddingX={2}>
         {mode === "boot" ? (
@@ -634,7 +679,7 @@ function SmithApp() {
           </>
         ) : (
           <>
-            {panel === "welcome" && <HeroPanel />}
+            <HeroPanel />
             {welcomeNotice ? (
               <Text color={welcomeNotice.tone === "error" ? "#e06c75" : MUTED}>{welcomeNotice.text}</Text>
             ) : null}
@@ -648,21 +693,6 @@ function SmithApp() {
       <Box flexDirection="column" paddingX={2}>
         {mode !== "boot" && (
           <>
-            <Box flexWrap="wrap">
-              <Text color={INFO}>skills {skills.length}</Text>
-              <Text color={BORDER}> │ </Text>
-              <Text color={INFO}>
-                plugins {plugins.filter((p) => p.enabled).length}/{plugins.length}
-              </Text>
-              <Text color={BORDER}> │ </Text>
-              <Text color={INFO}>view {viewMode}</Text>
-              {pendingSkill ? (
-                <>
-                  <Text color={BORDER}> │ </Text>
-                  <Text color={ACCENT}>armed {pendingSkill.name}</Text>
-                </>
-              ) : null}
-            </Box>
             <Text color={busy ? WARNING : MUTED}>{statusLine}</Text>
             {pendingSkill ? (
               <Box marginBottom={1}>
@@ -678,6 +708,7 @@ function SmithApp() {
               <TextInput
                 value={inputValue}
                 placeholder={placeholder}
+                mask={mode === "setup" && activeSetupField === "api_key" ? "•" : undefined}
                 onChange={handleInputChange}
                 onSubmit={
                   mode === "setup"
@@ -691,7 +722,15 @@ function SmithApp() {
               />
             </Box>
             {slashMenuOpen ? <SlashMenu items={slashItems} selectedIndex={slashIndex} /> : null}
-            <StatusBar />
+            <StatusHud
+              model={config?.model || "-"}
+              projectName={path.basename(process.cwd())}
+              cwd={process.cwd()}
+              sessionId={currentSession?.id}
+              transcript={transcript}
+              viewMode={viewMode}
+              tokenUsage={tokenUsage}
+            />
           </>
         )}
       </Box>

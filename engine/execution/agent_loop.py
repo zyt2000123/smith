@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, AsyncGenerator, NamedTuple
+from uuid import uuid4
 
 if TYPE_CHECKING:
     pass
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
 from engine.llm.client import LLMClient
 from engine.prompt.assembler import PromptAssembler
 from engine.react_budget import DEFAULT_MAX_REACT_ITERS
+from engine.safety.fact_gate import FactGate, FactGateContext, use_fact_gate
 from engine.safety.tool_guard import ToolGuard
 from engine.skill.executor import execute_skill
 from engine.skill.registry import SkillRegistry
@@ -63,7 +65,7 @@ async def run_agent_stream(
     forced_skill: str | None = None,
     execution_context: dict | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
-    """Streaming version of run_agent — yields ExecutionEvents throughout execution."""
+    """Run the agent as an event stream, yielding ExecutionEvents throughout execution."""
     if forced_skill:
         async for event in _run_forced_skill_stream(
             llm,
@@ -155,13 +157,13 @@ async def run_agent_stream(
             context[f"{node.skill_name}_output"] = output
             # Checkpoint save after each successful skill node
             session_id = str(context.get("session_id") or "")
-            employee_dir = str(context.get("_employee_dir") or "")
-            if session_id and employee_dir:
+            profile_dir = str(context.get("_profile_dir") or "")
+            if session_id and profile_dir:
                 try:
                     from .session_state import SessionStateManager, SessionCheckpoint
-                    state_mgr = SessionStateManager(Path(employee_dir))
+                    state_mgr = SessionStateManager(Path(profile_dir))
                     state_mgr.save(SessionCheckpoint(
-                        employee_id=str(context.get("employee_id") or ""),
+                        agent_id=str(context.get("agent_id") or ""),
                         session_id=session_id,
                         task_type=str(context.get("task_type") or ""),
                         skill_chain_index=node_idx,
@@ -204,160 +206,16 @@ async def run_agent_stream(
 
     # Clear checkpoint on successful completion
     session_id = str(context.get("session_id") or "")
-    employee_dir = str(context.get("_employee_dir") or "")
-    if session_id and employee_dir:
+    profile_dir = str(context.get("_profile_dir") or "")
+    if session_id and profile_dir:
         try:
             from .session_state import SessionStateManager
-            state_mgr = SessionStateManager(Path(employee_dir))
+            state_mgr = SessionStateManager(Path(profile_dir))
             state_mgr.clear(session_id)
         except Exception:
             logger.exception("failed to clear session checkpoint")
 
     yield ExecutionEvent(EventType.DONE, {})
-
-
-async def run_agent(
-    llm: LLMClient,
-    system_prompt: str,
-    user_message: str,
-    tool_registry: ToolRegistry,
-    skill_registry: SkillRegistry,
-    task_type: TaskType,
-    skill_chain: SkillChain | None,
-    guard: FailureLoopGuard,
-    tool_guard: ToolGuard | None = None,
-    max_react_iters: int = DEFAULT_MAX_REACT_ITERS,
-    history: list[dict] | None = None,
-    forced_skill: str | None = None,
-) -> str:
-    """Orchestrate the full agent flow.
-
-    DIRECT tasks run a simple ReAct loop.
-    BUGFIX/FEATURE tasks iterate through a skill chain with gates and backtracking.
-    """
-    if forced_skill:
-        return await _run_forced_skill(
-            llm,
-            tool_registry,
-            skill_registry,
-            user_message,
-            forced_skill,
-            tool_guard,
-            max_react_iters,
-            history=history,
-        )
-
-    base_messages = [
-        {"role": "system", "content": system_prompt},
-        *(history or []),
-        {"role": "user", "content": user_message},
-    ]
-
-    # --- Direct mode ---
-    if task_type == TaskType.DIRECT or skill_chain is None:
-        return await _react_loop(llm, base_messages, tool_registry, tool_guard, max_react_iters)
-
-    # --- Skill chain mode ---
-    context: dict = {"user_message": user_message, "task_type": task_type.value}
-    node_idx = 0
-    max_backtracks = 5
-    backtrack_count = 0
-
-    while node_idx < len(skill_chain.nodes):
-        node = skill_chain.nodes[node_idx]
-
-        # Check skip condition
-        if node.condition is not None and not node.condition(context):
-            node_idx += 1
-            continue
-
-        # --- Execute skill with rubric gate retry loop ---
-        rubric_attempt = 0
-        output = ""
-        rubric_passed = False
-
-        while rubric_attempt < _RUBRIC_MAX_RETRIES:
-            # Build messages — may include rubric retry hints
-            skill = skill_registry.get(node.skill_name)
-            if skill is None:
-                messages = base_messages + [
-                    {"role": "user", "content": f"[Skill: {node.skill_name}] {user_message}"},
-                ]
-                if rubric_attempt == 1 and context.get("_rubric_retry_hint"):
-                    messages.append({"role": "user", "content": context["_rubric_retry_hint"]})
-                elif rubric_attempt == 2:
-                    messages.append({"role": "user", "content": "Switch strategy: try a completely different approach to address the task."})
-                output = await _react_loop(llm, messages, tool_registry, tool_guard, max_react_iters)
-            else:
-                skill_context = dict(context)
-                if rubric_attempt == 1 and skill_context.get("_rubric_retry_hint"):
-                    skill_context["rubric_feedback"] = skill_context["_rubric_retry_hint"]
-                elif rubric_attempt == 2:
-                    skill_context["rubric_feedback"] = "Switch strategy: try a completely different approach to address the task."
-                messages = [{"role": "user", "content": user_message}]
-                output = await execute_skill(skill, llm, tool_registry, messages, skill_context, max_react_iters, tool_guard=tool_guard)
-
-            # Rubric gate check (before node's own gate)
-            rubric_result = await _rubric_gate.check(output, context)
-            if rubric_result.verdict == "pass":
-                rubric_passed = True
-                break
-
-            # Store hint for next retry
-            context["_rubric_retry_hint"] = rubric_result.retry_hint or ""
-            rubric_attempt += 1
-
-        # Clean up transient rubric keys
-        context.pop("_rubric_retry_hint", None)
-
-        if not rubric_passed:
-            return (
-                f"Blocked: skill '{node.skill_name}' failed rubric gate after "
-                f"{_RUBRIC_MAX_RETRIES} attempts. Last: {rubric_result.reason}"
-            )
-
-        # --- Node gate check (existing logic, unchanged) ---
-        if isinstance(node.gate, LLMGate):
-            node.gate.set_llm(llm)
-        gate_result = await node.gate.check(output, context)
-
-        if gate_result.verdict == "pass":
-            context[f"{node.skill_name}_output"] = output
-            node_idx += 1
-            continue
-
-        # Gate failed — consult loop guard
-        sig = FailureSignature(
-            error_type=node.skill_name,
-            context_hash=hashlib.md5(output.encode()).hexdigest()[:8],
-        )
-        action = guard.record(sig)
-
-        if action == "blocked":
-            return (
-                f"Blocked: repeated failures at '{node.skill_name}'. "
-                f"Last gate: {gate_result.reason}"
-            )
-
-        if action == "switch" and node.skill_name in skill_chain.backtrack_map:
-            backtrack_count += 1
-            if backtrack_count > max_backtracks:
-                return f"Max backtracks exceeded at '{node.skill_name}'."
-            target = skill_chain.backtrack_map[node.skill_name]
-            node_idx = next(
-                (i for i, n in enumerate(skill_chain.nodes) if n.skill_name == target),
-                0,
-            )
-            continue
-
-        # Retry — stay on same node (loop guard will eventually block)
-
-    # Collect final output from last completed skill
-    for node in reversed(skill_chain.nodes):
-        if f"{node.skill_name}_output" in context:
-            return context[f"{node.skill_name}_output"]
-
-    return "Skill chain completed with no output."
 
 
 class _AgentSetup(NamedTuple):
@@ -386,7 +244,7 @@ def _missing_skill_message(skill_registry: SkillRegistry, forced_skill: str) -> 
 
 
 def _enabled_tools_from_config(emp_config: dict, tool_registry: ToolRegistry) -> list[str]:
-    """Resolve the runtime tool allowlist for an employee.
+    """Resolve the runtime tool allowlist for an agent.
 
     Missing config means "all registered tools except internal/default-hidden
     tools"; explicit tools.enabled narrows that list further. This keeps stale
@@ -408,10 +266,8 @@ def _enabled_tools_from_config(emp_config: dict, tool_registry: ToolRegistry) ->
 def _runtime_prompt_context(runtime: RuntimeContext) -> dict[str, str]:
     context = {
         "agent_id": runtime.agent_id,
-        "employee_id": runtime.agent_id,  # legacy prompt/tool compatibility
         "name": runtime.agent_name,
         "_profile_dir": str(runtime.profile_dir),
-        "_employee_dir": str(runtime.profile_dir),  # legacy checkpoint compatibility
     }
     if runtime.session_id:
         context["session_id"] = runtime.session_id
@@ -423,10 +279,8 @@ def _runtime_prompt_context(runtime: RuntimeContext) -> dict[str, str]:
 def _runtime_execution_context(runtime: RuntimeContext) -> dict[str, str | None]:
     context: dict[str, str | None] = {
         "agent_id": runtime.agent_id,
-        "employee_id": runtime.agent_id,  # legacy checkpoint compatibility
         "session_id": runtime.session_id,
         "_profile_dir": str(runtime.profile_dir),
-        "_employee_dir": str(runtime.profile_dir),
     }
     context.update({key: value for key, value in runtime.metadata.items()})
     return context
@@ -486,7 +340,7 @@ async def prepare_runtime(
     services.skill_registry.load_builtin(runtime.agents_dir / "skills")
     profile_skills = runtime.profile_dir / "skills"
     if profile_skills.is_dir():
-        services.skill_registry.load_employee_skills(profile_skills)
+        services.skill_registry.load_agent_skills(profile_skills)
 
     from engine.memory.store import search_relevant_memories
 
@@ -505,39 +359,15 @@ async def prepare_runtime(
         system_prompt += "\n\n" + EVAL_SENSITIVE_GUIDANCE
 
     chain: SkillChain | None = None
+    available_skills = {
+        summary["name"] for summary in services.skill_registry.list_summaries()
+    }
     if task_type == TaskType.FEATURE:
-        chain = SkillChain.feature_chain()
+        chain = SkillChain.feature_chain().for_available_skills(available_skills)
     elif task_type == TaskType.BUGFIX:
-        chain = SkillChain.bugfix_chain()
+        chain = SkillChain.bugfix_chain().for_available_skills(available_skills)
 
     return _AgentSetup(runtime.profile_dir, system_prompt, task_type, chain)
-
-
-async def _run_forced_skill(
-    llm: LLMClient,
-    tool_registry: ToolRegistry,
-    skill_registry: SkillRegistry,
-    user_message: str,
-    forced_skill: str,
-    tool_guard: ToolGuard | None,
-    max_react_iters: int,
-    history: list[dict] | None = None,
-) -> str:
-    skill = skill_registry.get(forced_skill)
-    if skill is None:
-        return _missing_skill_message(skill_registry, forced_skill)
-
-    messages = [*(history or []), {"role": "user", "content": user_message}]
-    context = {"user_message": user_message, "task_type": "skill", "forced_skill": forced_skill}
-    return await execute_skill(
-        skill,
-        llm,
-        tool_registry,
-        messages,
-        context,
-        max_react_iters,
-        tool_guard=tool_guard,
-    )
 
 
 async def _run_forced_skill_stream(
@@ -592,7 +422,7 @@ async def _persist_runtime_learning(
 
         await save_conversation_memory(runtime.profile_dir, user_message, reply_text, had_tools)
     except Exception:
-        pass
+        logger.warning("failed to persist conversation memory", exc_info=True)
 
     try:
         from engine.memory.user_learner import UserPreferenceLearner
@@ -600,7 +430,21 @@ async def _persist_runtime_learning(
         learner = UserPreferenceLearner(runtime.profile_dir)
         await learner.observe(user_message, reply_text)
     except Exception:
-        pass
+        logger.warning("failed to learn user preferences", exc_info=True)
+
+
+def _has_memory_worthy_activity(event: ExecutionEvent) -> bool:
+    """Keep streaming and non-streaming persistence criteria identical."""
+    return event.type in (EventType.TOOL_CALL_START, EventType.SKILL_START)
+
+
+def _fact_gate_for_request(request: EngineRequest, runtime: RuntimeContext) -> FactGate:
+    """Create one isolated preflight state container for this user turn."""
+
+    return FactGate(FactGateContext(
+        session_id=runtime.session_id or "",
+        turn_id=uuid4().hex,
+    ))
 
 
 async def reply_with_runtime(
@@ -613,22 +457,31 @@ async def reply_with_runtime(
     guard = FailureLoopGuard()
 
     try:
-        result = await run_agent(
-            services.llm,
-            s.system_prompt,
-            _merge_context(request.message, request.context),
-            services.tool_registry,
-            services.skill_registry,
-            s.task_type,
-            s.chain,
-            guard,
-            tool_guard=services.tool_guard,
-            history=request.history,
-            forced_skill=request.forced_skill,
-        )
+        full_text: list[str] = []
+        had_tools = False
+        with use_fact_gate(_fact_gate_for_request(request, runtime)):
+            async for event in run_agent_stream(
+                services.llm,
+                s.system_prompt,
+                _merge_context(request.message, request.context),
+                services.tool_registry,
+                services.skill_registry,
+                s.task_type,
+                s.chain,
+                guard,
+                tool_guard=services.tool_guard,
+                history=request.history,
+                forced_skill=request.forced_skill,
+                execution_context=_runtime_execution_context(runtime),
+            ):
+                if event.type == EventType.TEXT_DELTA:
+                    full_text.append(event.data.get("text", ""))
+                elif _has_memory_worthy_activity(event):
+                    had_tools = True
 
-        await _persist_runtime_learning(runtime, request.message, result, True)
-        return EngineResult(text=result, had_tools=True)
+        result = "".join(full_text)
+        await _persist_runtime_learning(runtime, request.message, result, had_tools)
+        return EngineResult(text=result, had_tools=had_tools)
     finally:
         await services.close()
 
@@ -646,25 +499,26 @@ async def reply_events_with_runtime(
     had_tools = False
     try:
         try:
-            async for event in run_agent_stream(
-                services.llm,
-                s.system_prompt,
-                _merge_context(request.message, request.context),
-                services.tool_registry,
-                services.skill_registry,
-                s.task_type,
-                s.chain,
-                guard,
-                tool_guard=services.tool_guard,
-                history=request.history,
-                forced_skill=request.forced_skill,
-                execution_context=_runtime_execution_context(runtime),
-            ):
-                if event.type == EventType.TEXT_DELTA:
-                    full_text.append(event.data.get("text", ""))
-                elif event.type in (EventType.TOOL_CALL_START, EventType.SKILL_START):
-                    had_tools = True
-                yield event
+            with use_fact_gate(_fact_gate_for_request(request, runtime)):
+                async for event in run_agent_stream(
+                    services.llm,
+                    s.system_prompt,
+                    _merge_context(request.message, request.context),
+                    services.tool_registry,
+                    services.skill_registry,
+                    s.task_type,
+                    s.chain,
+                    guard,
+                    tool_guard=services.tool_guard,
+                    history=request.history,
+                    forced_skill=request.forced_skill,
+                    execution_context=_runtime_execution_context(runtime),
+                ):
+                    if event.type == EventType.TEXT_DELTA:
+                        full_text.append(event.data.get("text", ""))
+                    elif _has_memory_worthy_activity(event):
+                        had_tools = True
+                    yield event
         except Exception as e:
             # 任一环节失败（LLM 超长上下文/网络/工具崩溃）：优雅收尾，SSE 流不裸断。
             # 异常详情只进服务端日志，不透给前端（可能含 base_url / 请求细节）。
@@ -680,16 +534,16 @@ async def reply_events_with_runtime(
 
 
 async def reply(
-    employee_id: str, name: str, user_message: str,
+    agent_id: str, name: str, user_message: str,
     history: list[dict] | None = None,
     context: str | None = None,
     forced_skill: str | None = None,
 ) -> str:
-    """Legacy high-level entry point for employee_id-based callers."""
+    """Legacy high-level entry point for agent_id-based callers."""
     from .legacy import reply as legacy_reply
 
     return await legacy_reply(
-        employee_id,
+        agent_id,
         name,
         user_message,
         history=history,
@@ -699,17 +553,17 @@ async def reply(
 
 
 async def reply_events(
-    employee_id: str, name: str, user_message: str,
+    agent_id: str, name: str, user_message: str,
     history: list[dict] | None = None,
     context: str | None = None,
     forced_skill: str | None = None,
     session_id: str | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
-    """Legacy structured event stream for employee_id-based callers."""
+    """Legacy structured event stream for agent_id-based callers."""
     from .legacy import reply_events as legacy_reply_events
 
     async for event in legacy_reply_events(
-        employee_id,
+        agent_id,
         name,
         user_message,
         history=history,
@@ -740,17 +594,17 @@ async def reply_stream_with_runtime(
 
 
 async def reply_stream(
-    employee_id: str,
+    agent_id: str,
     name: str,
     user_message: str,
     history: list[dict] | None = None,
     session_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Legacy text stream for employee_id-based callers."""
+    """Legacy text stream for agent_id-based callers."""
     from .legacy import reply_stream as legacy_reply_stream
 
     async for chunk in legacy_reply_stream(
-        employee_id,
+        agent_id,
         name,
         user_message,
         history=history,

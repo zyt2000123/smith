@@ -1,6 +1,0 @@
-[
-  {"task_type": "feature", "pipeline": ["assess-requirements", "design-infrastructure", "write-iac-code", "test-in-dev", "validate-in-staging", "deploy-to-production", "verify-health", "update-docs"]},
-  {"task_type": "bugfix", "pipeline": ["triage-incident", "gather-logs-metrics", "identify-root-cause", "implement-fix", "test-fix", "deploy-fix", "write-postmortem"]},
-  {"task_type": "review", "pipeline": ["check-iac-best-practices", "verify-security-config", "validate-rollback-plan", "check-monitoring-coverage", "assess-cost-impact"]},
-  {"task_type": "optimization", "pipeline": ["analyze-metrics", "identify-bottlenecks", "propose-improvements", "implement-and-benchmark", "validate-in-staging", "roll-out"]}
-]

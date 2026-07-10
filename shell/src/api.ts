@@ -15,7 +15,7 @@ export type AgentProfile = {
 
 export type Session = {
   id: string;
-  employee_id: string;
+  agent_id: string;
   title: string;
   created_at: string;
   last_message_preview?: string | null;
@@ -53,7 +53,7 @@ export type StreamEvent =
   | { type: "message"; text: string }
   | { type: "thinking"; text: string; done: boolean }
   | { type: "tool_call"; id: string; name: string; hint: string }
-  | { type: "tool_result"; id: string; error: boolean; blocked: boolean; summary: string }
+  | { type: "tool_result"; id: string; error: boolean; blocked: boolean; preflight: boolean; summary: string }
   | { type: "skill"; name: string; status: string }
   | ({ type: "token_usage" } & TokenUsage)
   | { type: "done"; id?: string };
@@ -111,10 +111,6 @@ export async function ensureAgentProfile(baseUrl: string): Promise<AgentProfile>
   return request<AgentProfile>(baseUrl, "/api/agent/ensure", {
     method: "POST",
   });
-}
-
-export async function ensureSmithAgent(baseUrl: string): Promise<AgentProfile> {
-  return ensureAgentProfile(baseUrl);
 }
 
 export async function listSessions(baseUrl: string): Promise<Session[]> {
@@ -176,22 +172,19 @@ export async function* streamMessage(
   content: string,
   options: StreamMessageOptions = {},
 ): AsyncGenerator<StreamEvent, void, void> {
-  const response = await fetch(
-    buildUrl(baseUrl, `/api/agent/sessions/${sessionId}/messages/stream`),
-    {
-      method: "POST",
-      headers: {
-        Accept: "text/event-stream",
-        "Content-Type": "application/json",
-      },
-      signal: options.signal,
-      body: JSON.stringify({
-        content,
-        context: options.context,
-        skill_name: options.skillName,
-      }),
+  const response = await fetch(buildUrl(baseUrl, `/api/agent/sessions/${sessionId}/messages/stream`), {
+    method: "POST",
+    headers: {
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
     },
-  );
+    signal: options.signal,
+    body: JSON.stringify({
+      content,
+      context: options.context,
+      skill_name: options.skillName,
+    }),
+  });
 
   if (!response.ok) {
     const text = await response.text();
@@ -271,6 +264,7 @@ export async function* streamMessage(
             id: String(payload.id ?? ""),
             error: Boolean(payload.error),
             blocked: Boolean(payload.blocked),
+            preflight: Boolean(payload.preflight),
             summary: String(payload.summary ?? ""),
           };
           break;

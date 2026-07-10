@@ -185,11 +185,10 @@ FailureSignature = error_type + context_hash。record() → retry / switch / blo
 | 3 workflow.md | SOP | 最高（不截断）|
 | 4 toolbox.md + 注册表 | 工具 | 中 |
 | 5 技能注册表 | 技能 | 中 |
-| 6 expertise.json | 能力 | 低 |
-| 7 traits.json | 标签 | 低 |
-| 8 pipeline.json | 交付 | 最低 |
-| 9 context.md | 偏好 | 中低 |
-| 10 output_style.md | 格式 | 低 |
+| 6 context.md | 偏好 | 中低 |
+| 7 output_style.md | 格式 | 低 |
+| 8 memory/ | 记忆 | 中低 |
+| 9 runtime context | 运行时信息 | 最高（不截断） |
 | 11 memory + runtime | 记忆+环境 | 中低 |
 
 Token 预算 max_tokens=100k + 优先级截断。Prefix Cache（稳定层 MD5 hash 透传 LLM）。实测约 2500 tokens。
@@ -281,8 +280,8 @@ SKILL.md = YAML frontmatter + Markdown。内置只读，Agent 可进化（SkillS
 6. **DAG+ReAct 灵感？** → QoderWake 逆向分析。"硬骨架+软肌肉"。
 7. **流式怎么保持一致？** → async generator 全程 yield 事件 + context dict 累积 + 检查点。
 8. **怎么加新工具？** → agents/tools/ 新建 .py + TOOL_META + execute。无需改代码。
-9. **怎么加新角色？** → agents/templates/ 新建目录+9个文件。server 自动扫描。
-10. **五层架构好处？** → 测试隔离。换 Flask 只改 server/；换 Web 只改 app/。
+9. **怎么扩展能力？** → agents/skills/ 新建 `SKILL.md`。Smith 不新增身份。
+10. **分层架构好处？** → 测试隔离。换 Flask 只改 server/；换 Web/macOS 前端只改客户端层。
 11. **config 为什么四层？** → 灵活性平衡。全局→角色→个性化→临时。只需配最高优先级。
 12. **技能和工具为什么分？** → 粒度不同。工具=原子操作，技能=完整工作流+多次 LLM 迭代。
 13. **MCP 是什么？** → Anthropic 标准化工具协议。STDIO JSON-RPC 桥接到 ToolRegistry。

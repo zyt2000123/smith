@@ -35,7 +35,7 @@
   2. 定义 `EventType` 枚举：`MESSAGE_RECEIVED` / `TOOL_CALLED` / `MEMORY_UPDATED` / `SKILL_COMPLETED` / `PLUGIN_EVENT`
   3. `subscribe(callback, filter)` — filter 可指定 session_path 和 types
   4. `emit(event_type, data, session_path)` — 只通知 global + 匹配 session 的订阅者
-  5. 改造 `TeamService._route_to_employees()` 使用 EventBus 分发
+  5. 改造 `TeamService._route_to_agents()` 使用 EventBus 分发
   6. 改造 `PollingTrigger` / `WebhookTrigger` 的事件输出走 EventBus
 
 ---
@@ -74,7 +74,7 @@
   2. 后台启动独立 session 执行，完成后写入 `DeferredResultStore` (SQLite)
   3. 并发控制: per-session 上限 5，全局上限 10，超时 30 分钟
   4. `reply()` 入口检查 `DeferredResultStore`，有已完成结果时注入 context
-  5. `TeamService._route_to_employees()` 改为 `asyncio.gather` 并行调用
+  5. `TeamService._route_to_agents()` 改为 `asyncio.gather` 并行调用
 
 ---
 
@@ -173,7 +173,7 @@
 - [ ] **待检查**
 - **涉及文件**:
   - `engine/memory/user_learner.py` (230 行) — UserPreferenceLearner
-  - `agents/templates/*/context.md` — `{{to_be_learned}}` 占位符
+  - `agents/smith/context.md` — `{{to_be_learned}}` 占位符
 - **检查要点**:
   - [ ] 3 次观察 (`_CONFIDENCE_THRESHOLD`) 确认偏好是否足够可靠
   - [ ] regex/keyword 启发式检测语言、verbosity、tech_level 是否准确
@@ -200,14 +200,14 @@
 
 ---
 
-### P7: 多 Agent 协作 (团队群聊)
+### P7: 多 Agent 协作 (legacy / experimental)
 
-- [ ] **待检查**
+- [ ] **已降级为兼容实验能力，非当前主线**
 - **涉及文件**:
   - `server/app/services/team_service.py` (196 行) — TeamService
-  - `server/app/domain/team.py` — Pydantic 模型
+  - `server/app/schemas/team.py` — Pydantic 模型
   - `server/app/infrastructure/repositories/team_repo.py` — SQLite 持久化
-  - `server/app/routers/` — 群聊路由
+  - `server/app/routers/teams.py` — legacy 群聊路由（隐藏于 OpenAPI 主面）
 - **检查要点**:
   - [ ] Agent 顺序回复的延迟是否可接受（3 个 Agent = 3x LLM 调用时间）
   - [ ] `@employee_id` 提及提取是否可靠（目前是简单字符串匹配）
@@ -220,15 +220,11 @@
 
 ## 三、已知技术债务
 
-### TD-1: macOS App 未提交改动
+### TD-1: macOS App 已暂缓
 
-- [ ] **待处理**
-- **详情**: `app/` 的 UI 改动在 git stash 里，需要 Xcode 编译才能验证
-- **操作**:
-  1. `git stash list` 检查 stash 内容
-  2. `git stash pop` 恢复改动
-  3. 在 Xcode 中打开 `app/AgentSmith.xcodeproj`，编译验证
-  4. 确认无误后提交
+- [x] **已处理**
+- **详情**: 当前主线前端是 `shell/`，root `app/` 残留目录已清理；macOS 原生端不再作为当前工作树交付目标。
+- **后续**: 若未来恢复 macOS 原生端，应作为新的前端客户端重新接入 `server/`。
 
 ---
 
@@ -265,20 +261,19 @@
 
 ### TD-4: 流式回复记忆保存缺陷
 
-- [ ] **待修复**
-- **详情**: `engine/execution/agent_loop.py` 中的 `reply_stream()` 保存对话记忆时传入空字符串
+- [x] **已修复**
+- **详情**: `engine/execution/agent_loop.py` 中的流式路径已累积完整回复文本再保存记忆
 - **涉及文件**: `engine/execution/agent_loop.py` — `reply_stream()` 函数
-- **修复方案**: 在流式生成过程中累积完整回复文本，流结束后用完整文本调用 `save_conversation_memory()`
+- **修复方式**: 在流式生成过程中累积完整回复文本，流结束后用完整文本调用 `save_conversation_memory()`
 
 ---
 
 ### TD-5: import 路径脆弱性
 
-- [ ] **待修复**
-- **详情**: `engine/execution/agent_loop.py` 的 `reply()` 函数使用 `sys.path.insert(0, ...)` 动态修改模块搜索路径
-- **涉及文件**: `engine/execution/agent_loop.py`
-- **风险**: 多次调用可能导致 `sys.path` 膨胀，模块查找不稳定
-- **修复方案**: 改为在 `pyproject.toml` 中配置包依赖，或使用 `importlib` 绝对路径导入
+- [x] **已修复**
+- **详情**: server 通过 `pyproject.toml` path dependency 引入 `common` / `engine`，生产入口不再使用 `sys.path.insert(...)`
+- **涉及文件**: `server/pyproject.toml`, `common/pyproject.toml`, `engine/pyproject.toml`
+- **修复方式**: 配置包依赖并把 engine 内部 import 迁到 `engine.*` 绝对导入
 
 ---
 
