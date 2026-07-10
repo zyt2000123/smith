@@ -40,6 +40,20 @@ class FileMemoryStore:
                     files.append((f, scope))
         return files
 
+    async def search(self, query: str) -> list[MemoryEntry]:
+        """Keyword scan over legacy .md entries."""
+        keywords = query.lower().split()
+        if not keywords:
+            return []
+        results: list[MemoryEntry] = []
+        for path, scope in self._all_md_files():
+            content = path.read_text(encoding="utf-8")
+            if any(kw in content.lower() for kw in keywords):
+                entry = self._parse_file(path, content, scope)
+                if entry:
+                    results.append(entry)
+        return results
+
     async def list_all(self) -> list[MemoryEntry]:
         entries: list[MemoryEntry] = []
         for path, scope in self._all_md_files():
@@ -58,6 +72,28 @@ class FileMemoryStore:
         text = f"---\nid: {entry.id}\nscope: {entry.scope}\ncreated_at: {entry.created_at}\nlast_accessed: {entry.last_accessed}\n---\n{entry.content}\n\nEvidence: {entry.evidence}\n"
         (target_dir / f"{entry.id}.md").write_text(text, encoding="utf-8")
         return entry
+
+    async def update(self, entry_id: str, content: str | None = None, evidence: str | None = None) -> bool:
+        """Update a legacy .md entry."""
+        for scope_dir, scope in [(self._project_dir, "project"), (self._agent_dir, "agent")]:
+            if not scope_dir.is_dir():
+                continue
+            path = scope_dir / f"{entry_id}.md"
+            if path.is_file():
+                raw = path.read_text(encoding="utf-8")
+                entry = self._parse_file(path, raw, scope)
+                if entry is None:
+                    return False
+                if content is not None:
+                    entry.content = content
+                if evidence is not None:
+                    entry.evidence = evidence
+                entry.last_accessed = datetime.now(timezone.utc).isoformat()
+                target_dir = self._project_dir if entry.scope == "project" else self._agent_dir
+                text = f"---\nid: {entry.id}\nscope: {entry.scope}\ncreated_at: {entry.created_at}\nlast_accessed: {entry.last_accessed}\n---\n{entry.content}\n\nEvidence: {entry.evidence}\n"
+                (target_dir / f"{entry.id}.md").write_text(text, encoding="utf-8")
+                return True
+        return False
 
     async def remove(self, entry_id: str) -> bool:
         for scope_dir in (self._project_dir, self._agent_dir):
