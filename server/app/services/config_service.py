@@ -1,42 +1,347 @@
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
+from typing import Any
+
+from fastapi import HTTPException
+
 from common.config import DATA_DIR
-from common.yaml_utils import load_yaml, save_yaml
+from common.yaml_utils import YamlConfigError, load_yaml, save_yaml
+from engine.llm.factory import normalize_provider_name
+from engine.llm.contracts import UnsupportedProviderError
+
+
+_USAGES = frozenset(("interactive", "gate", "background"))
+_BASE_STRING_FIELDS = ("provider", "api_key", "base_url", "model")
+_ROUTE_STRING_FIELDS = _BASE_STRING_FIELDS
+_ROUTE_FIELDS = frozenset((*_ROUTE_STRING_FIELDS, "stream", "max_output_tokens", "timeout_profile"))
+_TIMEOUT_FIELDS = frozenset(("connect", "read", "stream_read", "write", "pool"))
+_PUBLIC_ROUTE_FIELDS = (
+    "provider",
+    "base_url",
+    "model",
+    "stream",
+    "max_output_tokens",
+    "timeout_profile",
+)
 
 
 class ConfigService:
+    """Persist and expose the user-editable portion of LLM configuration.
+
+    The service is intentionally the only place that understands the public
+    API's patch semantics.  It keeps routers thin and makes the write-only
+    handling of provider API keys consistent for the base route and every
+    optional model route.
+    """
 
     _config_path = DATA_DIR / "config.yaml"
 
-    def get_llm_config(self) -> dict:
-        cfg = load_yaml(self._config_path)
-        llm = cfg.get("llm", {})
+    @staticmethod
+    def _invalid(detail: str) -> None:
+        raise HTTPException(status_code=422, detail=detail)
+
+    def _mapping(self, value: object, label: str) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            self._invalid(f"{label} must be a mapping")
+        return value
+
+    def _validate_usage(self, usage: object, label: str) -> str:
+        if not isinstance(usage, str) or usage not in _USAGES:
+            allowed = ", ".join(sorted(_USAGES))
+            self._invalid(f"{label} must be one of: {allowed}")
+        return usage
+
+    def _validate_string_fields(
+        self,
+        values: Mapping[str, Any],
+        fields: tuple[str, ...],
+        label: str,
+        *,
+        allow_none: bool = False,
+    ) -> None:
+        for field in fields:
+            if field not in values:
+                continue
+            value = values[field]
+            if value is None and allow_none:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                self._invalid(f"{label}.{field} must be a non-empty string")
+            if field == "provider":
+                self._validate_provider(value, f"{label}.{field}")
+
+    def _validate_provider(self, value: object, label: str) -> None:
+        try:
+            normalize_provider_name(value)
+        except UnsupportedProviderError as exc:
+            self._invalid(f"{label}: {exc}")
+
+    def _validate_max_output_tokens(self, value: object, label: str) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            self._invalid(f"{label} must be a positive integer")
+
+    def _validate_route(self, route: Mapping[str, Any], label: str) -> None:
+        unknown = set(route) - _ROUTE_FIELDS
+        if unknown:
+            self._invalid(f"{label} has unknown fields: {', '.join(sorted(unknown))}")
+        self._validate_string_fields(route, _ROUTE_STRING_FIELDS, label)
+        if "stream" in route and not isinstance(route["stream"], bool):
+            self._invalid(f"{label}.stream must be a boolean")
+        if "max_output_tokens" in route:
+            self._validate_max_output_tokens(route["max_output_tokens"], f"{label}.max_output_tokens")
+        if "timeout_profile" in route:
+            self._validate_usage(route["timeout_profile"], f"{label}.timeout_profile")
+
+    def _validate_timeout_profile(self, profile: Mapping[str, Any], label: str) -> None:
+        unknown = set(profile) - _TIMEOUT_FIELDS
+        if unknown:
+            self._invalid(f"{label} has unknown fields: {', '.join(sorted(unknown))}")
+        for field, value in profile.items():
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                self._invalid(f"{label}.{field} must be a positive number")
+
+    def _validate_stored_llm(self, llm: Mapping[str, Any]) -> None:
+        self._validate_string_fields(llm, _BASE_STRING_FIELDS, "llm", allow_none=True)
+        if "stream" in llm and not isinstance(llm["stream"], bool):
+            self._invalid("llm.stream must be a boolean")
+        if "max_output_tokens" in llm:
+            self._validate_max_output_tokens(llm["max_output_tokens"], "llm.max_output_tokens")
+
+        routes = self._mapping(llm.get("routes"), "llm.routes")
+        for usage, route in routes.items():
+            self._validate_usage(usage, "llm.routes key")
+            if not isinstance(route, dict):
+                self._invalid(f"llm.routes.{usage} must be a mapping")
+            self._validate_route(route, f"llm.routes.{usage}")
+
+        timeout_profiles = self._mapping(llm.get("timeout_profiles"), "llm.timeout_profiles")
+        for usage, profile in timeout_profiles.items():
+            self._validate_usage(usage, "llm.timeout_profiles key")
+            if not isinstance(profile, dict):
+                self._invalid(f"llm.timeout_profiles.{usage} must be a mapping")
+            self._validate_timeout_profile(profile, f"llm.timeout_profiles.{usage}")
+
+    def _load_config(self) -> dict[str, Any]:
+        try:
+            config = load_yaml(self._config_path)
+        except YamlConfigError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        llm = config.get("llm")
+        if llm is not None:
+            if not isinstance(llm, dict):
+                self._invalid("llm configuration must be a mapping")
+            self._validate_stored_llm(llm)
+        return config
+
+    @staticmethod
+    def _string_or_empty(value: object) -> str:
+        return value if isinstance(value, str) else ""
+
+    def _public_routes(self, routes: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+        public: dict[str, dict[str, Any]] = {}
+        for usage, route in routes.items():
+            if not isinstance(route, dict):
+                continue  # Stored values have already been validated.
+            public_route = {field: route[field] for field in _PUBLIC_ROUTE_FIELDS if field in route}
+            public_route["has_api_key"] = bool(route.get("api_key"))
+            public[usage] = public_route
+        return public
+
+    def get_llm_config(self) -> dict[str, Any]:
+        cfg = self._load_config()
+        llm = self._mapping(cfg.get("llm"), "llm configuration")
+        routes = self._mapping(llm.get("routes"), "llm.routes")
+        timeout_profiles = self._mapping(llm.get("timeout_profiles"), "llm.timeout_profiles")
+        interactive = self._mapping(routes.get("interactive"), "llm.routes.interactive")
+
+        def effective(field: str) -> object:
+            return interactive[field] if field in interactive else llm.get(field)
+
+        configured = all(
+            isinstance(effective(field), str) and effective(field).strip()
+            for field in ("api_key", "base_url", "model")
+        )
         return {
-            "configured": bool(llm.get("api_key")),
+            "configured": configured,
             "has_api_key": bool(llm.get("api_key")),
-            "provider": llm.get("provider") or "openai",
-            "model": llm.get("model", ""),
-            "base_url": llm.get("base_url", ""),
+            "provider": self._string_or_empty(llm.get("provider")) or "openai",
+            "model": self._string_or_empty(llm.get("model")),
+            "base_url": self._string_or_empty(llm.get("base_url")),
+            "max_output_tokens": llm.get("max_output_tokens"),
+            "routes": self._public_routes(routes),
+            "timeout_profiles": {usage: dict(profile) for usage, profile in timeout_profiles.items()},
         }
 
-    def set_llm_config(
+    def _apply_string_patch(
         self,
-        *,
-        provider: str,
-        api_key: str | None,
-        base_url: str | None,
-        model: str,
-    ) -> dict:
-        cfg = load_yaml(self._config_path)
-        cfg.setdefault("llm", {})
+        target: dict[str, Any],
+        field: str,
+        value: object,
+        label: str,
+    ) -> None:
+        if value is None:
+            target.pop(field, None)
+            return
+        if not isinstance(value, str):
+            self._invalid(f"{label}.{field} must be a string")
+        stripped = value.strip()
+        if not stripped:
+            if field == "api_key":
+                return  # A blank secret is a safe no-op; null explicitly removes it.
+            self._invalid(f"{label}.{field} must be a non-empty string")
+        if field == "provider":
+            self._validate_provider(stripped, f"{label}.{field}")
+        target[field] = stripped
 
-        cfg["llm"]["provider"] = provider or cfg["llm"].get("provider") or "openai"
-        if api_key is not None and api_key.strip():
-            cfg["llm"]["api_key"] = api_key.strip()
-        if base_url is not None:
-            cfg["llm"]["base_url"] = base_url
-        cfg["llm"]["model"] = model
-        save_yaml(self._config_path, cfg)
+    def _apply_route_patch(self, route: dict[str, Any], patch: Mapping[str, Any], label: str) -> None:
+        unknown = set(patch) - _ROUTE_FIELDS
+        if unknown:
+            self._invalid(f"{label} has unknown fields: {', '.join(sorted(unknown))}")
+        for field in _ROUTE_STRING_FIELDS:
+            if field in patch:
+                self._apply_string_patch(route, field, patch[field], label)
+        if "stream" in patch:
+            stream = patch["stream"]
+            if stream is None:
+                route.pop("stream", None)
+            elif isinstance(stream, bool):
+                route["stream"] = stream
+            else:
+                self._invalid(f"{label}.stream must be a boolean")
+        if "max_output_tokens" in patch:
+            max_output_tokens = patch["max_output_tokens"]
+            if max_output_tokens is None:
+                route.pop("max_output_tokens", None)
+            else:
+                self._validate_max_output_tokens(max_output_tokens, f"{label}.max_output_tokens")
+                route["max_output_tokens"] = max_output_tokens
+        if "timeout_profile" in patch:
+            profile = patch["timeout_profile"]
+            if profile is None:
+                route.pop("timeout_profile", None)
+            else:
+                route["timeout_profile"] = self._validate_usage(profile, f"{label}.timeout_profile")
+
+    def _apply_routes_patch(self, llm: dict[str, Any], value: object) -> None:
+        if value is None:
+            llm.pop("routes", None)
+            return
+        if not isinstance(value, dict):
+            self._invalid("routes must be a mapping")
+        if not value:
+            llm.pop("routes", None)
+            return
+
+        existing = self._mapping(llm.get("routes"), "llm.routes")
+        routes = {usage: dict(route) for usage, route in existing.items()}
+        for usage, route_patch in value.items():
+            self._validate_usage(usage, "routes key")
+            if route_patch is None:
+                routes.pop(usage, None)
+                continue
+            if not isinstance(route_patch, dict):
+                self._invalid(f"routes.{usage} must be a mapping or null")
+            route = routes.get(usage, {})
+            self._apply_route_patch(route, route_patch, f"routes.{usage}")
+            if route:
+                routes[usage] = route
+            else:
+                routes.pop(usage, None)
+
+        if routes:
+            llm["routes"] = routes
+        else:
+            llm.pop("routes", None)
+
+    def _apply_timeout_profiles_patch(self, llm: dict[str, Any], value: object) -> None:
+        if value is None:
+            llm.pop("timeout_profiles", None)
+            return
+        if not isinstance(value, dict):
+            self._invalid("timeout_profiles must be a mapping")
+        if not value:
+            llm.pop("timeout_profiles", None)
+            return
+
+        existing = self._mapping(llm.get("timeout_profiles"), "llm.timeout_profiles")
+        profiles = {usage: dict(profile) for usage, profile in existing.items()}
+        for usage, profile_patch in value.items():
+            self._validate_usage(usage, "timeout_profiles key")
+            if profile_patch is None:
+                profiles.pop(usage, None)
+                continue
+            if not isinstance(profile_patch, dict):
+                self._invalid(f"timeout_profiles.{usage} must be a mapping or null")
+            unknown = set(profile_patch) - _TIMEOUT_FIELDS
+            if unknown:
+                self._invalid(
+                    f"timeout_profiles.{usage} has unknown fields: {', '.join(sorted(unknown))}"
+                )
+            profile = profiles.get(usage, {})
+            for field, timeout in profile_patch.items():
+                if timeout is None:
+                    profile.pop(field, None)
+                elif (
+                    isinstance(timeout, bool)
+                    or not isinstance(timeout, int | float)
+                    or not math.isfinite(timeout)
+                    or timeout <= 0
+                ):
+                    self._invalid(f"timeout_profiles.{usage}.{field} must be a positive number")
+                else:
+                    profile[field] = float(timeout)
+            if profile:
+                profiles[usage] = profile
+            else:
+                profiles.pop(usage, None)
+
+        if profiles:
+            llm["timeout_profiles"] = profiles
+        else:
+            llm.pop("timeout_profiles", None)
+
+    def set_llm_config(self, *, updates: Mapping[str, Any]) -> dict[str, Any]:
+        cfg = self._load_config()
+        llm = cfg.setdefault("llm", {})
+        if not isinstance(llm, dict):
+            self._invalid("llm configuration must be a mapping")
+
+        for field in _BASE_STRING_FIELDS:
+            if field in updates:
+                self._apply_string_patch(llm, field, updates[field], "llm")
+        if "stream" in updates:
+            stream = updates["stream"]
+            if stream is None:
+                llm.pop("stream", None)
+            elif isinstance(stream, bool):
+                llm["stream"] = stream
+            else:
+                self._invalid("llm.stream must be a boolean")
+        if "max_output_tokens" in updates:
+            max_output_tokens = updates["max_output_tokens"]
+            if max_output_tokens is None:
+                llm.pop("max_output_tokens", None)
+            else:
+                self._validate_max_output_tokens(max_output_tokens, "llm.max_output_tokens")
+                llm["max_output_tokens"] = max_output_tokens
+        if "routes" in updates:
+            self._apply_routes_patch(llm, updates["routes"])
+        if "timeout_profiles" in updates:
+            self._apply_timeout_profiles_patch(llm, updates["timeout_profiles"])
+
+        try:
+            save_yaml(self._config_path, cfg)
+        except YamlConfigError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         result = self.get_llm_config()
         result["status"] = "ok"
         return result

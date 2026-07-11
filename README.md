@@ -31,6 +31,40 @@ AGENTSMITH_LLM_MODEL="glm-4.7" \
 cd server && uv run uvicorn app.main:app --port 8140
 ```
 
+多模型路由与超时档位可通过终端的 `/config` 配置，也可写入 `~/.agent-smith/config.yaml`：
+
+```yaml
+llm:
+  provider: openai                 # openai/openai_compatible 或 anthropic
+  api_key: sk-xxx
+  base_url: https://your-api.com/v1
+  model: main-model                 # 默认用于交互对话
+  max_output_tokens: 2048           # 可选；省略时采用厂商默认值
+  routes:
+    gate:
+      provider: anthropic           # 路由可以切换到另一家厂商
+      api_key: sk-ant-xxx           # 跨厂商路由需提供该厂商的密钥
+      base_url: https://api.anthropic.com
+      model: small-fast-model        # 未写的字段继承默认模型配置
+      max_output_tokens: 512
+      timeout_profile: gate
+    background:
+      model: economical-long-model
+      timeout_profile: background
+  timeout_profiles:
+    gate:
+      read: 45
+      stream_read: 60
+    background:
+      read: 240
+      stream_read: 300
+```
+
+可用路由和 profile 名为 `interactive`、`gate`、`background`。每个 profile 可覆盖
+`connect`、`read`、`stream_read`、`write`、`pool`（秒）；省略时使用内置默认值。
+`GET /api/config/llm` 与终端 UI 只显示密钥是否已配置，绝不返回密钥本身。
+`openai`/`openai_compatible` 使用 Chat Completions 兼容协议；`anthropic` 走原生 Messages 协议。
+
 ## 它能做什么
 
 - 读写文件、执行命令、Git 操作、联网搜索和抓取

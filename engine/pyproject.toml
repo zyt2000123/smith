@@ -2,7 +2,13 @@
 name = "agent-smith-engine"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.28", "pyyaml>=6.0", "aiosqlite>=0.21"]
+dependencies = ["httpx>=0.28", "pyyaml>=6.0", "aiosqlite>=0.21", "agent-smith-common"]
+
+[tool.uv.sources]
+agent-smith-common = { path = "../common", editable = true }
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
 
 [build-system]
 requires = ["setuptools>=69"]
@@ -13,6 +19,7 @@ packages = [
     "engine",
     "engine.execution",
     "engine.llm",
+    "engine.llm.adapters",
     "engine.memory",
     "engine.plugin",
     "engine.prompt",

@@ -35,6 +35,7 @@ name = "agent-smith-engine"
 version = "0.1.0"
 source = { editable = "../engine" }
 dependencies = [
+    { name = "agent-smith-common" },
     { name = "aiosqlite" },
     { name = "httpx" },
     { name = "pyyaml" },
@@ -42,10 +43,13 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agent-smith-common", editable = "../common" },
     { name = "aiosqlite", specifier = ">=0.21" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
+provides-extras = ["test"]
 
 [[package]]
 name = "agent-smith-server"
