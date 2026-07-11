@@ -1,0 +1,28 @@
+name: feature
+description: Feature development pipeline
+route: feature
+
+steps:
+  - skill: understand
+    gate: understanding
+  - skill: full-stack-product
+    gate: rubric
+  - skill: planning
+    gate: planning_llm
+  - skill: architecture
+    gate: design
+    condition: needs_architecture
+  - skill: testing-strategy
+    gate: test
+  - skill: contract-alignment
+    gate: contract_alignment
+  - skill: change-validation
+    gate: validation_llm
+  - skill: code-review
+    gate: review
+
+backtrack:
+  contract-alignment: planning
+  change-validation: planning
+  code-review: change-validation
+  testing-strategy: planning

@@ -1,0 +1,25 @@
+name: bugfix
+description: Bug fixing pipeline
+route: bugfix
+
+steps:
+  - skill: understand
+    gate: understanding
+  - skill: sde-debug
+    gate: root_cause
+  - skill: planning
+    gate: planning_llm
+  - skill: testing-strategy
+    gate: test
+  - skill: contract-alignment
+    gate: contract_alignment
+  - skill: change-validation
+    gate: validation_llm
+  - skill: code-review
+    gate: review
+
+backtrack:
+  contract-alignment: planning
+  change-validation: planning
+  code-review: change-validation
+  testing-strategy: planning

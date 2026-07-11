@@ -1,0 +1,19 @@
+name: refactor
+description: Code refactoring pipeline
+route: refactor
+
+steps:
+  - skill: planning
+    gate: planning_llm
+  - skill: testing-strategy
+    gate: test
+  - skill: change-validation
+    gate: validation_llm
+  - skill: code-review
+    gate: review
+
+backtrack:
+  contract-alignment: planning
+  change-validation: planning
+  code-review: change-validation
+  testing-strategy: planning

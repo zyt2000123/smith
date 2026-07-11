@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re as _re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,9 +21,21 @@ from .gate import (
     validation_gate_with_llm,
 )
 
-_GATE_MAP: dict[str, Callable[[], Gate]] = {
+logger = logging.getLogger(__name__)
+
+GATE_REGISTRY: dict[str, Callable[[], Gate]] = {
+    "understanding": UnderstandingGate,
+    "planning": PlanningGate,
+    "planning_llm": planning_gate_with_llm,
+    "design": DesignGate,
+    "test": TestGate,
+    "contract_alignment": ContractAlignmentGate,
+    "validation_llm": validation_gate_with_llm,
+    "review": ReviewGate,
+    "root_cause": RootCauseGate,
+    "rubric": SkillRubricGate,
+    # Legacy keys (skill name as gate key)
     "understand": UnderstandingGate,
-    "planning": planning_gate_with_llm,
     "architecture": DesignGate,
     "testing-strategy": TestGate,
     "contract-alignment": ContractAlignmentGate,
@@ -37,6 +50,14 @@ _DEFAULT_BACKTRACK: dict[str, str] = {
     "code-review": "change-validation",
     "testing-strategy": "planning",
 }
+
+
+def _needs_architecture(ctx: dict) -> bool:
+    """Skip architecture for small, single-module changes."""
+    plan_output = ctx.get("planning_output", "")
+    import re
+    file_refs = re.findall(r'[\w/]+\.\w{1,5}', plan_output)
+    return len(set(file_refs)) >= 3
 
 
 @dataclass
@@ -70,18 +91,79 @@ class SkillChain:
         }
         return SkillChain(nodes=nodes, backtrack_map=backtrack_map)
 
+    # ------------------------------------------------------------------
+    # YAML-based pipeline loading
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_yaml(cls, path: Path) -> SkillChain | None:
+        """Build a SkillChain from a pipeline YAML definition file."""
+        if not path.is_file():
+            return None
+        try:
+            import yaml
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("failed to parse pipeline yaml: %s", path)
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        steps = data.get("steps")
+        if not isinstance(steps, list) or not steps:
+            return None
+
+        nodes: list[SkillNode] = []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            skill_name = step.get("skill")
+            if not isinstance(skill_name, str) or not skill_name:
+                continue
+            gate_key = step.get("gate", "rubric")
+            gate_factory = GATE_REGISTRY.get(gate_key, SkillRubricGate)
+            gate = gate_factory() if callable(gate_factory) else gate_factory
+
+            condition = None
+            cond_key = step.get("condition")
+            if cond_key == "needs_architecture":
+                condition = _needs_architecture
+
+            nodes.append(SkillNode(skill_name=skill_name, gate=gate, condition=condition))
+
+        if not nodes:
+            return None
+
+        backtrack = data.get("backtrack")
+        backtrack_map = dict(backtrack) if isinstance(backtrack, dict) else dict(_DEFAULT_BACKTRACK)
+        return cls(nodes=nodes, backtrack_map=backtrack_map)
+
+    @classmethod
+    def load_pipelines(cls, pipelines_dir: Path) -> dict[str, "SkillChain"]:
+        """Load all pipeline YAML files from a directory, keyed by route name."""
+        result: dict[str, SkillChain] = {}
+        if not pipelines_dir.is_dir():
+            return result
+        for yaml_file in sorted(pipelines_dir.glob("*.yaml")):
+            chain = cls.from_yaml(yaml_file)
+            if chain is None:
+                continue
+            try:
+                import yaml
+                data = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
+                route = data.get("route", yaml_file.stem)
+            except Exception:
+                route = yaml_file.stem
+            result[route] = chain
+        return result
+
+    # ------------------------------------------------------------------
+    # Built-in chains (fallback when no YAML definitions exist)
+    # ------------------------------------------------------------------
+
     @staticmethod
     def feature_chain() -> SkillChain:
         """Predefined skill chain for feature development (QoderWake order)."""
-
-        def _needs_architecture(ctx: dict) -> bool:
-            """Skip architecture for small, single-module changes."""
-            # Condition: 3+ files touched or cross-module work
-            plan_output = ctx.get("planning_output", "")
-            import re
-            file_refs = re.findall(r'[\w/]+\.\w{1,5}', plan_output)
-            return len(set(file_refs)) >= 3
-
         return SkillChain(
             nodes=[
                 SkillNode(skill_name="understand", gate=UnderstandingGate()),
@@ -136,13 +218,9 @@ class SkillChain:
             clean = _re.sub(r"\(.*?\)", "", raw).strip()
             condition = None
             if "仅" in raw or "only" in raw.lower() or "条件" in raw:
-                def _needs_architecture(ctx: dict) -> bool:
-                    plan_output = ctx.get("planning_output", "")
-                    file_refs = _re.findall(r"[\w/]+\.\w{1,5}", plan_output)
-                    return len(set(file_refs)) >= 3
                 condition = _needs_architecture
 
-            gate_factory = _GATE_MAP.get(clean, SkillRubricGate)
+            gate_factory = GATE_REGISTRY.get(clean, SkillRubricGate)
             gate = gate_factory() if callable(gate_factory) else gate_factory
             nodes.append(SkillNode(skill_name=clean, gate=gate, condition=condition))
 

@@ -13,7 +13,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, AsyncGenerator, NamedTuple
+from typing import TYPE_CHECKING, AsyncGenerator, Callable, NamedTuple
 from pathlib import Path
 from uuid import uuid4
 
@@ -299,16 +299,48 @@ async def prepare_runtime(
     if detect_eval_sensitive(request.message):
         system_prompt += "\n\n" + EVAL_SENSITIVE_GUIDANCE
 
-    chain: SkillChain | None = None
     available_skills = {
         summary["name"] for summary in services.skill_registry.list_summaries()
     }
-    if task_type == TaskType.FEATURE:
-        chain = SkillChain.feature_chain().for_available_skills(available_skills)
-    elif task_type == TaskType.BUGFIX:
-        chain = SkillChain.bugfix_chain().for_available_skills(available_skills)
+    chain = _resolve_pipeline(task_type, runtime, available_skills)
 
     return _AgentSetup(runtime.profile_dir, system_prompt, task_type, chain)
+
+
+def _resolve_pipeline(
+    task_type: TaskType,
+    runtime: RuntimeContext,
+    available_skills: set[str],
+) -> SkillChain | None:
+    """Load pipeline: user profile → agents/pipelines/ → built-in fallback."""
+    route = task_type.value
+    if route == "direct":
+        return None
+
+    # 1. User-defined pipeline in profile
+    profile_pipelines = runtime.profile_dir / "pipelines"
+    if profile_pipelines.is_dir():
+        user_chains = SkillChain.load_pipelines(profile_pipelines)
+        if route in user_chains:
+            return user_chains[route].for_available_skills(available_skills)
+
+    # 2. Built-in pipelines from agents/pipelines/
+    builtin_pipelines = runtime.agents_dir / "pipelines"
+    if builtin_pipelines.is_dir():
+        builtin_chains = SkillChain.load_pipelines(builtin_pipelines)
+        if route in builtin_chains:
+            return builtin_chains[route].for_available_skills(available_skills)
+
+    # 3. Hardcoded fallback
+    _BUILTIN_CHAINS: dict[str, Callable[[], SkillChain]] = {
+        "feature": SkillChain.feature_chain,
+        "bugfix": SkillChain.bugfix_chain,
+    }
+    factory = _BUILTIN_CHAINS.get(route)
+    if factory:
+        return factory().for_available_skills(available_skills)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
