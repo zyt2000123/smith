@@ -266,8 +266,13 @@ def _runtime_execution_context(
 
 
 def _identity_state_dir(runtime: RuntimeContext, identity: IdentitySpec) -> Path:
-    """Keep mutable memory and checkpoints isolated between domain identities."""
-    return runtime.profile_dir / "identity-state" / identity.id
+    """Return the directory for mutable agent state (memory, checkpoints).
+
+    Single-agent design: state lives directly under profile_dir so that
+    the assembler (which reads profile_dir/memory/) and the compilation
+    pipeline (which writes here) share the same directory.
+    """
+    return runtime.profile_dir
 
 
 async def _load_profile_config(runtime: RuntimeContext) -> dict:

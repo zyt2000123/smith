@@ -197,40 +197,21 @@ def test_web_fetch_plain_html_fallback_extracts_text():
     assert "<h1>" not in text
 
 
-def test_memory_ops_reuses_store_crud_layout():
+def test_memory_ops_add_appends_to_recent_jsonl():
     memory_ops = _load_tool_module("memory_ops")
     old_home = os.environ.get("HOME")
 
     async def run():
         added = await memory_ops.execute(
             action="add",
-            agent_id="smith",
             content="alpha memory content",
             evidence="unit test evidence",
-            scope="project",
         )
-        match = re.search(r"'([a-f0-9]{12})'", added)
-        assert match, added
-        memory_id = match.group(1)
+        assert "OK" in added
+        assert "compiled" in added
 
-        found = await memory_ops.execute(action="search", agent_id="smith", query="alpha")
-        assert f"[{memory_id}] (project)" in found
-
-        updated = await memory_ops.execute(
-            action="update",
-            agent_id="smith",
-            memory_id=memory_id,
-            content="beta memory content",
-            evidence="updated evidence",
-        )
-        assert updated.startswith("OK: updated memory")
-
-        removed = await memory_ops.execute(
-            action="remove",
-            agent_id="smith",
-            memory_id=memory_id,
-        )
-        assert removed.startswith("OK: removed memory")
+        found = await memory_ops.execute(action="search", query="alpha")
+        assert "alpha" in found
 
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["HOME"] = tmp

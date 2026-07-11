@@ -1,14 +1,11 @@
-"""Dream — low-frequency memory consolidation for durable.md.
+"""Dream — low-frequency global memory review and log cleanup.
 
-Runs less frequently than compile_durable (every ~50 conversations or daily).
-While compile_durable is an online incremental writer, Dream is a conservative
-offline janitor that cleans up what incremental compilation accumulates.
-
-Steps:
-  1. Sanitize: regex-scan durable.md for leaked secrets, remove matching lines
-  2. Consolidate: LLM pass to compress redundancy, merge near-synonyms,
-     remove stale facts, without introducing new information
-  3. Report what changed
+Runs every ~50 conversations. Responsibilities:
+  1. Sanitize: regex-scan all memory layers for leaked secrets
+  2. Cross-layer review: check consistency across recent/durable/episodes
+  3. Consolidate: LLM pass to compress redundancy in durable.md
+  4. Log cleanup: truncate recent.jsonl entries before the compile offset
+  5. Report what changed
 """
 
 from __future__ import annotations
@@ -19,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ._files import atomic_write_text
+from ._files import atomic_write_text, contains_secret
 
 if TYPE_CHECKING:
     from engine.llm.port import LLMPort
@@ -28,33 +25,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Secret patterns — lines matching these are unsafe to keep
-# ---------------------------------------------------------------------------
-
-_SECRET_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),
-    re.compile(r"(?i)api[_-]?key\s*[:=]\s*\S+"),
-    re.compile(r"(?i)password\s*[:=]\s*\S+"),
-    re.compile(r"(?i)secret\s*[:=]\s*\S+"),
-    re.compile(r"(?i)token\s*[:=]\s*[A-Za-z0-9_\-\.]{16,}"),
-    re.compile(r"(?i)bearer\s+[A-Za-z0-9_\-\.]{16,}"),
-    re.compile(r"ghp_[A-Za-z0-9]{36}"),
-    re.compile(r"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----"),
-]
-
-
-def _contains_secret(text: str) -> bool:
-    return any(p.search(text) for p in _SECRET_PATTERNS)
-
-
 def _sanitize_lines(content: str) -> tuple[str, int]:
     """Remove lines containing secrets. Returns (cleaned, count_removed)."""
     lines = content.splitlines()
     clean = []
     removed = 0
     for line in lines:
-        if _contains_secret(line):
+        if contains_secret(line):
             removed += 1
         else:
             clean.append(line)
@@ -69,6 +46,7 @@ def _sanitize_lines(content: str) -> tuple[str, int]:
 class DreamReport:
     secrets_removed: int = 0
     consolidated: bool = False
+    log_lines_cleaned: int = 0
     skipped: str = ""
     errors: list[str] = field(default_factory=list)
 
@@ -104,25 +82,63 @@ DREAM_INTERVAL = 50
 
 
 async def run_dream(memory_dir: Path, llm: "LLMPort") -> DreamReport:
-    """Run Dream consolidation on durable.md. Returns a report."""
+    """Run Dream global review on all memory layers. Returns a report."""
     report = DreamReport()
+
+    _sanitize_all_layers(memory_dir, report)
+
+    await _consolidate_durable(memory_dir, llm, report)
+
+    _cleanup_log(memory_dir, report)
+
+    return report
+
+
+def _sanitize_all_layers(memory_dir: Path, report: DreamReport) -> None:
+    """Scan all memory files for secrets."""
+    total_removed = 0
+    for md_file in _all_memory_files(memory_dir):
+        content = md_file.read_text(encoding="utf-8")
+        cleaned, removed = _sanitize_lines(content)
+        if removed:
+            atomic_write_text(md_file, cleaned)
+            total_removed += removed
+    report.secrets_removed = total_removed
+
+
+def _all_memory_files(memory_dir: Path) -> list[Path]:
+    """Collect all .md files across memory layers."""
+    files = []
+    for name in ("durable.md", "recent.md"):
+        path = memory_dir / name
+        if path.is_file():
+            files.append(path)
+    episodes_dir = memory_dir / "episodes"
+    if episodes_dir.is_dir():
+        files.extend(sorted(episodes_dir.glob("*.md")))
+    return files
+
+
+async def _consolidate_durable(
+    memory_dir: Path,
+    llm: "LLMPort",
+    report: DreamReport,
+) -> None:
     durable_path = memory_dir / "durable.md"
 
     if not durable_path.is_file():
         report.skipped = "no durable.md"
-        return report
+        return
 
     original_content = durable_path.read_text(encoding="utf-8")
     content = original_content.strip()
     if not content or len(content) < 100:
         report.skipped = "durable.md too short to consolidate"
-        return report
+        return
 
-    # Step 1: sanitize secrets (fast, no LLM)
     content, secrets_removed = _sanitize_lines(content)
-    report.secrets_removed = secrets_removed
+    report.secrets_removed += secrets_removed
 
-    # Step 2: LLM consolidation
     try:
         resp = await llm.chat([
             {"role": "system", "content": "You are a memory janitor. Be conservative — only clean, never add."},
@@ -131,13 +147,51 @@ async def run_dream(memory_dir: Path, llm: "LLMPort") -> DreamReport:
         consolidated = resp.text.strip()
 
         if consolidated and len(consolidated) > 50:
-            atomic_write_text(durable_path.with_name("durable.md.bak"), original_content)
-            atomic_write_text(durable_path, consolidated + "\n")
-            report.consolidated = True
+            if contains_secret(consolidated):
+                logger.warning("dream consolidation output still contains secrets — keeping original")
+                report.errors.append("consolidation output contained secrets")
+            else:
+                atomic_write_text(durable_path.with_name("durable.md.bak"), original_content)
+                atomic_write_text(durable_path, consolidated + "\n")
+                report.consolidated = True
         else:
             report.skipped = "LLM returned insufficient output"
     except Exception as e:
         report.errors.append(f"consolidation: {type(e).__name__}: {e}")
         logger.warning("dream consolidation failed", exc_info=True)
 
-    return report
+
+def _cleanup_log(memory_dir: Path, report: DreamReport) -> None:
+    """Truncate recent.jsonl entries before the compile offset.
+
+    Only cleans if both recent.md and durable.md exist — proving
+    compilation has run successfully at least once.
+    """
+    recent = memory_dir / "recent.jsonl"
+    offset_file = memory_dir / ".compile_offset"
+
+    if not recent.is_file() or not offset_file.is_file():
+        return
+
+    if not (memory_dir / "recent.md").is_file() or not (memory_dir / "durable.md").is_file():
+        return
+
+    try:
+        offset = max(0, int(offset_file.read_text().strip()))
+    except (ValueError, OSError):
+        return
+
+    if offset <= 0:
+        return
+
+    lines = recent.read_text(encoding="utf-8").strip().splitlines()
+    if offset >= len(lines):
+        atomic_write_text(recent, "")
+        report.log_lines_cleaned = len(lines)
+    else:
+        remaining = lines[offset:]
+        atomic_write_text(recent, "\n".join(remaining) + "\n")
+        report.log_lines_cleaned = offset
+
+    if report.log_lines_cleaned > 0:
+        atomic_write_text(offset_file, "0")

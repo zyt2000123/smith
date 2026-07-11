@@ -29,8 +29,8 @@ MAX_DURABLE_CHARS = 10_000
 MAX_RECENT_SOURCE_CHARS = 24_000
 MAX_DURABLE_SOURCE_CHARS = 16_000
 MAX_EPISODE_SOURCE_CHARS = 16_000
-MIN_WINDOW_DAYS = 7
-MAX_WINDOW_DAYS = 14
+MIN_WINDOW_DAYS = 3
+MAX_WINDOW_DAYS = 7
 
 logger = logging.getLogger(__name__)
 
@@ -50,17 +50,47 @@ def _write_fp(path: Path, fp: str) -> None:
     atomic_write_text(path, fp)
 
 
-def _load_recent(memory_dir: Path) -> list[dict]:
+def _load_recent(memory_dir: Path, *, from_offset: bool = False) -> list[dict]:
+    """Load events from recent.jsonl.
+
+    When *from_offset* is True, only return entries after the last
+    successfully compiled offset (stored in ``.compile_offset``).
+    """
     recent = memory_dir / "recent.jsonl"
     if not recent.is_file():
         return []
+    lines = recent.read_text(encoding="utf-8").strip().splitlines()
+    offset = 0
+    if from_offset:
+        offset = _read_offset(memory_dir)
     entries = []
-    for line in recent.read_text(encoding="utf-8").strip().splitlines():
+    for line in lines[offset:]:
         try:
             entries.append(json.loads(line))
         except json.JSONDecodeError:
             continue
     return entries
+
+
+def _read_offset(memory_dir: Path) -> int:
+    offset_file = memory_dir / ".compile_offset"
+    if offset_file.is_file():
+        try:
+            return max(0, int(offset_file.read_text().strip()))
+        except (ValueError, OSError):
+            pass
+    return 0
+
+
+def _write_offset(memory_dir: Path, offset: int) -> None:
+    atomic_write_text(memory_dir / ".compile_offset", str(offset))
+
+
+def _total_lines(memory_dir: Path) -> int:
+    recent = memory_dir / "recent.jsonl"
+    if not recent.is_file():
+        return 0
+    return len(recent.read_text(encoding="utf-8").strip().splitlines())
 
 
 def _parse_ts(ts: str) -> datetime | None:
@@ -129,13 +159,110 @@ async def _llm_summarize(llm: "LLMPort", prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Generator-evaluator review pipeline
+# ---------------------------------------------------------------------------
+
+_MAX_REVIEW_ROUNDS = 3
+_MAX_SOFT_FAILS = 2
+
+_REVIEW_PROMPT = """\
+Review this memory compilation for quality. Check:
+
+1. HARD FAIL — any of these means immediate rejection:
+   - Contains API keys, passwords, tokens, or other secrets
+   - Contains fabricated facts not present in the source events
+2. SOFT FAIL — flag each instance:
+   - Important facts from source events are missing
+   - Redundant/duplicate statements
+   - A one-time action recorded as a long-term habit
+   - Character budget exceeded
+
+Source events (ground truth):
+{source}
+
+Compiled output to review:
+{draft}
+
+Respond in EXACTLY this JSON format, nothing else:
+{{"pass": true/false, "hard_fail": [...], "soft_fail": [...], "feedback": "..."}}"""
+
+
+async def _review_draft(
+    reviewer: "LLMPort",
+    draft: str,
+    source: str,
+) -> dict:
+    """Ask the reviewer model to evaluate a compilation draft."""
+    resp = await reviewer.chat([
+        {"role": "system", "content": "You are a memory quality reviewer. Output only valid JSON."},
+        {"role": "user", "content": _REVIEW_PROMPT.format(source=source[:4000], draft=draft)},
+    ])
+    text = resp.text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("reviewer returned unparseable response, treating as pass: %s", text[:200])
+        return {"pass": True, "hard_fail": [], "soft_fail": [], "feedback": ""}
+
+
+async def _generate_and_review(
+    generator: "LLMPort",
+    reviewer: "LLMPort",
+    prompt: str,
+    source: str,
+) -> str:
+    """Run the generator-evaluator loop: generate → review → retry up to 3 rounds.
+
+    Invariant: every returned draft has been reviewed. The loop generates a
+    draft, reviews it, and only regenerates if review fails AND retries remain.
+    Final draft always gets a deterministic contains_secret scan.
+    """
+    from ._files import contains_secret
+
+    draft = await _llm_summarize(generator, prompt)
+    gen_prompt = prompt
+
+    for attempt in range(_MAX_REVIEW_ROUNDS):
+        review = await _review_draft(reviewer, draft, source)
+
+        hard_fails = review.get("hard_fail", [])
+        soft_fails = review.get("soft_fail", [])
+        needs_retry = bool(hard_fails) or len(soft_fails) > _MAX_SOFT_FAILS
+
+        if not needs_retry:
+            break
+
+        if attempt >= _MAX_REVIEW_ROUNDS - 1:
+            break
+
+        feedback = review.get("feedback", "Quality issues found.")
+        gen_prompt = f"{prompt}\n\nPREVIOUS DRAFT REJECTED. Issues: {feedback}\nFix these and regenerate."
+        draft = await _llm_summarize(generator, gen_prompt)
+
+    if contains_secret(draft):
+        logger.warning("compiled draft still contains secrets after review — redacting")
+        draft = "[Content redacted — contained sensitive information after review]"
+
+    return draft
+
+
+# ---------------------------------------------------------------------------
 # compile_recent: replace today.md + week.md with a single budget-capped view
 # ---------------------------------------------------------------------------
 
-async def compile_recent(memory_dir: Path, llm: "LLMPort") -> bool:
-    """Compile recent events into recent.md. Budget-capped, elastic 7-14 day window."""
+async def compile_recent(
+    memory_dir: Path,
+    llm: "LLMPort",
+    reviewer: "LLMPort | None" = None,
+) -> bool:
+    """Compile recent events into recent.md. Budget-capped, elastic 3-7 day window."""
     now = datetime.now(timezone.utc)
-    all_entries = _load_recent(memory_dir)
+    # ponytail: recent.md is a rolling window — must read ALL events, not just
+    # new ones. Offset is only for compile_durable's incremental merge.
+    all_entries = _load_recent(memory_dir, from_offset=False)
 
     entries = _filter_by_time(all_entries, now - timedelta(days=MIN_WINDOW_DAYS))
     if not entries:
@@ -147,18 +274,26 @@ async def compile_recent(memory_dir: Path, llm: "LLMPort") -> bool:
     fp_file = memory_dir / ".fp_recent"
 
     fp = _fingerprint([f"{e.get('timestamp', '')}:{e.get('task', '')[:50]}" for e in entries])
-    if _read_fp(fp_file) == fp:
+    if _read_fp(fp_file) == fp and out.is_file():
         return False
 
     source = _entries_to_source(entries, source_limit=MAX_RECENT_SOURCE_CHARS)
     if len(source) > MAX_RECENT_CHARS:
-        summary = await _llm_summarize(
-            llm,
+        prompt = (
             f"Summarize recent activity into key events, grouped by date. "
-            f"Max {MAX_RECENT_CHARS} chars.\n\n{source}",
+            f"Max {MAX_RECENT_CHARS} chars.\n\n{source}"
         )
+        if reviewer:
+            summary = await _generate_and_review(llm, reviewer, prompt, source)
+        else:
+            summary = await _llm_summarize(llm, prompt)
     else:
         summary = source
+
+    from ._files import contains_secret
+    if contains_secret(summary):
+        logger.warning("recent compilation output contains secrets — skipping write")
+        return False
 
     atomic_write_text(out, f"## Recent Activity\n\n{summary}\n")
     _write_fp(fp_file, fp)
@@ -191,20 +326,24 @@ New events:
 {new_events}"""
 
 
-async def compile_durable(memory_dir: Path, llm: "LLMPort") -> bool:
+async def compile_durable(
+    memory_dir: Path,
+    llm: "LLMPort",
+    reviewer: "LLMPort | None" = None,
+) -> bool:
     """Incrementally merge new events into durable.md."""
-    all_entries = _load_recent(memory_dir)
+    all_entries = _load_recent(memory_dir, from_offset=True)
 
     out = memory_dir / "durable.md"
     fp_file = memory_dir / ".fp_durable"
 
-    fp = _fingerprint([f"{e.get('timestamp', '')}:{e.get('task', '')[:50]}" for e in all_entries[-30:]])
-    if _read_fp(fp_file) == fp:
+    fp = _fingerprint([f"{e.get('timestamp', '')}:{e.get('task', '')[:50]}" for e in all_entries])
+    if _read_fp(fp_file) == fp and out.is_file():
         return False
 
     existing = out.read_text(encoding="utf-8").strip() if out.is_file() else ""
     new_source = _entries_to_source(
-        all_entries[-20:],
+        all_entries,
         summary_limit=1000,
         source_limit=MAX_DURABLE_SOURCE_CHARS,
     )
@@ -212,11 +351,20 @@ async def compile_durable(memory_dir: Path, llm: "LLMPort") -> bool:
     if not new_source.strip():
         return False
 
-    summary = await _llm_summarize(llm, _DURABLE_MERGE_PROMPT.format(
+    merge_prompt = _DURABLE_MERGE_PROMPT.format(
         existing=existing or "(empty — first compilation)",
         new_events=new_source,
         max_chars=MAX_DURABLE_CHARS,
-    ))
+    )
+    if reviewer:
+        summary = await _generate_and_review(llm, reviewer, merge_prompt, new_source)
+    else:
+        summary = await _llm_summarize(llm, merge_prompt)
+
+    from ._files import contains_secret
+    if contains_secret(summary):
+        logger.warning("durable compilation output contains secrets — skipping write")
+        return False
 
     durable = f"## Durable Memory\n\n{summary}\n"
     if len(durable) > MAX_DURABLE_CHARS:
@@ -238,6 +386,7 @@ async def compact_episode(
     llm: "LLMPort",
     topic: str,
     related_entries: list[dict],
+    reviewer: "LLMPort | None" = None,
 ) -> Path | None:
     """Generate an episode summary for a completed topic. Returns the file path."""
     if not related_entries:
@@ -260,11 +409,20 @@ async def compact_episode(
         summary_limit=1200,
         source_limit=MAX_EPISODE_SOURCE_CHARS,
     )
-    summary = await _llm_summarize(llm, (
+    prompt = (
         f"Write a concise episode summary for the topic: {topic}\n\n"
         f"Include: background, process, key decisions, and outcome.\n"
         f"Max 800 chars.\n\n{source}"
-    ))
+    )
+    if reviewer:
+        summary = await _generate_and_review(llm, reviewer, prompt, source)
+    else:
+        summary = await _llm_summarize(llm, prompt)
+
+    from ._files import contains_secret
+    if contains_secret(summary):
+        logger.warning("episode output contains secrets — skipping write")
+        return None
 
     atomic_write_text(out, f"# {topic}\n\n{summary}\n")
     return out
@@ -300,22 +458,26 @@ async def run_compilation(
     memory_dir: Path,
     llm: "LLMPort",
     *,
+    reviewer: "LLMPort | None" = None,
     raise_on_error: bool = False,
 ) -> dict:
     """Run compilation pipeline. Optionally surface failures for retry control."""
     memory_dir.mkdir(parents=True, exist_ok=True)
+    total = _total_lines(memory_dir)
     results = {"recent": False, "durable": False}
     errors: list[str] = []
     try:
-        results["recent"] = await compile_recent(memory_dir, llm)
+        results["recent"] = await compile_recent(memory_dir, llm, reviewer)
     except Exception:
         logger.warning("recent-memory compilation failed", exc_info=True)
         errors.append("recent-memory compilation failed")
     try:
-        results["durable"] = await compile_durable(memory_dir, llm)
+        results["durable"] = await compile_durable(memory_dir, llm, reviewer)
     except Exception:
         logger.warning("durable-memory compilation failed", exc_info=True)
         errors.append("durable-memory compilation failed")
+    if not errors and (results["recent"] or results["durable"]):
+        _write_offset(memory_dir, total)
     if errors and raise_on_error:
         raise RuntimeError("; ".join(errors))
     return results

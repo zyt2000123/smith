@@ -32,7 +32,7 @@ TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
     "web_fetch": PermissionLevel.READ,
     "websearch": PermissionLevel.READ,
     "webfetch": PermissionLevel.READ,
-    "memory_ops": PermissionLevel.READ,
+    "memory_ops": PermissionLevel.WRITE,
     "skill_load": PermissionLevel.READ,
     "todo": PermissionLevel.READ,
     "write_file": PermissionLevel.WRITE,
