@@ -1,43 +1,57 @@
-"""task_router 单测：上下文线索路由 + Evaluation-Sensitive 检测。"""
+"""task_router 单测：YAML 身份目录路由 + Evaluation-Sensitive 检测。"""
 
-from engine.execution.task_router import (
-    TaskType,
-    detect_eval_sensitive,
-    route_task,
-)
+from pathlib import Path
 
-
-def test_stack_trace_routes_bugfix_without_keywords():
-    # Java 栈帧，无任何 bugfix 关键词
-    msg = "看看这个:\nat com.example.Main(Main.java:10)"
-    assert route_task(msg) == TaskType.BUGFIX
+from engine.execution.task_router import detect_eval_sensitive, route_task
+from engine.identity_catalog import IdentityCatalog
 
 
-def test_python_traceback_routes_bugfix():
-    msg = 'Traceback (most recent call last)\n  File "app.py", line 3\nValueError: bad'
-    assert route_task(msg) == TaskType.BUGFIX
+def _catalog(tmp_path: Path) -> IdentityCatalog:
+    (tmp_path / "smith.yaml").write_text(
+        """
+schema: agentsmith.identity/v1
+id: smith
+name: Smith
+default: true
+routes:
+  - id: bugfix
+    examples: ["Traceback (most recent call last)"]
+    keywords: [bug, \u62a5\u9519]
+    pipeline: bugfix
+  - id: feature
+    examples: ["\u7528\u6237\u6545\u4e8b", "\u9a8c\u6536\u6807\u51c6"]
+    keywords: [\u5b9e\u73b0, \u65b0\u589e]
+    pipeline: feature
+""".strip(),
+        encoding="utf-8",
+    )
+    return IdentityCatalog.load(tmp_path)
 
 
-def test_user_story_routes_feature():
-    msg = "作为用户，我希望能导出报表。验收标准：支持 CSV 格式。"
-    assert route_task(msg) == TaskType.FEATURE
+def test_route_task_uses_declared_example_route(tmp_path: Path) -> None:
+    decision = route_task(
+        'Traceback (most recent call last)\n  File "app.py", line 3\nValueError: bad',
+        _catalog(tmp_path),
+    )
+
+    assert decision.identity_id == "smith"
+    assert decision.route_id == "bugfix"
+    assert decision.pipeline_id == "bugfix"
 
 
-def test_context_clue_outweighs_single_keyword():
-    # 1 个 feature 关键词（添加）+ 1 条 bug 上下文线索（栈帧，2 分）→ BUGFIX
-    msg = "添加日志后还是崩:\nat com.example.Main(Main.java:10)"
-    assert route_task(msg) == TaskType.BUGFIX
+def test_route_task_uses_declared_feature_route(tmp_path: Path) -> None:
+    decision = route_task("作为用户，我希望能导出报表。验收标准：支持 CSV 格式。", _catalog(tmp_path))
+
+    assert decision.route_id == "feature"
+    assert decision.pipeline_id == "feature"
 
 
-def test_plain_chat_routes_direct():
-    assert route_task("今天天气怎么样") == TaskType.DIRECT
+def test_plain_chat_uses_default_identity_direct_fallback(tmp_path: Path) -> None:
+    decision = route_task("今天天气怎么样", _catalog(tmp_path))
 
-
-def test_exception_class_name_alone_is_weak_evidence():
-    # 异常类名只经 error/exception 关键词计 1 分（不再作为上下文线索双重计分），
-    # 不应压过明确的 feature 意图
-    msg = "帮我实现一个表单校验功能，校验失败时抛 ValidationError"
-    assert route_task(msg) != TaskType.BUGFIX
+    assert decision.identity_id == "smith"
+    assert decision.route_id == "direct"
+    assert decision.pipeline_id is None
 
 
 def test_eval_sensitive_positive():

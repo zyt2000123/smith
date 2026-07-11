@@ -3,10 +3,10 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from ..infrastructure.profile_files import (
-    agent_profile_dir,
-    list_agent_profile_files,
-    read_agent_profile_file,
-    write_agent_profile_file,
+    list_smith_profile_files,
+    read_smith_profile_file,
+    smith_profile_dir,
+    write_smith_profile_file,
 )
 
 
@@ -21,24 +21,24 @@ ALLOWED_PROFILE_FILES = {
 
 
 class ProfileFileService:
-    async def list_files(self, agent_id: str) -> list[dict]:
-        d = agent_profile_dir(agent_id)
+    async def list_files(self) -> list[dict]:
+        d = smith_profile_dir()
         if not d.exists():
             raise HTTPException(404, "Agent profile not found")
-        return list_agent_profile_files(agent_id)
+        return list_smith_profile_files()
 
-    async def get_file(self, agent_id: str, filename: str) -> dict:
+    async def get_file(self, filename: str) -> dict:
         self._ensure_allowed(filename)
-        content = read_agent_profile_file(agent_id, filename)
+        content = read_smith_profile_file(filename)
         if content is None:
             raise HTTPException(404, "File not found")
         return {"filename": filename, "content": content}
 
-    async def update_file(self, agent_id: str, filename: str, content: str) -> dict:
+    async def update_file(self, filename: str, content: str) -> dict:
         self._ensure_allowed(filename)
-        if not agent_profile_dir(agent_id).exists():
+        if not smith_profile_dir().exists():
             raise HTTPException(404, "Agent profile not found")
-        write_agent_profile_file(agent_id, filename, content)
+        write_smith_profile_file(filename, content)
         return {"filename": filename, "content": content}
 
     @staticmethod

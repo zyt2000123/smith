@@ -12,6 +12,7 @@ from engine.execution.agent_loop import (
     reply_with_runtime as engine_reply_with_runtime,
 )
 from engine.execution.runtime import EngineRequest
+from engine.identity_catalog import IdentityCatalog, IdentityCatalogError
 
 from ..schemas.session import SessionOut, MessageOut
 from ..infrastructure.repositories.session_repo import SessionRepo
@@ -25,20 +26,94 @@ logger = logging.getLogger(__name__)
 
 class SessionService:
 
-    def __init__(self, session_repo: SessionRepo, agent_profile_repo: AgentProfileRepo) -> None:
+    def __init__(
+        self,
+        session_repo: SessionRepo,
+        agent_profile_repo: AgentProfileRepo,
+        *,
+        identity_catalog: IdentityCatalog | None = None,
+    ) -> None:
         self.session_repo = session_repo
         self.agent_profile_repo = agent_profile_repo
+        self.identity_catalog = identity_catalog
 
     async def list_sessions(self, agent_id: str) -> list[SessionOut]:
         rows = await self.session_repo.list_by_agent(agent_id)
         return [SessionOut(**r) for r in rows]
 
-    async def create_session(self, agent_id: str, title: str) -> SessionOut:
-        emp = await self.agent_profile_repo.get(agent_id)
-        if emp is None:
+    def _catalog(self) -> IdentityCatalog:
+        if self.identity_catalog is not None:
+            return self.identity_catalog
+        from .engine_runtime import load_runtime_identity_catalog
+
+        return load_runtime_identity_catalog()
+
+    def _validate_identity(self, identity_id: str) -> None:
+        try:
+            self._catalog().get(identity_id)
+        except IdentityCatalogError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    async def create_session(
+        self,
+        agent_id: str,
+        title: str,
+        identity_id: str | None = None,
+    ) -> SessionOut:
+        profile = await self.agent_profile_repo.get(agent_id)
+        if profile is None:
             raise HTTPException(404, "Agent profile not found")
-        row = await self.session_repo.create(agent_id, title or "新对话")
+        if identity_id is not None:
+            self._validate_identity(identity_id)
+        row = await self.session_repo.create(agent_id, title or "新对话", identity_id)
         return SessionOut(**row)
+
+    async def _resolve_session_identity(
+        self,
+        agent_id: str,
+        session_id: str,
+        content: str,
+        requested_identity_id: str | None,
+    ) -> str:
+        session = await self.session_repo.get_owned(session_id, agent_id)
+        if session is None:
+            raise HTTPException(404, "Session not found")
+
+        pinned_identity_id = session.get("identity_id")
+        if requested_identity_id is not None:
+            self._validate_identity(requested_identity_id)
+            if pinned_identity_id and pinned_identity_id != requested_identity_id:
+                raise HTTPException(
+                    409,
+                    "This session is already bound to a different identity. Create a new session to switch identity.",
+                )
+            selected_identity_id = requested_identity_id
+        elif pinned_identity_id:
+            selected_identity_id = str(pinned_identity_id)
+            self._validate_identity(selected_identity_id)
+        else:
+            selected_identity_id = self._catalog().resolve(content).identity_id
+
+        if not pinned_identity_id:
+            claimed = await self.session_repo.claim_identity(
+                session_id,
+                agent_id,
+                selected_identity_id,
+            )
+            if not claimed:
+                # A concurrent first message won the race; use its stable binding.
+                concurrent_session = await self.session_repo.get_owned(session_id, agent_id)
+                if concurrent_session is None or not concurrent_session.get("identity_id"):
+                    raise HTTPException(409, "Unable to establish a stable session identity")
+                selected_identity_id = str(concurrent_session["identity_id"])
+                self._validate_identity(selected_identity_id)
+                if requested_identity_id is not None and selected_identity_id != requested_identity_id:
+                    raise HTTPException(
+                        409,
+                        "This session was bound to a different identity by another request.",
+                    )
+
+        return selected_identity_id
 
     async def _recent_history(self, session_id: str) -> list[dict]:
         """Last N messages as {"role","content"} dicts for engine short-term context."""
@@ -59,12 +134,17 @@ class SessionService:
         content: str,
         context: str | None = None,
         skill_name: str | None = None,
+        identity_id: str | None = None,
     ) -> MessageOut:
-        if not await self.session_repo.exists(session_id, agent_id):
-            raise HTTPException(404, "Session not found")
+        selected_identity_id = await self._resolve_session_identity(
+            agent_id,
+            session_id,
+            content,
+            identity_id,
+        )
 
-        emp = await self.agent_profile_repo.get(agent_id)
-        emp_name = emp["name"] if emp else "Agent"
+        profile = await self.agent_profile_repo.get(agent_id)
+        profile_name = profile["name"] if profile else "Agent"
 
         # Fetch recent history BEFORE saving the new message (avoids duplication)
         history = await self._recent_history(session_id)
@@ -74,13 +154,14 @@ class SessionService:
 
         # Call engine
         # context（工作目录/附件路径）由引擎侧拼接：LLM 可见，路由/记忆/落库均只用原文
-        runtime, services = build_engine_runtime(agent_id, emp_name, session_id=session_id)
+        runtime, services = build_engine_runtime(agent_id, profile_name, session_id=session_id)
         result = await engine_reply_with_runtime(
             EngineRequest(
                 message=content,
                 history=history,
                 context=context,
                 forced_skill=skill_name,
+                identity_id=selected_identity_id,
             ),
             runtime,
             services,
@@ -98,13 +179,18 @@ class SessionService:
         content: str,
         context: str | None = None,
         skill_name: str | None = None,
+        identity_id: str | None = None,
     ) -> AsyncGenerator[dict, None]:
         """Yield SSE event dicts. Streams text chunks as they arrive from the engine."""
-        if not await self.session_repo.exists(session_id, agent_id):
-            raise HTTPException(404, "Session not found")
+        selected_identity_id = await self._resolve_session_identity(
+            agent_id,
+            session_id,
+            content,
+            identity_id,
+        )
 
-        emp = await self.agent_profile_repo.get(agent_id)
-        emp_name = emp["name"] if emp else "Agent"
+        profile = await self.agent_profile_repo.get(agent_id)
+        profile_name = profile["name"] if profile else "Agent"
 
         # Fetch recent history BEFORE saving the new message (avoids duplication)
         history = await self._recent_history(session_id)
@@ -121,13 +207,14 @@ class SessionService:
         terminal_status = "completed"
         terminal_notice: str | None = None
         try:
-            runtime, services = build_engine_runtime(agent_id, emp_name, session_id=session_id)
+            runtime, services = build_engine_runtime(agent_id, profile_name, session_id=session_id)
             run = engine_run_stream_with_runtime(
                 EngineRequest(
                     message=content,
                     history=history,
                     context=context,
                     forced_skill=skill_name,
+                    identity_id=selected_identity_id,
                 ),
                 runtime,
                 services,
@@ -223,4 +310,7 @@ class SessionService:
 
         if terminal_notice:
             yield sse("message", {"text": f"\n⚠️ {terminal_notice}\n"})
-        yield sse("done", {"id": msg["id"] if msg else None, "status": terminal_status})
+        yield sse("done", {
+            "id": msg["id"] if msg else None,
+            "status": terminal_status,
+        })

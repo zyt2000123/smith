@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .cli_agents import resolve_session
+from .cli_smith import resolve_session
 
 
 def _context_from_args(args: Any) -> str | None:
@@ -58,20 +58,20 @@ def _emit_event(event_type: str, payload: dict[str, Any], *, verbose: bool) -> N
 
 
 async def _send_streaming_message(
-    session_service: Any,
-    agent: Any,
+    agent_service: Any,
     session_id: str,
     message: str,
     *,
     context: str | None,
     verbose: bool,
+    identity_id: str | None = None,
 ) -> None:
     printed_text = False
-    async for raw_event in session_service.stream_message(
-        agent.id,
+    async for raw_event in agent_service.stream_message(
         session_id,
         message,
         context=context,
+        identity_id=identity_id,
     ):
         event_type, payload = _decode_event(raw_event)
         if event_type == "message" and payload.get("text"):
@@ -82,22 +82,23 @@ async def _send_streaming_message(
 
 
 async def _interactive_chat(
-    session_service: Any,
+    agent_service: Any,
     agent: Any,
     *,
     session_id: str | None,
     context: str | None,
     session_title: str,
     verbose: bool,
+    identity_id: str | None = None,
 ) -> int:
     if session_id:
-        session = await resolve_session(session_service, agent, session_id)
+        session = await resolve_session(agent_service, session_id)
         print(
             f"Chatting with {agent.name} ({agent.role}) in session "
             f"{session.id}. Type `/exit` to quit."
         )
     else:
-        session = await session_service.create_session(agent.id, session_title)
+        session = await agent_service.create_session(session_title, identity_id)
         print(f"Chatting with {agent.name} ({agent.role}). Type `/exit` to quit.")
     while True:
         try:
@@ -116,10 +117,10 @@ async def _interactive_chat(
 
         print(f"{agent.name}> ", end="", flush=True)
         await _send_streaming_message(
-            session_service,
-            agent,
+            agent_service,
             session.id,
             user_input,
             context=context,
             verbose=verbose,
+            identity_id=identity_id,
         )

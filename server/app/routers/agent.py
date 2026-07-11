@@ -53,7 +53,13 @@ async def create_session(
     body: SessionCreate,
     svc: AgentService = Depends(get_agent_service),
 ):
-    return await svc.create_session(body.title)
+    return await svc.create_session(body.title, body.identity_id)
+
+
+@router.get("/identities")
+async def list_identities(svc: AgentService = Depends(get_agent_service)):
+    """Expose the startup-scanned identity catalog for clients and CLI users."""
+    return await svc.list_identities()
 
 
 @router.get("/sessions/{session_id}/messages", response_model=list[MessageOut])
@@ -77,6 +83,7 @@ async def send_message(
         body.content,
         context=body.context,
         skill_name=body.skill_name,
+        identity_id=body.identity_id,
     )
 
 
@@ -92,6 +99,7 @@ async def stream_message(
             body.content,
             context=body.context,
             skill_name=body.skill_name,
+            identity_id=body.identity_id,
         )
     )
 

@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from .cli_identity import SHELL_ALIASES
+SHELL_ALIASES = {"shell", "ui"}
 
 
 def _repo_root() -> Path:

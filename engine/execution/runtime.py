@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from engine.identity_catalog import IdentityCatalog
 from engine.llm.port import LLMPort
 from engine.safety.tool_guard import ToolGuard
 from engine.skill.registry import SkillRegistry
@@ -19,6 +20,7 @@ class EngineRequest:
     history: list[dict] | None = None
     context: str | None = None
     forced_skill: str | None = None
+    identity_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,7 @@ class RuntimeContext:
     agents_dir: Path
     session_id: str | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
+    identity_catalog: IdentityCatalog | None = None
 
 
 @dataclass

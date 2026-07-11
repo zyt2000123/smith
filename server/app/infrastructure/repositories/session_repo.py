@@ -11,7 +11,7 @@ class SessionRepo:
     async def list_by_agent(self, agent_id: str) -> list[dict]:
         db = await get_app_db()
         rows = await db.execute_fetchall(
-            "SELECT s.id, s.agent_id, s.title, s.created_at, "
+            "SELECT s.id, s.agent_id, s.identity_id, s.title, s.created_at, "
             "  (SELECT content FROM messages m WHERE m.session_id=s.id ORDER BY m.created_at DESC LIMIT 1) as last_message_preview, "
             "  (SELECT created_at FROM messages m WHERE m.session_id=s.id ORDER BY m.created_at DESC LIMIT 1) as last_message_at, "
             "  (SELECT count(*) FROM messages m WHERE m.session_id=s.id) as message_count "
@@ -27,16 +27,22 @@ class SessionRepo:
             result.append(d)
         return result
 
-    async def create(self, agent_id: str, title: str) -> dict:
+    async def create(self, agent_id: str, title: str, identity_id: str | None = None) -> dict:
         db = await get_app_db()
         sid = uuid.uuid4().hex[:12]
         now = datetime.now(timezone.utc).isoformat()
         await db.execute(
-            "INSERT INTO sessions (id, agent_id, title, created_at) VALUES (?,?,?,?)",
-            (sid, agent_id, title, now),
+            "INSERT INTO sessions (id, agent_id, identity_id, title, created_at) VALUES (?,?,?,?,?)",
+            (sid, agent_id, identity_id, title, now),
         )
         await db.commit()
-        return {"id": sid, "agent_id": agent_id, "title": title, "created_at": now}
+        return {
+            "id": sid,
+            "agent_id": agent_id,
+            "identity_id": identity_id,
+            "title": title,
+            "created_at": now,
+        }
 
     async def exists(self, session_id: str, agent_id: str) -> bool:
         db = await get_app_db()
@@ -45,6 +51,30 @@ class SessionRepo:
             (session_id, agent_id),
         )
         return bool(rows)
+
+    async def get_owned(self, session_id: str, agent_id: str) -> dict | None:
+        db = await get_app_db()
+        rows = await db.execute_fetchall(
+            "SELECT id, agent_id, identity_id, title, created_at FROM sessions WHERE id=? AND agent_id=?",
+            (session_id, agent_id),
+        )
+        return dict(rows[0]) if rows else None
+
+    async def claim_identity(
+        self,
+        session_id: str,
+        agent_id: str,
+        identity_id: str,
+    ) -> bool:
+        """Pin an identity once; a concurrent caller cannot overwrite it."""
+        db = await get_app_db()
+        cursor = await db.execute(
+            "UPDATE sessions SET identity_id=? "
+            "WHERE id=? AND agent_id=? AND identity_id IS NULL",
+            (identity_id, session_id, agent_id),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
 
     async def get_messages(self, session_id: str, limit: int = 0, offset: int = 0) -> list[dict]:
         db = await get_app_db()

@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    identity_id TEXT,
     title TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -70,42 +71,18 @@ CREATE TABLE IF NOT EXISTS auto_task_runs (
     error TEXT
 );
 
-CREATE TABLE IF NOT EXISTS team_groups (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    member_ids TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS team_messages (
-    id TEXT PRIMARY KEY,
-    group_id TEXT NOT NULL REFERENCES team_groups(id) ON DELETE CASCADE,
-    sender_id TEXT NOT NULL,
-    sender_name TEXT NOT NULL DEFAULT '',
-    content TEXT NOT NULL,
-    mentions TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
 """
 
 
-async def _migrate_employee_to_agent(db: aiosqlite.Connection) -> None:
-    async with db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='employees'"
-    ) as cur:
-        has_legacy = await cur.fetchone()
-    if has_legacy:
-        await db.execute("ALTER TABLE employees RENAME TO agent_profiles")
-    for tbl in ("sessions", "tasks", "auto_tasks"):
-        async with db.execute(f"PRAGMA table_info({tbl})") as cur:
-            cols = [r[1] for r in await cur.fetchall()]
-        if "employee_id" in cols and "agent_id" not in cols:
-            await db.execute(f"ALTER TABLE {tbl} RENAME COLUMN employee_id TO agent_id")
-    await db.commit()
+async def _ensure_session_identity_column(db: aiosqlite.Connection) -> None:
+    """Add the domain-identity binding to existing single-Smith sessions."""
+    async with db.execute("PRAGMA table_info(sessions)") as cur:
+        columns = {row[1] for row in await cur.fetchall()}
+    if "identity_id" not in columns:
+        await db.execute("ALTER TABLE sessions ADD COLUMN identity_id TEXT")
 
 
 async def ensure_schema(db: aiosqlite.Connection) -> None:
-    await _migrate_employee_to_agent(db)
     await db.executescript(APP_SCHEMA)
+    await _ensure_session_identity_column(db)
     await db.commit()

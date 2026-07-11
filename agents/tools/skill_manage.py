@@ -3,8 +3,7 @@ from __future__ import annotations
 """Skill management tool provider — list, read, create, edit, patch, and version skills.
 
 Built-in skills (under agents/skills/) are READ-ONLY.
-Only agent-installed skills (under the agent profile's skills dir; see
-common.paths.LEGACY_PROFILES_DIRNAME) can be modified.
+Only Smith-installed skills (under ~/.agent-smith/agent/skills/) can be modified.
 """
 
 import os
@@ -62,13 +61,12 @@ _BUILTIN_SKILLS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "
 
 def _agent_skills_dir(agent_id: str) -> Path:
     try:
-        from common.paths import LEGACY_PROFILES_DIRNAME
+        from common.config import AGENT_DIR
     except ModuleNotFoundError:
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from common.paths import LEGACY_PROFILES_DIRNAME
-    safe_id = Path(agent_id).name
-    return Path.home() / ".agent-smith" / LEGACY_PROFILES_DIRNAME / safe_id / "skills"
+        from common.config import AGENT_DIR
+    return AGENT_DIR / "skills"
 
 
 def _is_builtin(skill_name: str) -> bool:
@@ -104,9 +102,9 @@ def _list_all_skills(agent_id: str) -> list[dict]:
                 })
 
     # Agent-installed
-    emp_dir = _agent_skills_dir(agent_id)
-    if emp_dir.is_dir():
-        for child in sorted(emp_dir.iterdir()):
+    agent_skills_dir = _agent_skills_dir(agent_id)
+    if agent_skills_dir.is_dir():
+        for child in sorted(agent_skills_dir.iterdir()):
             sf = child / "SKILL.md"
             if sf.is_file():
                 meta = _parse_frontmatter(sf.read_text(encoding="utf-8"))
@@ -125,9 +123,9 @@ def _get_skill_content(agent_id: str, skill_name: str) -> tuple[str, str]:
     safe = Path(skill_name).name
 
     # Agent-installed first
-    emp_path = _agent_skills_dir(agent_id) / safe / "SKILL.md"
-    if emp_path.is_file():
-        return emp_path.read_text(encoding="utf-8"), "agent"
+    agent_path = _agent_skills_dir(agent_id) / safe / "SKILL.md"
+    if agent_path.is_file():
+        return agent_path.read_text(encoding="utf-8"), "agent"
 
     # Builtin
     builtin_path = Path(_BUILTIN_SKILLS_DIR) / safe / "SKILL.md"
@@ -194,8 +192,8 @@ async def execute(
     # Lazy import to avoid circular deps at module level
     from engine.skill.store import SkillStore
 
-    emp_dir = _agent_skills_dir(agent_id)
-    store = SkillStore(emp_dir)
+    agent_skills_dir = _agent_skills_dir(agent_id)
+    store = SkillStore(agent_skills_dir)
 
     # ------------------------------------------------------------------
     # list
@@ -233,7 +231,7 @@ async def execute(
             return f"Error: '{skill_name}' is a built-in skill name. Choose a different name."
 
         safe = Path(skill_name).name
-        skill_dir = emp_dir / safe
+        skill_dir = agent_skills_dir / safe
         skill_file = skill_dir / "SKILL.md"
         if skill_file.is_file():
             return f"Error: skill '{skill_name}' already exists. Use 'edit' to modify it."
@@ -254,7 +252,7 @@ async def execute(
             return "Error: built-in skills are read-only. Cannot edit."
 
         safe = Path(skill_name).name
-        skill_file = emp_dir / safe / "SKILL.md"
+        skill_file = agent_skills_dir / safe / "SKILL.md"
         if not skill_file.is_file():
             return f"Error: skill '{skill_name}' not found in agent skills. Use 'create' first."
 
@@ -279,7 +277,7 @@ async def execute(
             return "Error: built-in skills are read-only. Cannot patch."
 
         safe = Path(skill_name).name
-        skill_file = emp_dir / safe / "SKILL.md"
+        skill_file = agent_skills_dir / safe / "SKILL.md"
         if not skill_file.is_file():
             return f"Error: skill '{skill_name}' not found in agent skills"
 

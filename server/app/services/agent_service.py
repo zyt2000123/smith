@@ -86,8 +86,29 @@ class AgentService:
     async def list_sessions(self) -> list[SessionOut]:
         return await self.session_service.list_sessions(await self._profile_id())
 
-    async def create_session(self, title: str) -> SessionOut:
-        return await self.session_service.create_session(await self._profile_id(), title)
+    async def create_session(
+        self,
+        title: str,
+        identity_id: str | None = None,
+    ) -> SessionOut:
+        return await self.session_service.create_session(
+            await self._profile_id(),
+            title,
+            identity_id,
+        )
+
+    async def list_identities(self) -> list[dict]:
+        from .engine_runtime import load_runtime_identity_catalog
+
+        return [
+            {
+                "id": identity.id,
+                "name": identity.name,
+                "description": identity.description,
+                "default": identity.is_default,
+            }
+            for identity in load_runtime_identity_catalog().identities
+        ]
 
     async def list_messages(
         self,
@@ -109,6 +130,7 @@ class AgentService:
         *,
         context: str | None = None,
         skill_name: str | None = None,
+        identity_id: str | None = None,
     ) -> MessageOut:
         return await self.session_service.send_message(
             await self._profile_id(),
@@ -116,6 +138,7 @@ class AgentService:
             content,
             context=context,
             skill_name=skill_name,
+            identity_id=identity_id,
         )
 
     async def stream_message(
@@ -125,6 +148,7 @@ class AgentService:
         *,
         context: str | None = None,
         skill_name: str | None = None,
+        identity_id: str | None = None,
     ) -> AsyncGenerator[dict, None]:
         async for event in self.session_service.stream_message(
             await self._profile_id(),
@@ -132,6 +156,7 @@ class AgentService:
             content,
             context=context,
             skill_name=skill_name,
+            identity_id=identity_id,
         ):
             yield event
 
@@ -139,17 +164,16 @@ class AgentService:
         return await self.skill_service.list_skills(await self._profile_id())
 
     async def list_files(self) -> list[dict]:
-        return await self.profile_file_service.list_files(await self._profile_id())
+        await self._profile_id()
+        return await self.profile_file_service.list_files()
 
     async def get_file(self, filename: str) -> dict:
-        return await self.profile_file_service.get_file(await self._profile_id(), filename)
+        await self._profile_id()
+        return await self.profile_file_service.get_file(filename)
 
     async def update_file(self, filename: str, content: str) -> dict:
-        return await self.profile_file_service.update_file(
-            await self._profile_id(),
-            filename,
-            content,
-        )
+        await self._profile_id()
+        return await self.profile_file_service.update_file(filename, content)
 
     async def get_stats(self) -> dict:
         return await self.stats_service.get_agent_stats(await self._profile_id())

@@ -16,7 +16,8 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 class SessionCheckpoint:
     agent_id: str
     session_id: str
-    task_type: str
+    identity_id: str
+    route_id: str
     skill_chain_index: int  # -1 for DIRECT
     context: dict  # accumulated skill outputs
     timestamp: str

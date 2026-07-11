@@ -3,9 +3,8 @@ from __future__ import annotations
 """Memory operations tool provider — CRUD for the agent's memory directory.
 
 Unified with engine/memory/store.py: both read/write .md files with YAML
-frontmatter under the agent profile's memory dir (see
-common.paths.LEGACY_PROFILES_DIRNAME).  This ensures the prompt assembler
-sees memories written by the agent tool and vice-versa.
+frontmatter under Smith's canonical memory directory. This ensures the prompt
+assembler sees memories written by the agent tool and vice-versa.
 """
 
 import json
@@ -71,15 +70,14 @@ _SENSITIVE_PATTERNS = re.compile(
 
 
 def _memory_dir(agent_id: str) -> Path:
-    """Canonical memory directory: <data_dir>/<LEGACY_PROFILES_DIRNAME>/<id>/memory/"""
+    """Return Smith's single canonical memory directory."""
     try:
-        from common.paths import LEGACY_PROFILES_DIRNAME
+        from common.config import AGENT_DIR
     except ModuleNotFoundError:
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from common.paths import LEGACY_PROFILES_DIRNAME
-    safe_id = Path(agent_id).name  # prevent path traversal
-    return Path.home() / ".agent-smith" / LEGACY_PROFILES_DIRNAME / safe_id / "memory"
+        from common.config import AGENT_DIR
+    return AGENT_DIR / "memory"
 
 
 def _check_sensitive(text: str) -> str | None:
@@ -99,13 +97,6 @@ def _memory_store(mem_dir: Path):
         sys.path.insert(0, str(project_root))
         from engine.memory.store import FileMemoryStore
     return FileMemoryStore(mem_dir)
-
-
-def _remove_legacy_duplicate(mem_dir: Path, memory_id: str) -> None:
-    safe = Path(memory_id).name
-    legacy = mem_dir / f"{safe}.md"
-    if legacy.is_file():
-        legacy.unlink()
 
 
 async def execute(
@@ -191,7 +182,6 @@ async def execute(
         updated = await store.update(memory_id, content=content, evidence=evidence)
         if not updated:
             return f"Error: memory '{memory_id}' not found"
-        _remove_legacy_duplicate(mem_dir, memory_id)
         return f"OK: updated memory '{memory_id}' for agent '{agent_id}'"
 
     elif action == "remove":
@@ -201,7 +191,6 @@ async def execute(
         removed = await store.remove(memory_id)
         if not removed:
             return f"Error: memory '{memory_id}' not found"
-        _remove_legacy_duplicate(mem_dir, memory_id)
         return f"OK: removed memory '{memory_id}' for agent '{agent_id}'"
 
     elif action == "episode":
@@ -231,7 +220,7 @@ async def execute(
             from engine.memory.compile import compact_episode
             from engine.llm.model_config import resolve_llm_config, build_llm_client
 
-            llm_cfg = resolve_llm_config(agent_id)
+            llm_cfg = resolve_llm_config()
             if not llm_cfg.get("api_key"):
                 return "Error: no LLM API key configured — cannot generate episode"
 

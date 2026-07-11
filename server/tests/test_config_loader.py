@@ -25,8 +25,8 @@ def test_resolve_llm_config_loads_builtin_smith_profile_by_default(
     )
 
     monkeypatch.setattr(model_config, "DATA_DIR", data_dir)
-    monkeypatch.setattr(model_config, "LEGACY_AGENT_PROFILES_DIR", data_dir / "agent_profiles")
     monkeypatch.setattr(model_config, "SMITH_PROFILE_DIR", smith_dir)
+    monkeypatch.setattr(model_config, "AGENT_DIR", data_dir / "agent")
     for env_key in (
         "AGENTSMITH_LLM_API_KEY",
         "AGENTSMITH_LLM_BASE_URL",
@@ -35,9 +35,8 @@ def test_resolve_llm_config_loads_builtin_smith_profile_by_default(
     ):
         monkeypatch.delenv(env_key, raising=False)
 
-    cfg = model_config.resolve_llm_config("smith-id")
+    cfg = model_config.resolve_llm_config()
     gate_cfg = model_config.resolve_llm_config(
-        "smith-id",
         usage=model_config.LLMUsage.GATE,
     )
 
@@ -76,15 +75,13 @@ llm:
 
     monkeypatch.setattr(model_config, "DATA_DIR", data_dir)
     monkeypatch.setattr(model_config, "SMITH_PROFILE_DIR", tmp_path / "missing-smith")
-    monkeypatch.setattr(model_config, "LEGACY_AGENT_PROFILES_DIR", tmp_path / "missing-profiles")
+    monkeypatch.setattr(model_config, "AGENT_DIR", tmp_path / "missing-agent")
 
     interactive = model_config.resolve_llm_config(
-        "smith-id",
         usage=model_config.LLMUsage.INTERACTIVE,
     )
-    gate = model_config.resolve_llm_config("smith-id", usage=model_config.LLMUsage.GATE)
+    gate = model_config.resolve_llm_config(usage=model_config.LLMUsage.GATE)
     background = model_config.resolve_llm_config(
-        "smith-id",
         usage=model_config.LLMUsage.BACKGROUND,
     )
 
@@ -108,10 +105,10 @@ def test_resolve_llm_config_rejects_a_non_mapping_llm_config(tmp_path, monkeypat
 
     monkeypatch.setattr(model_config, "DATA_DIR", data_dir)
     monkeypatch.setattr(model_config, "SMITH_PROFILE_DIR", tmp_path / "missing-smith")
-    monkeypatch.setattr(model_config, "LEGACY_AGENT_PROFILES_DIR", tmp_path / "missing-profiles")
+    monkeypatch.setattr(model_config, "AGENT_DIR", tmp_path / "missing-agent")
 
     with pytest.raises(YamlConfigError, match="LLM configuration"):
-        model_config.resolve_llm_config("smith-id")
+        model_config.resolve_llm_config()
 
 
 @pytest.mark.parametrize("field", ["api_key", "base_url", "model"])
@@ -144,10 +141,38 @@ llm:
     )
     monkeypatch.setattr(model_config, "DATA_DIR", data_dir)
     monkeypatch.setattr(model_config, "SMITH_PROFILE_DIR", tmp_path / "missing-smith")
-    monkeypatch.setattr(model_config, "LEGACY_AGENT_PROFILES_DIR", tmp_path / "missing-profiles")
+    monkeypatch.setattr(model_config, "AGENT_DIR", tmp_path / "missing-agent")
 
     with pytest.raises(YamlConfigError, match="positive number"):
-        model_config.resolve_llm_config("smith-id", usage=model_config.LLMUsage.GATE)
+        model_config.resolve_llm_config(usage=model_config.LLMUsage.GATE)
+
+
+def test_build_engine_runtime_selects_interactive_and_gate_clients(monkeypatch) -> None:
+    selected_usages: list[model_config.LLMUsage] = []
+    clients: list[object] = []
+
+    def fake_resolve(*, usage: model_config.LLMUsage) -> dict:
+        selected_usages.append(usage)
+        return {"usage": usage.value}
+
+    def fake_build(config: dict) -> object:
+        client = object()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(engine_runtime, "resolve_llm_config", fake_resolve)
+    monkeypatch.setattr(engine_runtime, "build_llm_client", fake_build)
+    monkeypatch.setattr(engine_runtime, "load_runtime_identity_catalog", lambda: object())
+    monkeypatch.setattr(engine_runtime, "ToolRegistry", lambda: object())
+    monkeypatch.setattr(engine_runtime, "SkillRegistry", lambda: object())
+    monkeypatch.setattr(engine_runtime, "ToolGuard", lambda _path: object())
+
+    runtime, services = engine_runtime.build_engine_runtime("smith-id", "Smith")
+
+    assert runtime.agent_id == "smith-id"
+    assert selected_usages == [model_config.LLMUsage.INTERACTIVE, model_config.LLMUsage.GATE]
+    assert services.llm is clients[0]
+    assert services.gate_llm is clients[1]
 
 
 def test_route_can_select_native_anthropic_adapter_and_generation_limit(tmp_path, monkeypatch) -> None:
@@ -172,9 +197,9 @@ llm:
     )
     monkeypatch.setattr(model_config, "DATA_DIR", data_dir)
     monkeypatch.setattr(model_config, "SMITH_PROFILE_DIR", tmp_path / "missing-smith")
-    monkeypatch.setattr(model_config, "LEGACY_AGENT_PROFILES_DIR", tmp_path / "missing-profiles")
+    monkeypatch.setattr(model_config, "AGENT_DIR", tmp_path / "missing-agent")
 
-    gate = model_config.resolve_llm_config("smith-id", usage=model_config.LLMUsage.GATE)
+    gate = model_config.resolve_llm_config(usage=model_config.LLMUsage.GATE)
     client = model_config.build_llm_client(gate)
     try:
         assert gate["provider"] == "anthropic"
@@ -184,28 +209,3 @@ llm:
     finally:
         import asyncio
         asyncio.run(client.close())
-
-
-def test_build_engine_runtime_selects_interactive_and_gate_clients(monkeypatch) -> None:
-    selected_usages: list[model_config.LLMUsage] = []
-    clients: list[object] = []
-
-    def fake_resolve(agent_id: str, *, usage: model_config.LLMUsage) -> dict:
-        assert agent_id == "smith-id"
-        selected_usages.append(usage)
-        return {"usage": usage.value}
-
-    def fake_build(config: dict) -> object:
-        client = object()
-        clients.append(client)
-        return client
-
-    monkeypatch.setattr(engine_runtime, "resolve_llm_config", fake_resolve)
-    monkeypatch.setattr(engine_runtime, "build_llm_client", fake_build)
-    monkeypatch.setattr(engine_runtime, "ToolRegistry", lambda: object())
-    monkeypatch.setattr(engine_runtime, "SkillRegistry", lambda: object())
-    monkeypatch.setattr(engine_runtime, "ToolGuard", lambda _path: object())
-
-    runtime, services = engine_runtime.build_engine_runtime("smith-id", "Smith")
-
-    assert runtime.agent_id == "smith-id"

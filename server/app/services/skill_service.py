@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from engine.skill.registry import SkillRegistry
 
 from ..schemas.skill import SkillSummaryOut
-from ..infrastructure.profile_files import agent_profile_dir
+from common.config import AGENT_DIR
 from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
 
 
@@ -18,7 +18,7 @@ class SkillService:
 
     async def list_skills(self, agent_id: str) -> list[SkillSummaryOut]:
         await self._ensure_profile(agent_id)
-        registry = self._load_registry(agent_id)
+        registry = self._load_registry()
 
         summaries: list[SkillSummaryOut] = []
         for item in sorted(registry.list_summaries(), key=lambda value: value["name"]):
@@ -38,7 +38,7 @@ class SkillService:
 
     async def ensure_skill_exists(self, agent_id: str, skill_name: str) -> SkillSummaryOut:
         await self._ensure_profile(agent_id)
-        registry = self._load_registry(agent_id)
+        registry = self._load_registry()
         body = registry.get(skill_name)
         if body is None:
             raise HTTPException(404, f"Skill '{skill_name}' not found")
@@ -57,12 +57,12 @@ class SkillService:
             raise HTTPException(404, "Agent profile not found")
 
     @staticmethod
-    def _load_registry(agent_id: str) -> SkillRegistry:
+    def _load_registry() -> SkillRegistry:
         registry = SkillRegistry()
         agents_dir = Path(__file__).resolve().parents[3] / "agents"
         registry.load_builtin(agents_dir / "skills")
 
-        agent_skills_dir = agent_profile_dir(agent_id) / "skills"
+        agent_skills_dir = AGENT_DIR / "skills"
         if agent_skills_dir.is_dir():
             registry.load_agent_skills(agent_skills_dir)
         return registry

@@ -16,13 +16,13 @@ class FakeAgentProfileRepo:
 
 
 @pytest.mark.asyncio
-async def test_list_skills_allows_empty_builtin_directory(
+async def test_list_skills_allows_an_empty_single_smith_skill_directory(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
-        "app.services.skill_service.agent_profile_dir",
-        lambda _agent_id: tmp_path,
+        "app.services.skill_service.AGENT_DIR",
+        tmp_path,
     )
     monkeypatch.setattr(
         "app.services.skill_service.SkillRegistry.load_builtin",
@@ -30,6 +30,6 @@ async def test_list_skills_allows_empty_builtin_directory(
     )
     svc = SkillService(FakeAgentProfileRepo())
 
-    skills = await svc.list_skills("emp-1")
+    skills = await svc.list_skills("smith-id")
 
     assert skills == []

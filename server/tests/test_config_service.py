@@ -149,7 +149,7 @@ def test_persisted_api_configuration_resolves_to_engine_route(monkeypatch, tmp_p
     )
     monkeypatch.setattr(model_config, "DATA_DIR", data_dir)
     monkeypatch.setattr(model_config, "SMITH_PROFILE_DIR", tmp_path / "missing-smith")
-    monkeypatch.setattr(model_config, "LEGACY_AGENT_PROFILES_DIR", tmp_path / "missing-profiles")
+    monkeypatch.setattr(model_config, "AGENT_DIR", tmp_path / "missing-agent")
     for name in (
         "AGENTSMITH_LLM_API_KEY",
         "AGENTSMITH_LLM_BASE_URL",
@@ -158,7 +158,7 @@ def test_persisted_api_configuration_resolves_to_engine_route(monkeypatch, tmp_p
     ):
         monkeypatch.delenv(name, raising=False)
 
-    gate = model_config.resolve_llm_config("smith-id", usage=model_config.LLMUsage.GATE)
+    gate = model_config.resolve_llm_config(usage=model_config.LLMUsage.GATE)
 
     assert gate["api_key"] == "primary-secret"
     assert gate["model"] == "cheap-gate-model"

@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from engine.execution.agent_loop import _enabled_tools_from_config
+from engine.identity_catalog import IdentitySpec
 from engine.tool.interface import ToolCall
 from engine.tool.registry import ToolRegistry
 
@@ -141,6 +142,16 @@ def test_agent_tool_config_hides_internal_and_stale_tools_by_default():
             }
         },
         registry,
+        IdentitySpec(
+            id="smith",
+            name="Smith",
+            description="",
+            prompt="",
+            enabled_tools=None,
+            enabled_skills=None,
+            routes=(),
+            is_default=True,
+        ),
     )
 
     assert enabled == ["read_file", "todo"]
@@ -193,7 +204,7 @@ def test_memory_ops_reuses_store_crud_layout():
     async def run():
         added = await memory_ops.execute(
             action="add",
-            agent_id="emp",
+            agent_id="smith",
             content="alpha memory content",
             evidence="unit test evidence",
             scope="project",
@@ -202,12 +213,12 @@ def test_memory_ops_reuses_store_crud_layout():
         assert match, added
         memory_id = match.group(1)
 
-        found = await memory_ops.execute(action="search", agent_id="emp", query="alpha")
+        found = await memory_ops.execute(action="search", agent_id="smith", query="alpha")
         assert f"[{memory_id}] (project)" in found
 
         updated = await memory_ops.execute(
             action="update",
-            agent_id="emp",
+            agent_id="smith",
             memory_id=memory_id,
             content="beta memory content",
             evidence="updated evidence",
@@ -216,7 +227,7 @@ def test_memory_ops_reuses_store_crud_layout():
 
         removed = await memory_ops.execute(
             action="remove",
-            agent_id="emp",
+            agent_id="smith",
             memory_id=memory_id,
         )
         assert removed.startswith("OK: removed memory")

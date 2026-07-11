@@ -18,8 +18,8 @@ class TaskService:
         return [TaskOut(**r) for r in rows]
 
     async def create_task(self, agent_id: str, body: TaskCreate) -> TaskOut:
-        emp = await self.agent_profile_repo.get(agent_id)
-        if emp is None:
+        profile = await self.agent_profile_repo.get(agent_id)
+        if profile is None:
             raise HTTPException(404, "Agent profile not found")
         row = await self.task_repo.create(agent_id, body.type, body.title)
         return TaskOut(**row)

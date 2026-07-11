@@ -176,6 +176,7 @@ Agent-Smith/
 │
 ├── agents/                  # 内容定义
 │   ├── smith/               #   Smith 内置身份种子（role/config/style/workflow）
+│   ├── identities/          #   YAML 领域身份与意图→pipeline 路由
 │   ├── skills/              #   18 个内置技能（流程型 + 领域/通才型）
 │   ├── tools/               #   14 个工具 provider
 │   └── safety/              #   安全规则
@@ -187,7 +188,7 @@ Agent-Smith/
 │       ├── cli_*.py         #   CLI 内部模块（身份、shell、命令、chat）
 │       ├── schemas/         #   Pydantic 请求/响应模型
 │       ├── routers/         #   12 个路由（薄壳）
-│       ├── services/        #   服务编排层（Agent facade + legacy 兼容）
+│       ├── services/        #   服务编排层（单 Smith facade）
 │       └── infrastructure/  #   Repository 持久化
 │
 ├── shell/                   # Ink 终端壳
@@ -201,10 +202,8 @@ Agent-Smith/
 ├── config.yaml              # 平台级配置（LLM key/url/model）
 ├── agent/                   # Smith 的唯一运行时档案
 │   ├── role.md / ...        # 从模板复制，可编辑
-│   ├── memory/              # 记忆积累
 │   ├── skills/              # 自装技能
-│   └── sessions/            # 会话数据
-├── employees/               # legacy compatibility：旧 profile path
+│   └── identity-state/      # 按 YAML 身份隔离的记忆和执行检查点
 ├── snapshots/               # 文件修改快照
 ├── tool-output/             # 截断的工具输出完整文件
 └── sqlite/agent-smith.sqlite

@@ -1,14 +1,14 @@
-# Smith 身份与技能规范
+# 06 · Agents 内容层
 
-本文档描述 Agent-Smith 的 Smith 内置身份种子、内置技能规范、工具 Provider 接口、安全规则和技能自进化机制。
+本文档描述 Agent-Smith 的 Smith 基础身份、YAML 领域身份目录、内置技能规范、工具 Provider 接口、安全规则和技能自进化机制。
 
 ---
 
 ## 1. Smith 身份文件格式
 
-Agent-Smith 只有一个内置身份：Smith。出厂身份种子位于 `agents/smith/`，只定义基础人格、全局工作规约、用户上下文和运行配置。
+Agent-Smith 只有一个运行中的 Agent：Smith。出厂基础人格位于 `agents/smith/`，定义全局工作规约、用户上下文和运行配置；领域身份位于 `agents/identities/*.yaml`，在一次任务中叠加领域指令、能力边界和 intent→pipeline 路由。
 
-具体能力不再通过新增 Agent 模板扩展，而是通过 `agents/skills/*/SKILL.md` 按需加载。
+具体能力不通过新增 Agent 模板或运行实例扩展，而是通过 `agents/identities/*.yaml`、`agents/pipelines/*.yaml` 与 `agents/skills/*/SKILL.md` 组合声明。
 
 ### 1.1 config.yaml — 元信息
 
@@ -21,11 +21,16 @@ llm:
 knowledge:
   - personal-workflow
   - local-context
+  - research-and-synthesis
+  - execution-planning
+  - writing-and-communication
 tools:
   enabled:
     - read_file
     - write_file
     - edit_file
+    - list_dir
+    - glob_files
     - grep
     - shell
     - web_search
@@ -54,7 +59,7 @@ tools:
 - **Done Criteria** — 什么算"完成"的可验证标准
 - **Anti-Goals** — 明确列出"不做什么"，划定职责边界
 
-重要边界：Smith 不根据任务切换成其他 Agent；具体能力通过 skill 按需加载。
+重要边界：Smith 不根据任务创建或切换到另一个 Agent；它可以在同一个 Smith 运行时中叠加一个 YAML 领域身份，具体 SOP 仍通过 skill 按需加载。
 
 ### 1.3 style.md — "我怎么工作"
 
@@ -117,15 +122,20 @@ tools:
 
 ---
 
-## 2. 内置 Smith 身份与通才 skill
+## 2. Smith 基础身份、领域身份与通才 skill
 
-当前只有一个内置身份目录：
+当前内容分为一个基础身份目录和可扩展的领域身份目录：
 
-| 身份目录 | 兼容 role id | 用途 |
+| 内容目录 | 标识 | 用途 |
 |----------|------------|------|
-| `agents/smith/` | `personal-assistant` | 唯一常驻 Agent 的基础身份、风格、上下文和运行配置 |
+| `agents/smith/` | `personal-assistant` | 唯一常驻 Smith 的基础人格、风格、上下文和运行配置 |
+| `agents/identities/*.yaml` | `id` | 领域 prompt、tools/skills allowlist、intent→pipeline 路由；启动时统一扫描 |
 
-仓库默认不附带内置 skill；需要的能力可安装到 Smith 的运行时档案中，也可按需加入 `agents/skills/` 作为内置内容。
+仓库附带 **28 个内置 skill**（位于 `agents/skills/`）：
+
+`ask-matt`, `code-review`, `codebase-design`, `diagnosing-bugs`, `domain-modeling`, `edit-article`, `git-guardrails-claude-code`, `grill-me`, `grill-with-docs`, `grilling`, `handoff`, `implement`, `improve-codebase-architecture`, `migrate-to-shoehorn`, `obsidian-vault`, `prototype`, `research`, `resolving-merge-conflicts`, `scaffold-exercises`, `setup-matt-pocock-skills`, `setup-pre-commit`, `tdd`, `teach`, `to-spec`, `to-tickets`, `triage`, `wayfinder`, `writing-great-skills`
+
+此外，用户也可安装额外技能到 Smith 的运行时档案中。
 
 ---
 
@@ -178,7 +188,7 @@ output: "numbered implementation plan with verification points"
 
 ## 4. 技能加载
 
-`agents/skills/` 是可选的内置技能入口，仓库默认不附带技能。Smith 还会加载 `~/.agent-smith/agent/skills/` 下的用户技能；同名用户技能覆盖内置技能。
+`agents/skills/` 是内置技能入口，当前包含 28 个内置技能。Smith 还会加载用户数据目录下的技能；同名用户技能覆盖内置技能。
 
 Feature / Bug Fix 只执行当前实际加载且匹配预定义链路的技能。如果没有匹配技能，运行时直接回落到普通 ReAct。
 
@@ -214,19 +224,26 @@ async def execute(*, param1: str, param2: int = 0) -> str:
 
 `engine/tool/registry.py` 中的 `ToolRegistry.load_providers()` 扫描 `agents/tools/` 目录下所有 `.py` 文件（跳过 `_` 开头的），自动注册发现的工具。无需手动注册。
 
-### 9 个内置工具
+### 14 个活跃工具
+
+> `_search_knowledge.py.disabled` 已停用，不参与自动发现。
 
 | 工具 | 关键参数 | 行为特征 |
 |------|---------|---------|
 | `read_file` | `path`, `offset`, `limit` | 50KB 上限，返回带行号的文本，超限需用 offset/limit 分段读取 |
 | `write_file` | `path`, `content`, `append` | 写入前校验是否在工作目录内，自动创建父目录，支持追加模式 |
+| `edit_file` | `path`, `old_text`, `new_text` | 精确文本替换，修改现有文件的局部内容 |
 | `shell` | `command`, `timeout`, `cwd` | 默认 30s 超时（最大 120s），输出截断 10KB，通过 `asyncio.create_subprocess_shell` 执行 |
-| `search_knowledge` | `query`, `top_k`, `category` | 知识库搜索（当前为 Stub，待连接 Hub 向量/全文索引） |
+| `git_ops` | `action`, `cwd`, `branch`, `message`, `files`, ... | 8 个操作：status/diff/branch_create/commit/push/worktree_create/worktree_remove/discover。提交前自动检查敏感文件（.env, .pem, .key, .ssh/ 等） |
+| `memory_ops` | `action`, `agent_id`, `query`/`content`/`evidence`/`memory_id` | 4 个操作：search/add/update/remove。强制要求 evidence，自动拒绝含敏感信息（API key、密码等）的记忆 |
 | `web_fetch` | `url`, `timeout` | 仅允许 http/https，50KB 内容上限，默认 15s 超时（最大 30s），阻止 file/ftp/data scheme |
+| `web_search` | `query`, `max_results` | 网络搜索，返回结构化搜索结果 |
 | `skill_load` | `name` | 按名称加载 `agents/skills/<name>/SKILL.md`，找不到时列出可用技能 |
 | `skill_manage` | `action`, `agent_id`, `skill_name`, ... | 7 个操作：list/get/create/edit/patch/versions/rollback。内置技能只读 |
-| `memory_ops` | `action`, `agent_id`, `query`/`content`/`evidence`/`memory_id` | 4 个操作：search/add/update/remove。强制要求 evidence，自动拒绝含敏感信息（API key、密码等）的记忆 |
-| `git_ops` | `action`, `cwd`, `branch`, `message`, `files`, ... | 8 个操作：status/diff/branch_create/commit/push/worktree_create/worktree_remove/discover。提交前自动检查敏感文件（.env, .pem, .key, .ssh/ 等） |
+| `todo` | `action`, `items`, ... | 待办事项管理 |
+| `grep` | `pattern`, `path`, `options` | 按正则/文本模式搜索文件内容 |
+| `glob_files` | `pattern`, `path` | 按 glob 模式查找文件 |
+| `list_dir` | `path`, `recursive` | 列出目录内容 |
 
 ### 工具输出截断
 
@@ -238,17 +255,19 @@ async def execute(*, param1: str, param2: int = 0) -> str:
 
 安全规则定义在 `agents/safety/dangerous_commands.json`，由 `engine/safety/tool_guard.py` 在工具执行前检查。
 
-### 7 大类 24 条规则
+### 9 大类 29 条规则
 
 | 类别 | ID 范围 | 条数 | 典型拦截目标 |
 |------|---------|------|-------------|
 | `command_injection` | cmd-inj-001 ~ 004 | 4 | 管道到 shell 解释器、反引号/`$()` 命令替换、`eval`、变量注入 |
 | `resource_abuse` | res-abuse-001 ~ 003 | 3 | Fork bomb、无退出条件的死循环、创建超大文件 |
 | `code_execution` | code-exec-001 ~ 004 | 4 | Python eval/exec 内联、动态 import、`compile()` 滥用、`node -e` 内联执行 |
+| `destructive_command` | destruct-001 ~ 004 | 4 | `rm -rf /`、`DROP TABLE`、`git push --force`、格式化磁盘等不可逆操作 |
 | `network_abuse` | net-abuse-001 ~ 003 | 3 | 向外部 POST 数据、反向 shell、端口扫描 |
 | `sensitive_file_access` | sens-file-001 ~ 004 | 4 | /etc/passwd, .ssh/, .env, .pem/.key 私钥文件 |
 | `privilege_escalation` | priv-esc-001 ~ 003 | 3 | sudo/su 提权、chmod 777、setuid/setgid |
 | `shell_evasion` | sh-evade-001 ~ 003 | 3 | Base64 解码后管道到 shell、清除 history、覆盖标准命令别名 |
+| `platform_integrity` | platform-protect-001 | 1 | 保护 Agent-Smith 平台自身配置和数据不被篡改 |
 
 ### 规则结构
 
@@ -279,7 +298,7 @@ async def execute(*, param1: str, param2: int = 0) -> str:
 
 | 属性 | 内置技能 | Agent 技能 |
 |------|---------|---------|
-| 位置 | `agents/skills/<name>/SKILL.md` | `~/.agent-smith/employees/<id>/skills/<name>/SKILL.md` |
+| 位置 | `agents/skills/<name>/SKILL.md` | `~/.agent-smith/agent/skills/<name>/SKILL.md` |
 | 可修改 | No（只读） | Yes |
 | 版本控制 | Git 跟踪 | SkillStore 版本快照 |
 | 来源 | 系统预装 | Agent 创建或进化 |
@@ -289,7 +308,7 @@ async def execute(*, param1: str, param2: int = 0) -> str:
 `engine/skill/store.py` 中的 `SkillStore` 为每个 Agent 技能维护版本快照：
 
 ```
-~/.agent-smith/employees/<id>/skills/<name>/
+~/.agent-smith/agent/skills/<name>/
     SKILL.md            # 当前版本
     .versions/          # 历史快照
         20260704T120000.md

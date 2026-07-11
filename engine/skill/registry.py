@@ -51,6 +51,16 @@ class SkillRegistry:
             return skill_dir
         return None
 
+    def restrict_to(self, names: tuple[str, ...] | list[str] | set[str]) -> None:
+        """Restrict one per-request registry to an identity's declared skills."""
+        allowed = set(names)
+        self._skills = {
+            name: skill
+            for name, skill in self._skills.items()
+            if name in allowed
+        }
+        self._builtin_names.intersection_update(allowed)
+
     def list_summaries(self) -> list[dict]:
         return [
             {

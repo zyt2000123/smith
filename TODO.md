@@ -45,6 +45,7 @@
 - [x] K2 compact 摘要输入纳入工具结果与工具调用意图，压缩不再抹掉任务证据（`compression.py:118-142`）
 - [~] K3 prune 单任务内不生效 —— **待决策，暂保持现状**：改动会让模型在任务中途丢失早期工具结果，风险高于收益；K1 修好后 compact 已能在正确时机兜底（`compression.py:62-76`）
 - [x] K4 `react_event_loop` 逐条 `dict(m)` 浅拷贝，prune/compress 不再污染调用方 history（`execution/react_loop.py:115`）
+- [x] K4.1 流式暂态文本在“长度截断 → 后续工具调用”时会撤回全部未提交 draft 并清空累计文本，避免旧片段被提交或持久化；已补回归测试（`execution/react_loop.py`、`tests/test_react_budget.py`）
 - [x] K5 `_request` 4xx（除 429）不再重试，仅 429 与 5xx 重试到上限（`llm/client.py:113-120`）
 - [ ] K6 对话中途插入 system 消息 + 裸透传，引擎锁定 OpenAI 兼容协议；换 Anthropic 原生需 client 层适配（记录边界，暂不动）（`react_loop.py:183`、`react_budget.py:84`）
 

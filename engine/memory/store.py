@@ -287,7 +287,7 @@ async def _create_explicit_episode(
         if not related_entries:
             return
 
-        llm_cfg = resolve_llm_config(agent_dir.name, usage=LLMUsage.BACKGROUND)
+        llm_cfg = resolve_llm_config(usage=LLMUsage.BACKGROUND)
         if not llm_cfg.get("api_key"):
             logger.warning("episode-memory generation skipped: no LLM API key configured")
             return
@@ -306,7 +306,7 @@ async def _run_periodic_compilation(agent_dir: Path, memory_dir: Path) -> bool:
         from .compile import run_compilation
         from engine.llm.model_config import LLMUsage, build_llm_client, resolve_llm_config
 
-        llm_cfg = resolve_llm_config(agent_dir.name, usage=LLMUsage.BACKGROUND)
+        llm_cfg = resolve_llm_config(usage=LLMUsage.BACKGROUND)
         if not llm_cfg.get("api_key"):
             logger.warning("conversation-memory compilation skipped: no LLM API key configured")
             return False
@@ -327,7 +327,7 @@ async def _run_periodic_dream(agent_dir: Path, memory_dir: Path) -> bool:
         from .dream import run_dream
         from engine.llm.model_config import LLMUsage, build_llm_client, resolve_llm_config
 
-        llm_cfg = resolve_llm_config(agent_dir.name, usage=LLMUsage.BACKGROUND)
+        llm_cfg = resolve_llm_config(usage=LLMUsage.BACKGROUND)
         if not llm_cfg.get("api_key"):
             logger.warning("conversation-memory Dream skipped: no LLM API key configured")
             return False

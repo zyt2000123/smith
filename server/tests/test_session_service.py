@@ -6,18 +6,36 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services import session_service as session_service_module
 from app.services.session_service import SessionService
+from engine.identity_catalog import IdentityCatalog
 
 
 class FakeSessionRepo:
     def __init__(self) -> None:
         self.saved_messages: list[tuple[str, str, str]] = []
+        self.identity_id: str | None = None
 
     async def exists(self, session_id: str, agent_id: str) -> bool:
+        return True
+
+    async def get_owned(self, session_id: str, agent_id: str) -> dict | None:
+        return {
+            "id": session_id,
+            "agent_id": agent_id,
+            "identity_id": self.identity_id,
+            "title": "Test session",
+            "created_at": "2026-07-07T00:00:00Z",
+        }
+
+    async def claim_identity(self, session_id: str, agent_id: str, identity_id: str) -> bool:
+        if self.identity_id is not None:
+            return False
+        self.identity_id = identity_id
         return True
 
     async def get_messages(self, session_id: str, limit: int = 0, offset: int = 0) -> list[dict]:
@@ -37,6 +55,32 @@ class FakeSessionRepo:
 class FakeAgentProfileRepo:
     async def get(self, agent_id: str) -> dict | None:
         return {"id": agent_id, "name": "Smith"}
+
+
+def _identity_catalog(tmp_path: Path) -> IdentityCatalog:
+    (tmp_path / "smith.yaml").write_text(
+        """
+schema: agentsmith.identity/v1
+id: smith
+name: Smith
+default: true
+routes: []
+""".strip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "legal.yaml").write_text(
+        """
+schema: agentsmith.identity/v1
+id: legal
+name: \u6cd5\u52a1\u52a9\u624b
+routes:
+  - id: contract_review
+    keywords: [\u5408\u540c]
+    pipeline: legal-contract-review
+""".strip(),
+        encoding="utf-8",
+    )
+    return IdentityCatalog.load(tmp_path)
 
 
 class FakeRun:
@@ -90,7 +134,7 @@ async def test_stream_message_forwards_skill_name_and_blocked_flag(monkeypatch: 
     events = [
         event
         async for event in svc.stream_message(
-            "emp-1",
+            "smith-id",
             "sess-1",
             "analyze this repo",
             skill_name="planning",
@@ -111,6 +155,54 @@ async def test_stream_message_forwards_skill_name_and_blocked_flag(monkeypatch: 
     assert preflight_payload["blocked"] is False
     assert preflight_payload["error"] is False
     assert preflight_payload["summary"] == "present facts and retry"
+
+
+@pytest.mark.asyncio
+async def test_first_message_auto_selects_and_pins_identity(tmp_path: Path) -> None:
+    repo = FakeSessionRepo()
+    service = SessionService(
+        repo,
+        FakeAgentProfileRepo(),
+        identity_catalog=_identity_catalog(tmp_path),
+    )
+
+    selected = await service._resolve_session_identity(
+        "smith-id",
+        "sess-1",
+        "请审查这份合同",
+        None,
+    )
+    follow_up = await service._resolve_session_identity(
+        "smith-id",
+        "sess-1",
+        "顺便帮我整理一下措辞",
+        None,
+    )
+
+    assert selected == "legal"
+    assert follow_up == "legal"
+    assert repo.identity_id == "legal"
+
+
+@pytest.mark.asyncio
+async def test_session_rejects_switching_a_pinned_identity(tmp_path: Path) -> None:
+    repo = FakeSessionRepo()
+    repo.identity_id = "legal"
+    service = SessionService(
+        repo,
+        FakeAgentProfileRepo(),
+        identity_catalog=_identity_catalog(tmp_path),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await service._resolve_session_identity(
+            "smith-id",
+            "sess-1",
+            "hello",
+            "smith",
+        )
+
+    assert exc.value.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -254,7 +346,7 @@ async def test_stream_message_saves_partial_reply_on_client_disconnect(monkeypat
 
     repo = FakeSessionRepo()
     svc = SessionService(repo, FakeAgentProfileRepo())
-    stream = svc.stream_message("emp-1", "sess-1", "hello")
+    stream = svc.stream_message("smith-id", "sess-1", "hello")
     await anext(stream)
     await anext(stream)
     # 模拟客户端断连：SSE 响应会 aclose 生成器，触发 GeneratorExit

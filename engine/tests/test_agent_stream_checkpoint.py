@@ -9,11 +9,24 @@ from engine.execution.backtrack import FailureLoopGuard
 from engine.execution.events import EventType, ExecutionEvent
 from engine.execution.gate import GateResult, LLMGate
 from engine.execution.skill_chain import SkillChain, SkillNode
-from engine.execution.task_router import TaskType
+from engine.identity_catalog import IdentitySpec, RouteDecision
 from engine.llm.client import ChatResponse
 from engine.llm.events import ProviderEvent, ProviderEventType
 from engine.skill.loader import SkillBody, SkillMeta
 
+
+_SMITH_IDENTITY = IdentitySpec(
+    id="smith",
+    name="Smith",
+    description="",
+    prompt="",
+    enabled_tools=None,
+    enabled_skills=None,
+    routes=(),
+    is_default=True,
+)
+FEATURE_ROUTE = RouteDecision(_SMITH_IDENTITY, "feature", "feature", score=1)
+DIRECT_ROUTE = RouteDecision(_SMITH_IDENTITY, "direct", None)
 
 
 class FakeLLM:
@@ -124,13 +137,13 @@ def test_run_agent_stream_saves_and_clears_checkpoint(tmp_path: Path) -> None:
             "build a feature",
             FakeToolRegistry(),
             FakeSkillRegistry(),
-            TaskType.FEATURE,
+            FEATURE_ROUTE,
             SkillChain([SkillNode("planning", PassingGate())]),
             FailureLoopGuard(),
             execution_context={
-                "agent_id": "emp-1",
+                "agent_id": "smith-id",
                 "session_id": "sess-1",
-                "_profile_dir": str(tmp_path),
+                "_state_dir": str(tmp_path),
             },
         ):
             if event.type == EventType.SKILL_END:
@@ -151,7 +164,7 @@ def test_run_agent_stream_forwards_provider_events_from_skill_nodes() -> None:
             "build a feature",
             FakeToolRegistry(),
             FakeSkillRegistry(),
-            TaskType.FEATURE,
+            FEATURE_ROUTE,
             SkillChain([SkillNode("planning", PassingGate())]),
             FailureLoopGuard(),
         ):
@@ -184,7 +197,7 @@ def test_run_agent_stream_routes_llm_gates_to_gate_client() -> None:
             "build a feature",
             FakeToolRegistry(),
             FakeSkillRegistry(),
-            TaskType.FEATURE,
+            FEATURE_ROUTE,
             SkillChain([SkillNode("planning", gate)]),
             FailureLoopGuard(),
             gate_llm=gate_llm,
@@ -205,7 +218,7 @@ def test_forced_skill_marks_final_text_already_streamed() -> None:
             "run planning",
             FakeToolRegistry(),
             FakeSkillRegistry(),
-            TaskType.DIRECT,
+            DIRECT_ROUTE,
             None,
             FailureLoopGuard(),
             forced_skill="planning",
@@ -258,7 +271,7 @@ def test_pipeline_retracts_provisional_draft_before_propagating_provider_error()
                 "build a feature",
                 FakeToolRegistry(),
                 FakeSkillRegistry(),
-                TaskType.FEATURE,
+                FEATURE_ROUTE,
                 SkillChain([SkillNode("planning", PassingGate())]),
                 FailureLoopGuard(),
             ):
@@ -286,7 +299,7 @@ def test_pipeline_retracts_each_rejected_rubric_attempt_before_committing() -> N
             "build a feature",
             FakeToolRegistry(),
             FakeSkillRegistry(),
-            TaskType.FEATURE,
+            FEATURE_ROUTE,
             SkillChain([SkillNode("planning", PassingGate())]),
             FailureLoopGuard(),
         ):

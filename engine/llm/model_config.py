@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from common.config import DATA_DIR, LEGACY_AGENT_PROFILES_DIR, SMITH_PROFILE_DIR
+from common.config import AGENT_DIR, DATA_DIR, SMITH_PROFILE_DIR
 from common.yaml_utils import YamlConfigError, load_yaml, merge_configs
 
 from .contracts import LLMProviderConfig, LLMTimeouts, UnsupportedProviderError
@@ -205,8 +205,6 @@ def _resolve_timeout(
 
 
 def resolve_llm_config(
-    agent_id: str,
-    template_id: str | None = None,
     session_override: dict[str, Any] | None = None,
     usage: LLMUsage | str = LLMUsage.INTERACTIVE,
 ) -> dict[str, Any]:
@@ -215,8 +213,8 @@ def resolve_llm_config(
     Levels (lower overrides upper):
       1. Environment defaults
       2. Platform:  ~/.agent-smith/config.yaml
-      3. Smith:     agents/smith/config.yaml
-      4. Profile:   legacy LEGACY_AGENT_PROFILES_DIR/<id>/config.yaml
+      3. Smith seed: agents/smith/config.yaml
+      4. Smith runtime: ~/.agent-smith/agent/config.yaml
       5. Session:   dict passed at runtime
 
     ``llm.routes`` may override the base config for ``interactive``, ``gate``,
@@ -239,11 +237,8 @@ def resolve_llm_config(
 
     platform = load_yaml(DATA_DIR / "config.yaml")
 
-    template: dict[str, Any] = {}
-    if template_id is None or template_id == SMITH_TEMPLATE_ID:
-        template = load_yaml(SMITH_PROFILE_DIR / "config.yaml")
-
-    agent = load_yaml(LEGACY_AGENT_PROFILES_DIR / agent_id / "config.yaml")
+    template = load_yaml(SMITH_PROFILE_DIR / "config.yaml")
+    agent = load_yaml(AGENT_DIR / "config.yaml")
 
     merged = merge_configs(env_defaults, platform, template, agent, session_override or {})
 

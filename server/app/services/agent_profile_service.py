@@ -6,8 +6,7 @@ from common.config import SMITH_PROFILE_DIR
 
 from ..schemas.agent_profile import AgentProfileCreate, AgentProfileUpdate, AgentProfileOut
 from ..infrastructure.profile_files import (
-    delete_agent_profile_files,
-    init_agent_profile_files,
+    init_smith_profile_files,
 )
 from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
 from .template_service import ACTIVE_TEMPLATE_IDS
@@ -34,8 +33,7 @@ class AgentProfileService:
             raise HTTPException(400, f"Unsupported agent role. Allowed: {allowed}")
         data = body.model_dump()
         row = await self.repo.create(data)
-        init_agent_profile_files(
-            row["id"],
+        init_smith_profile_files(
             profile_seed_dir=SMITH_PROFILE_DIR,
             name=body.name,
             role=body.role,
@@ -54,4 +52,3 @@ class AgentProfileService:
         deleted = await self.repo.delete(agent_id)
         if not deleted:
             raise HTTPException(404, "Agent profile not found")
-        delete_agent_profile_files(agent_id)

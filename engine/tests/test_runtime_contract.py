@@ -7,12 +7,14 @@ import pytest
 
 from engine.execution import agent_loop as agent_loop_module
 from engine.execution.agent_loop import (
+    prepare_runtime,
     reply_events_with_runtime,
     reply_with_runtime,
     run_stream_with_runtime,
 )
 from engine.execution.events import EventType
 from engine.execution.runtime import EngineRequest, RuntimeContext, RuntimeServices
+from engine.identity_catalog import IdentityCatalog
 from engine.llm.client import ChatResponse, ToolCallData
 from engine.skill.registry import SkillRegistry
 from engine.tool.registry import ToolRegistry
@@ -81,6 +83,19 @@ def _runtime(tmp_path: Path) -> tuple[RuntimeContext, RuntimeServices, FakeLLM]:
     _write_profile(profile_dir)
     (agents_dir / "tools").mkdir(parents=True)
     (agents_dir / "skills").mkdir(parents=True)
+    identities_dir = agents_dir / "identities"
+    identities_dir.mkdir()
+    (identities_dir / "smith.yaml").write_text(
+        """
+schema: agentsmith.identity/v1
+id: smith
+name: Smith
+default: true
+routes: []
+""".strip(),
+        encoding="utf-8",
+    )
+
     llm = FakeLLM()
     runtime = RuntimeContext(
         agent_id="smith",
@@ -88,6 +103,7 @@ def _runtime(tmp_path: Path) -> tuple[RuntimeContext, RuntimeServices, FakeLLM]:
         profile_dir=profile_dir,
         agents_dir=agents_dir,
         session_id="sess-1",
+        identity_catalog=IdentityCatalog.load(identities_dir),
     )
     services = RuntimeServices(
         llm=llm,  # type: ignore[arg-type]
@@ -108,7 +124,7 @@ def test_reply_with_runtime_uses_explicit_profile_context(tmp_path: Path) -> Non
 
         assert result.text == "runtime reply"
         assert result.had_tools is False
-        assert not (runtime.profile_dir / "memory" / "recent.jsonl").exists()
+        assert not (runtime.profile_dir / "identity-state" / "smith" / "memory" / "recent.jsonl").exists()
         return llm
 
     llm = asyncio.run(run())
@@ -128,11 +144,59 @@ def test_reply_with_runtime_marks_actual_tool_activity(tmp_path: Path) -> None:
 
         assert result.text == "tool-assisted reply"
         assert result.had_tools is True
-        assert (runtime.profile_dir / "memory" / "recent.jsonl").is_file()
+        assert (runtime.profile_dir / "identity-state" / "smith" / "memory" / "recent.jsonl").is_file()
         return llm
 
     llm = asyncio.run(run())
     assert llm.closed is True
+
+
+def test_prepare_runtime_resolves_a_yaml_route_to_its_pipeline(tmp_path: Path) -> None:
+    async def run():
+        runtime, services, _ = _runtime(tmp_path)
+        identities_dir = runtime.agents_dir / "identities"
+        (identities_dir / "smith.yaml").write_text(
+            """
+schema: agentsmith.identity/v1
+id: smith
+name: Smith
+default: true
+routes:
+  - id: refactor
+    keywords: [重构]
+    pipeline: refactor
+""".strip(),
+            encoding="utf-8",
+        )
+        pipelines_dir = runtime.agents_dir / "pipelines"
+        pipelines_dir.mkdir()
+        (pipelines_dir / "refactor.yaml").write_text(
+            """
+name: refactor
+route: refactor
+steps:
+  - skill: planning
+    gate: planning
+""".strip(),
+            encoding="utf-8",
+        )
+        runtime = RuntimeContext(
+            agent_id=runtime.agent_id,
+            agent_name=runtime.agent_name,
+            profile_dir=runtime.profile_dir,
+            agents_dir=runtime.agents_dir,
+            session_id=runtime.session_id,
+            identity_catalog=IdentityCatalog.load(identities_dir),
+        )
+        return await prepare_runtime(EngineRequest(message="请重构这个模块"), runtime, services)
+
+    setup = asyncio.run(run())
+
+    assert setup.route.identity_id == "smith"
+    assert setup.route.route_id == "refactor"
+    assert setup.route.pipeline_id == "refactor"
+    assert setup.chain is not None
+    assert [node.skill_name for node in setup.chain.nodes] == ["planning"]
 
 
 def test_reply_events_with_runtime_emits_decision_reply_and_closes(tmp_path: Path) -> None:

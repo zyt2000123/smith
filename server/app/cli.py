@@ -4,13 +4,10 @@ import asyncio
 import sys
 from typing import Sequence
 
-from .cli_agents import (  # noqa: E402
-    _build_agent_profile_service,
-    _build_session_service,
+from .cli_smith import (  # noqa: E402
+    _build_agent_service,
     _find_session_in_list,
-    ensure_builtin_agent,
-    ensure_demo_agents,
-    resolve_agent,
+    ensure_smith,
     resolve_session,
 )
 from .cli_chat import (  # noqa: E402
@@ -26,25 +23,14 @@ from .cli_commands import (  # noqa: E402
     cmd_agent_ensure,
     cmd_agent_show,
     cmd_chat,
-    cmd_agents_list,
     cmd_sessions_list,
     cmd_sessions_show,
 )
 from .cli_format import (  # noqa: E402
     _format_agent_line,
     _format_session_line,
-    _print_agent_table,
     _print_messages,
     _print_session_table,
-)
-from .cli_identity import (  # noqa: E402
-    BUILTIN_AGENT,
-    SHELL_ALIASES,
-    BuiltInAgentSpec,
-    AgentProfileServiceLike,
-    SessionServiceLike,
-    _find_builtin_agent_spec,
-    _normalize,
 )
 from .cli_shell import (  # noqa: E402
     _extract_shell_argv,
@@ -57,27 +43,18 @@ from .cli_shell import (  # noqa: E402
 
 
 __all__ = [
-    "BUILTIN_AGENT",
-    "SHELL_ALIASES",
-    "BuiltInAgentSpec",
-    "AgentProfileServiceLike",
-    "SessionServiceLike",
-    "_build_agent_profile_service",
-    "_build_session_service",
+    "_build_agent_service",
     "_context_from_args",
     "_decode_event",
     "_emit_event",
     "_extract_shell_argv",
-    "_find_builtin_agent_spec",
     "_find_session_in_list",
     "_format_agent_line",
     "_format_session_line",
     "_interactive_chat",
     "_launch_shell",
-    "_normalize",
     "_normalize_argv",
     "_pick_initial_prompt",
-    "_print_agent_table",
     "_print_messages",
     "_print_session_table",
     "_repo_root",
@@ -89,13 +66,10 @@ __all__ = [
     "cmd_agent_ensure",
     "cmd_agent_show",
     "cmd_chat",
-    "cmd_agents_list",
     "cmd_sessions_list",
     "cmd_sessions_show",
-    "ensure_builtin_agent",
-    "ensure_demo_agents",
+    "ensure_smith",
     "main",
-    "resolve_agent",
     "resolve_session",
 ]
 

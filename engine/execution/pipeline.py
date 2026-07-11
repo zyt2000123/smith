@@ -266,15 +266,16 @@ async def _collect_node_events(
 
 def _save_checkpoint(context: dict, node_idx: int) -> None:
     session_id = str(context.get("session_id") or "")
-    profile_dir = str(context.get("_profile_dir") or "")
-    if not session_id or not profile_dir:
+    state_dir = str(context.get("_state_dir") or "")
+    if not session_id or not state_dir:
         return
     try:
         from .session_state import SessionStateManager, SessionCheckpoint
-        SessionStateManager(Path(profile_dir)).save(SessionCheckpoint(
+        SessionStateManager(Path(state_dir)).save(SessionCheckpoint(
             agent_id=str(context.get("agent_id") or ""),
             session_id=session_id,
-            task_type=str(context.get("task_type") or ""),
+            identity_id=str(context.get("identity_id") or ""),
+            route_id=str(context.get("route_id") or ""),
             skill_chain_index=node_idx,
             context={k: v for k, v in context.items() if not k.startswith("_")},
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -285,11 +286,11 @@ def _save_checkpoint(context: dict, node_idx: int) -> None:
 
 def _clear_checkpoint(context: dict) -> None:
     session_id = str(context.get("session_id") or "")
-    profile_dir = str(context.get("_profile_dir") or "")
-    if not session_id or not profile_dir:
+    state_dir = str(context.get("_state_dir") or "")
+    if not session_id or not state_dir:
         return
     try:
         from .session_state import SessionStateManager
-        SessionStateManager(Path(profile_dir)).clear(session_id)
+        SessionStateManager(Path(state_dir)).clear(session_id)
     except Exception:
         logger.exception("failed to clear session checkpoint")

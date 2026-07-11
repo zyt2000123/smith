@@ -59,16 +59,15 @@ async def test_create_profile_rejects_legacy_template_roles() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_profile_seeds_from_builtin_smith_profile(monkeypatch) -> None:
+async def test_create_profile_seeds_the_single_smith_runtime_profile(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_init_agent_profile_files(agent_id: str, **kwargs) -> None:
-        captured["agent_id"] = agent_id
+    def fake_init_smith_profile_files(**kwargs) -> None:
         captured.update(kwargs)
 
     monkeypatch.setattr(
-        "app.services.agent_profile_service.init_agent_profile_files",
-        fake_init_agent_profile_files,
+        "app.services.agent_profile_service.init_smith_profile_files",
+        fake_init_smith_profile_files,
     )
 
     svc = AgentProfileService(FakeCreateAgentProfileRepo())
@@ -76,3 +75,4 @@ async def test_create_profile_seeds_from_builtin_smith_profile(monkeypatch) -> N
 
     assert agent.id == "smith-id"
     assert captured["profile_seed_dir"] == SMITH_PROFILE_DIR
+    assert captured["name"] == "Smith"

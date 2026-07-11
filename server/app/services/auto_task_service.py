@@ -12,7 +12,7 @@ from ..schemas.auto_task import AutoTaskCreate, AutoTaskUpdate, AutoTaskOut, Aut
 from ..infrastructure.repositories.auto_task_repo import AutoTaskRepo
 from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
 from ..infrastructure.repositories.session_repo import SessionRepo
-from .engine_runtime import build_engine_runtime
+from .engine_runtime import build_engine_runtime, load_runtime_identity_catalog
 from ..utils.cron import next_cron_time, next_interval_time
 
 log = logging.getLogger(__name__)
@@ -35,8 +35,8 @@ class AutoTaskService:
     async def create_auto_task(
         self, agent_id: str, body: AutoTaskCreate
     ) -> AutoTaskOut:
-        emp = await self.agent_profile_repo.get(agent_id)
-        if emp is None:
+        profile = await self.agent_profile_repo.get(agent_id)
+        if profile is None:
             raise HTTPException(404, "Agent profile not found")
 
         next_run = self._calc_next_run(body.trigger_type, body.trigger_config)
@@ -99,12 +99,17 @@ class AutoTaskService:
         run = await self.repo.create_run(task_id)
 
         try:
-            emp = await self.agent_profile_repo.get(agent_id)
-            emp_name = emp["name"] if emp else "Agent"
+            profile = await self.agent_profile_repo.get(agent_id)
+            profile_name = profile["name"] if profile else "Agent"
 
-            # Create a session for this run
+            # Bind this generated session to one declarative identity before execution.
+            identity_id = load_runtime_identity_catalog().resolve(
+                task["instruction"]
+            ).identity_id
             session = await self.session_repo.create(
-                agent_id, f"[自动] {task['title']}"
+                agent_id,
+                f"[自动] {task['title']}",
+                identity_id,
             )
 
             # Save the instruction as a user message
@@ -115,11 +120,14 @@ class AutoTaskService:
             # Call engine
             runtime, services = build_engine_runtime(
                 agent_id,
-                emp_name,
+                profile_name,
                 session_id=session["id"],
             )
             result = await engine_reply_with_runtime(
-                EngineRequest(message=task["instruction"]),
+                EngineRequest(
+                    message=task["instruction"],
+                    identity_id=identity_id,
+                ),
                 runtime,
                 services,
             )

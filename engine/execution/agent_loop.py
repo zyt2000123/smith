@@ -13,13 +13,11 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, AsyncGenerator, Callable, NamedTuple
+from typing import AsyncGenerator, NamedTuple
 from pathlib import Path
 from uuid import uuid4
 
-if TYPE_CHECKING:
-    pass
-
+from engine.identity_catalog import IdentityCatalog, IdentitySpec, RouteDecision
 from engine.llm.port import LLMPort
 from engine.prompt.assembler import PromptAssembler
 from engine.react_budget import DEFAULT_MAX_REACT_ITERS
@@ -43,7 +41,6 @@ from .runtime import EngineRequest, EngineResult, RuntimeContext, RuntimeService
 from .skill_chain import SkillChain
 from .task_router import (
     EVAL_SENSITIVE_GUIDANCE,
-    TaskType,
     detect_eval_sensitive,
     route_task,
 )
@@ -71,7 +68,7 @@ async def run_agent_stream(
     user_message: str,
     tool_registry: ToolRegistry,
     skill_registry: SkillRegistry,
-    task_type: TaskType,
+    route: RouteDecision,
     skill_chain: SkillChain | None,
     guard: FailureLoopGuard,
     tool_guard: ToolGuard | None = None,
@@ -97,15 +94,19 @@ async def run_agent_stream(
         {"role": "user", "content": user_message},
     ]
 
-    yield ExecutionEvent(EventType.ROUTE_DECIDED, {"type": task_type.value})
+    yield ExecutionEvent(EventType.ROUTE_DECIDED, route.to_event_data())
 
-    if task_type == TaskType.DIRECT or skill_chain is None:
+    if route.pipeline_id is None or skill_chain is None:
         async for event in _react_event_loop(llm, base_messages, tool_registry, tool_guard, max_react_iters):
             yield event
         yield ExecutionEvent(EventType.DONE, {})
         return
 
-    context: dict = {"user_message": user_message, "task_type": task_type.value}
+    context: dict = {
+        "user_message": user_message,
+        "identity_id": route.identity_id,
+        "route_id": route.route_id,
+    }
     if execution_context:
         context.update({k: v for k, v in execution_context.items() if v is not None})
 
@@ -193,10 +194,11 @@ async def _run_forced_skill_stream(
 
 
 class _AgentSetup(NamedTuple):
-    profile_dir: Path
     system_prompt: str
-    task_type: TaskType
+    identity: IdentitySpec
+    route: RouteDecision
     chain: SkillChain | None
+    state_dir: Path
 
 
 def _merge_context(user_message: str, context: str | None) -> str:
@@ -212,22 +214,33 @@ def _missing_skill_message(skill_registry: SkillRegistry, forced_skill: str) -> 
     return f"Skill '{forced_skill}' not found. Available skills: {available}"
 
 
-def _enabled_tools_from_config(emp_config: dict, tool_registry: ToolRegistry) -> list[str]:
+def _enabled_tools_from_config(
+    profile_config: dict,
+    tool_registry: ToolRegistry,
+    identity: IdentitySpec,
+) -> list[str]:
     available = tool_registry.list_tool_names(include_disabled=True)
-    tools_cfg = emp_config.get("tools") if isinstance(emp_config, dict) else {}
+    tools_cfg = profile_config.get("tools") if isinstance(profile_config, dict) else {}
     enabled = tools_cfg.get("enabled") if isinstance(tools_cfg, dict) else None
     if not isinstance(enabled, list):
-        return [name for name in available if name not in _HIDDEN_DEFAULT_TOOLS]
-    return [
+        configured = [name for name in available if name not in _HIDDEN_DEFAULT_TOOLS]
+    else:
+        configured = [
         name for name in enabled
         if isinstance(name, str) and name and name not in _HIDDEN_DEFAULT_TOOLS
-    ]
+        ]
+    if identity.enabled_tools is None:
+        return configured
+    allowed = set(identity.enabled_tools)
+    return [name for name in configured if name in allowed]
 
 
-def _runtime_prompt_context(runtime: RuntimeContext) -> dict[str, str]:
+def _runtime_prompt_context(runtime: RuntimeContext, identity: IdentitySpec) -> dict[str, str]:
     context = {
         "agent_id": runtime.agent_id,
         "name": runtime.agent_name,
+        "identity_id": identity.id,
+        "identity_name": identity.name,
         "_profile_dir": str(runtime.profile_dir),
     }
     if runtime.session_id:
@@ -237,14 +250,24 @@ def _runtime_prompt_context(runtime: RuntimeContext) -> dict[str, str]:
     return context
 
 
-def _runtime_execution_context(runtime: RuntimeContext) -> dict[str, str | None]:
+def _runtime_execution_context(
+    runtime: RuntimeContext,
+    identity: IdentitySpec,
+    state_dir: Path,
+) -> dict[str, str | None]:
     context: dict[str, str | None] = {
         "agent_id": runtime.agent_id,
         "session_id": runtime.session_id,
-        "_profile_dir": str(runtime.profile_dir),
+        "identity_id": identity.id,
+        "_state_dir": str(state_dir),
     }
     context.update({key: value for key, value in runtime.metadata.items()})
     return context
+
+
+def _identity_state_dir(runtime: RuntimeContext, identity: IdentitySpec) -> Path:
+    """Keep mutable memory and checkpoints isolated between domain identities."""
+    return runtime.profile_dir / "identity-state" / identity.id
 
 
 async def _load_profile_config(runtime: RuntimeContext) -> dict:
@@ -258,9 +281,13 @@ async def _load_profile_config(runtime: RuntimeContext) -> dict:
     return {}
 
 
-async def _register_mcp_tools(emp_config: dict, runtime: RuntimeContext, services: RuntimeServices) -> None:
+async def _register_mcp_tools(
+    profile_config: dict,
+    runtime: RuntimeContext,
+    services: RuntimeServices,
+) -> None:
     try:
-        mcp_servers = emp_config.get("mcp_servers", [])
+        mcp_servers = profile_config.get("mcp_servers", [])
         if not mcp_servers:
             return
         from engine.tool.mcp_client import MCPClient, register_mcp_tools
@@ -282,12 +309,17 @@ async def prepare_runtime(
     services: RuntimeServices,
 ) -> _AgentSetup:
     """Prepare prompt, tools, skills, and task routing from an explicit runtime."""
+    catalog = runtime.identity_catalog or IdentityCatalog.load(runtime.agents_dir / "identities")
+    route = route_task(request.message, catalog, identity_id=request.identity_id)
+    identity = route.identity
+    state_dir = _identity_state_dir(runtime, identity)
+
     services.tool_registry.load_providers(runtime.agents_dir / "tools")
-    emp_config = await _load_profile_config(runtime)
-    await _register_mcp_tools(emp_config, runtime, services)
+    profile_config = await _load_profile_config(runtime)
+    await _register_mcp_tools(profile_config, runtime, services)
 
     unknown_tools = services.tool_registry.set_enabled(
-        _enabled_tools_from_config(emp_config, services.tool_registry)
+        _enabled_tools_from_config(profile_config, services.tool_registry, identity)
     )
     if unknown_tools:
         logger.warning(
@@ -299,61 +331,52 @@ async def prepare_runtime(
     profile_skills = runtime.profile_dir / "skills"
     if profile_skills.is_dir():
         services.skill_registry.load_agent_skills(profile_skills)
+    if identity.enabled_skills is not None:
+        services.skill_registry.restrict_to(identity.enabled_skills)
 
     from engine.memory.store import search_relevant_memories
-    retrieved = await search_relevant_memories(runtime.profile_dir, request.message)
+    retrieved = await search_relevant_memories(state_dir, request.message)
     assembler = PromptAssembler()
     system_prompt = assembler.assemble(
         runtime.profile_dir, services.tool_registry, services.skill_registry,
-        _runtime_prompt_context(runtime), retrieved_memory=retrieved,
+        _runtime_prompt_context(runtime, identity), retrieved_memory=retrieved,
     )
+    if identity.prompt:
+        system_prompt += "\n\n---\n\n" + identity.prompt
 
-    task_type = route_task(request.message)
     if detect_eval_sensitive(request.message):
         system_prompt += "\n\n" + EVAL_SENSITIVE_GUIDANCE
 
-    available_skills = {
-        summary["name"] for summary in services.skill_registry.list_summaries()
-    }
-    chain = _resolve_pipeline(task_type, runtime, available_skills)
+    chain = _resolve_pipeline(route, runtime)
 
-    return _AgentSetup(runtime.profile_dir, system_prompt, task_type, chain)
+    return _AgentSetup(system_prompt, identity, route, chain, state_dir)
 
 
 def _resolve_pipeline(
-    task_type: TaskType,
+    route: RouteDecision,
     runtime: RuntimeContext,
-    available_skills: set[str],
 ) -> SkillChain | None:
-    """Load pipeline: user profile → agents/pipelines/ → built-in fallback."""
-    route = task_type.value
-    if route == "direct":
+    """Resolve a YAML pipeline selected by a declarative route decision."""
+    if route.pipeline_id is None:
         return None
 
     # 1. User-defined pipeline in profile
     profile_pipelines = runtime.profile_dir / "pipelines"
     if profile_pipelines.is_dir():
         user_chains = SkillChain.load_pipelines(profile_pipelines)
-        if route in user_chains:
-            return user_chains[route].for_available_skills(available_skills)
+        if route.pipeline_id in user_chains:
+            return user_chains[route.pipeline_id]
 
     # 2. Built-in pipelines from agents/pipelines/
     builtin_pipelines = runtime.agents_dir / "pipelines"
     if builtin_pipelines.is_dir():
         builtin_chains = SkillChain.load_pipelines(builtin_pipelines)
-        if route in builtin_chains:
-            return builtin_chains[route].for_available_skills(available_skills)
+        if route.pipeline_id in builtin_chains:
+            return builtin_chains[route.pipeline_id]
 
-    # 3. Hardcoded fallback
-    _BUILTIN_CHAINS: dict[str, Callable[[], SkillChain]] = {
-        "feature": SkillChain.feature_chain,
-        "bugfix": SkillChain.bugfix_chain,
-    }
-    factory = _BUILTIN_CHAINS.get(route)
-    if factory:
-        return factory().for_available_skills(available_skills)
-
-    return None
+    raise RuntimeError(
+        f"Route {route.identity_id}:{route.route_id} references missing pipeline {route.pipeline_id!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -362,16 +385,16 @@ def _resolve_pipeline(
 
 
 async def _persist_runtime_learning(
-    runtime: RuntimeContext, user_message: str, reply_text: str, had_tools: bool,
+    state_dir: Path, user_message: str, reply_text: str, had_tools: bool,
 ) -> None:
     try:
         from engine.memory.store import save_conversation_memory
-        await save_conversation_memory(runtime.profile_dir, user_message, reply_text, had_tools)
+        await save_conversation_memory(state_dir, user_message, reply_text, had_tools)
     except Exception:
         logger.warning("failed to persist conversation memory", exc_info=True)
     try:
         from engine.memory.user_learner import UserPreferenceLearner
-        learner = UserPreferenceLearner(runtime.profile_dir)
+        learner = UserPreferenceLearner(state_dir)
         await learner.observe(user_message, reply_text)
     except Exception:
         logger.warning("failed to learn user preferences", exc_info=True)
@@ -413,21 +436,23 @@ async def _run_events_with_runtime(
     terminal_status = "completed"
     terminal_reason: str | None = None
     drained = False
+    state_dir: Path | None = None
 
     yield ExecutionEvent(EventType.RUN_STARTED, {"run_id": run_id})
     try:
         s = await prepare_runtime(request, runtime, services)
+        state_dir = s.state_dir
         guard = FailureLoopGuard()
         with use_fact_gate(_fact_gate_for_request(request, runtime)):
             async for event in run_agent_stream(
                 services.llm, s.system_prompt,
                 _merge_context(request.message, request.context),
                 services.tool_registry, services.skill_registry,
-                s.task_type, s.chain, guard,
+                s.route, s.chain, guard,
                 tool_guard=services.tool_guard,
                 history=request.history,
                 forced_skill=request.forced_skill,
-                execution_context=_runtime_execution_context(runtime),
+                execution_context=_runtime_execution_context(runtime, s.identity, s.state_dir),
                 gate_llm=services.gate_llm,
             ):
                 if event.type == EventType.TEXT_DELTA:
@@ -456,10 +481,10 @@ async def _run_events_with_runtime(
         yield ExecutionEvent(EventType.DONE, {})
         drained = True
     finally:
-        if drained and terminal_status == "completed":
+        if drained and terminal_status == "completed" and state_dir is not None:
             try:
                 await _persist_runtime_learning(
-                    runtime, request.message, "".join(full_text), had_tools,
+                    state_dir, request.message, "".join(full_text), had_tools,
                 )
             except Exception:
                 logger.warning("failed to finalize conversation memory", exc_info=True)
@@ -523,40 +548,6 @@ async def reply_events_with_runtime(
         yield event
 
 
-# ---------------------------------------------------------------------------
-# Legacy entry points — delegate to legacy.py
-# ---------------------------------------------------------------------------
-
-
-async def reply(
-    agent_id: str, name: str, user_message: str,
-    history: list[dict] | None = None,
-    context: str | None = None,
-    forced_skill: str | None = None,
-) -> str:
-    from .legacy import reply as legacy_reply
-    return await legacy_reply(
-        agent_id, name, user_message,
-        history=history, context=context, forced_skill=forced_skill,
-    )
-
-
-async def reply_events(
-    agent_id: str, name: str, user_message: str,
-    history: list[dict] | None = None,
-    context: str | None = None,
-    forced_skill: str | None = None,
-    session_id: str | None = None,
-) -> AsyncGenerator[ExecutionEvent, None]:
-    from .legacy import reply_events as legacy_reply_events
-    async for event in legacy_reply_events(
-        agent_id, name, user_message,
-        history=history, context=context,
-        forced_skill=forced_skill, session_id=session_id,
-    ):
-        yield event
-
-
 async def reply_stream_with_runtime(
     request: EngineRequest,
     runtime: RuntimeContext,
@@ -588,16 +579,3 @@ async def reply_stream_with_runtime(
             yield f"\n[↩ 回退: {event.data.get('from', '')} → {event.data.get('to', '')}]\n"
         elif event.type == EventType.BLOCKED:
             yield f"\n[⛔ 阻断: {event.data.get('reason', '')}]\n"
-
-
-async def reply_stream(
-    agent_id: str, name: str, user_message: str,
-    history: list[dict] | None = None,
-    session_id: str | None = None,
-) -> AsyncGenerator[str, None]:
-    from .legacy import reply_stream as legacy_reply_stream
-    async for chunk in legacy_reply_stream(
-        agent_id, name, user_message,
-        history=history, session_id=session_id,
-    ):
-        yield chunk

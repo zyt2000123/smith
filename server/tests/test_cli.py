@@ -8,89 +8,69 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.cli import (
-    BUILTIN_AGENT,
+from app.cli import (  # noqa: E402
     _context_from_args,
     _extract_shell_argv,
     _find_session_in_list,
     _should_launch_shell,
     build_parser,
-    ensure_builtin_agent,
-    resolve_agent,
+    ensure_smith,
+    resolve_session,
 )
 
 
-class FakeAgentProfileService:
-    def __init__(self, agents: list[SimpleNamespace]) -> None:
-        self.agents = agents
-        self.create_calls = 0
+class FakeAgentService:
+    def __init__(self, sessions: list[SimpleNamespace] | None = None) -> None:
+        self.get_profile_calls = 0
+        self.sessions = sessions or []
 
-    async def list_profiles(self) -> list[SimpleNamespace]:
-        return list(self.agents)
-
-    async def create_profile(self, body) -> SimpleNamespace:
-        self.create_calls += 1
-        agent = SimpleNamespace(
-            id=f"emp-{self.create_calls}",
-            name=body.name,
-            role=body.role,
-            online=True,
-            description=body.description,
-        )
-        self.agents.append(agent)
-        return agent
-
-
-@pytest.mark.asyncio
-async def test_ensure_builtin_agent_is_idempotent() -> None:
-    svc = FakeAgentProfileService([
-        SimpleNamespace(
-            id="existing-smith",
-            name="Smith",
-            role="personal-assistant",
-            online=True,
-            description="existing",
-        )
-    ])
-
-    first = await ensure_builtin_agent(svc)
-    second = await ensure_builtin_agent(svc)
-
-    assert first.id == "existing-smith"
-    assert second.id == "existing-smith"
-    assert svc.create_calls == 0
-    assert sorted(agent.name for agent in svc.agents) == ["Smith"]
-
-
-@pytest.mark.asyncio
-async def test_resolve_agent_prefers_builtin_alias_target() -> None:
-    svc = FakeAgentProfileService([
-        SimpleNamespace(
-            id="custom-assistant",
-            name="Custom",
-            role="personal-assistant",
-            online=True,
-            description="custom",
-        ),
-        SimpleNamespace(
+    async def get_profile(self) -> SimpleNamespace:
+        self.get_profile_calls += 1
+        return SimpleNamespace(
             id="smith-id",
             name="Smith",
             role="personal-assistant",
             online=True,
-            description="demo",
-        ),
+            description="resident",
+        )
+
+    async def list_sessions(self) -> list[SimpleNamespace]:
+        return list(self.sessions)
+
+
+@pytest.mark.asyncio
+async def test_ensure_smith_uses_the_single_agent_facade() -> None:
+    service = FakeAgentService()
+
+    profile = await ensure_smith(service)
+
+    assert profile.id == "smith-id"
+    assert service.get_profile_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_uses_only_smith_sessions() -> None:
+    service = FakeAgentService([
+        SimpleNamespace(id="sess-001", title="First"),
+        SimpleNamespace(id="sess-002", title="Second"),
     ])
 
-    agent = await resolve_agent(svc, "assistant", ensure_builtin=False)
+    session = await resolve_session(service, "sess-002")
 
-    assert agent.id == "smith-id"
+    assert session.title == "Second"
 
 
-def test_chat_parser_defaults_to_builtin_agent() -> None:
-    args = build_parser().parse_args(["chat", "--message", "hello"])
+def test_chat_parser_has_no_agent_selector_and_accepts_identity() -> None:
+    args = build_parser().parse_args([
+        "chat",
+        "--identity",
+        "legal",
+        "--message",
+        "hello",
+    ])
 
-    assert args.agent == BUILTIN_AGENT.key
-    assert args.no_ensure_agent is False
+    assert not hasattr(args, "agent")
+    assert args.identity == "legal"
 
 
 def test_chat_parser_accepts_session_resume() -> None:
@@ -102,8 +82,8 @@ def test_chat_parser_accepts_session_resume() -> None:
         "hello",
     ])
 
-    assert args.agent == BUILTIN_AGENT.key
     assert args.session == "sess-123"
+    assert args.identity is None
 
 
 def test_extract_shell_argv_supports_default_and_alias() -> None:

@@ -21,7 +21,7 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
-def test_app_paths_create_private_runtime_dirs(tmp_path: Path) -> None:
+def test_app_paths_create_private_runtime_dirs_and_exposes_builtin_identities(tmp_path: Path) -> None:
     paths = AppPaths(data_dir=tmp_path / "data", project_root=tmp_path / "project")
     paths.data_dir.mkdir(mode=0o755)
     paths.data_dir.chmod(0o755)
@@ -31,7 +31,7 @@ def test_app_paths_create_private_runtime_dirs(tmp_path: Path) -> None:
     assert _mode(paths.data_dir) == 0o700
     assert _mode(paths.agent_dir) == 0o700
     assert _mode(paths.sqlite_path.parent) == 0o700
-    assert _mode(paths.legacy_agent_profiles_dir) == 0o700
+    assert paths.builtin_identities_dir == paths.project_root / "agents" / "identities"
 
 
 def test_app_paths_honors_explicit_project_root(monkeypatch, tmp_path: Path) -> None:

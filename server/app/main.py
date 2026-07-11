@@ -15,6 +15,7 @@ from .services.scheduler import run_scheduler
 from .services.plugin_service import PluginService
 
 from common.config import BUILTIN_PLUGINS_DIR
+from .services.engine_runtime import load_runtime_identity_catalog
 _plugin_service = PluginService(BUILTIN_PLUGINS_DIR)
 plugins.set_service(_plugin_service)
 
@@ -22,6 +23,8 @@ plugins.set_service(_plugin_service)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await get_app_db()
+    identity_catalog = load_runtime_identity_catalog(force=True)
+    app.state.identity_catalog = identity_catalog
     scheduler_task = asyncio.create_task(run_scheduler())
     await _plugin_service.startup()
     yield

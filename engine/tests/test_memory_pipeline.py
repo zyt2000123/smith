@@ -191,7 +191,7 @@ def test_save_conversation_memory_resets_compilation_counter_after_success(tmp_p
     compile, resolve = asyncio.run(run())
 
     compile.assert_awaited_once_with(memory_dir, ANY, raise_on_error=True)
-    resolve.assert_called_once_with(tmp_path.name, usage=model_config.LLMUsage.BACKGROUND)
+    resolve.assert_called_once_with(usage=model_config.LLMUsage.BACKGROUND)
     assert (memory_dir / ".compile_counter").read_text(encoding="utf-8") == "0"
 
 

@@ -3,30 +3,30 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from common.config import LEGACY_AGENT_PROFILES_DIR
+from common.config import AGENT_DIR
 
 
-def agent_profile_dir(agent_id: str) -> Path:
-    return LEGACY_AGENT_PROFILES_DIR / agent_id
+def smith_profile_dir() -> Path:
+    """Return the one writable runtime profile owned by Smith."""
+    return AGENT_DIR
 
 
-def _safe_child(agent_id: str, filename: str) -> Path:
-    base = agent_profile_dir(agent_id).resolve()
+def _safe_child(filename: str) -> Path:
+    base = smith_profile_dir().resolve()
     p = (base / filename).resolve()
     if not p.is_relative_to(base):
         raise ValueError("path traversal")
     return p
 
 
-def init_agent_profile_files(
-    agent_id: str,
+def init_smith_profile_files(
     *,
     profile_seed_dir: Path,
     name: str,
     role: str,
     description: str,
 ) -> None:
-    dest = agent_profile_dir(agent_id)
+    dest = smith_profile_dir()
     dest.mkdir(parents=True, exist_ok=True)
 
     if profile_seed_dir.is_dir():
@@ -41,27 +41,21 @@ def init_agent_profile_files(
         (dest / sub).mkdir(exist_ok=True)
 
 
-def delete_agent_profile_files(agent_id: str) -> None:
-    d = agent_profile_dir(agent_id)
-    if d.exists():
-        shutil.rmtree(d)
-
-
-def read_agent_profile_file(agent_id: str, filename: str) -> str | None:
-    p = _safe_child(agent_id, filename)
+def read_smith_profile_file(filename: str) -> str | None:
+    p = _safe_child(filename)
     if p.is_file():
         return p.read_text(encoding="utf-8")
     return None
 
 
-def write_agent_profile_file(agent_id: str, filename: str, content: str) -> None:
-    p = _safe_child(agent_id, filename)
+def write_smith_profile_file(filename: str, content: str) -> None:
+    p = _safe_child(filename)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
 
 
-def list_agent_profile_files(agent_id: str) -> list[dict]:
-    d = agent_profile_dir(agent_id)
+def list_smith_profile_files() -> list[dict]:
+    d = smith_profile_dir()
     if not d.is_dir():
         return []
     return [

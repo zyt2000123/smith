@@ -3,11 +3,13 @@ from pydantic import BaseModel
 
 class SessionCreate(BaseModel):
     title: str = "新对话"
+    identity_id: str | None = None
 
 
 class SessionOut(BaseModel):
     id: str
     agent_id: str
+    identity_id: str | None = None
     title: str
     created_at: str
     last_message_preview: str | None = None
@@ -19,6 +21,7 @@ class MessageCreate(BaseModel):
     content: str
     context: str | None = None
     skill_name: str | None = None
+    identity_id: str | None = None
 
 
 class MessageOut(BaseModel):
