@@ -1,6 +1,6 @@
 """Memory store — recent.jsonl as sole event source + episode FTS5 search.
 
-FileMemoryStore is retained for backward compat with dream.py (pending redesign).
+FileMemoryStore is retained for backward compatibility with memory_ops.
 New conversation memories are NOT written as .md entries — recent.jsonl is the
 sole event source. See compile.py for the compilation pipeline.
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Legacy FileMemoryStore — retained for Dream migration
+# Legacy FileMemoryStore — retained for memory_ops compatibility
 # ---------------------------------------------------------------------------
 
 
@@ -29,7 +30,7 @@ class FileMemoryStore:
     """Legacy file-based memory store with scope-based subdirectories.
 
     New conversation memories are no longer written here.
-    Kept temporarily for Dream migration and backward compatibility.
+    Kept temporarily for memory_ops and backward compatibility.
     """
 
     def __init__(self, memory_dir: Path) -> None:
@@ -227,6 +228,122 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) 
 # ---------------------------------------------------------------------------
 
 _COMPILE_INTERVAL = 5
+_MAX_EVENT_VALUE_CHARS = 16_000
+_EPISODE_REQUEST_RE = re.compile(
+    r"(?:整理|总结|归档|复盘)\s*(?:一下)?\s*(?:这段|这个|本次|当前|上述).*?(?:过程|对话|任务|工作|经历)"
+    r"|\b(?:summari[sz]e|recap)\s+(?:this|the)\s+(?:process|conversation|task)\b",
+    re.IGNORECASE,
+)
+
+
+def _bounded_event_value(value: str) -> str:
+    """Keep normal conversation events intact and mark exceptional truncation."""
+    if len(value) <= _MAX_EVENT_VALUE_CHARS:
+        return value
+
+    marker = "\n\n[Memory event truncated for storage]\n\n"
+    available = _MAX_EVENT_VALUE_CHARS - len(marker)
+    if available <= 0:
+        return value[:_MAX_EVENT_VALUE_CHARS]
+    head = available // 2
+    tail = available - head
+    return f"{value[:head]}{marker}{value[-tail:]}"
+
+
+def _increment_counter(counter_file: Path, retry_threshold: int) -> int:
+    count = 0
+    if counter_file.is_file():
+        try:
+            count = int(counter_file.read_text().strip())
+        except (ValueError, OSError):
+            count = 0
+    count = min(count + 1, retry_threshold)
+    atomic_write_text(counter_file, str(count))
+    return count
+
+
+def _episode_topic(user_message: str) -> str | None:
+    """Return a bounded topic only for an explicit episode-summary request."""
+    if not _EPISODE_REQUEST_RE.search(user_message):
+        return None
+    topic = " ".join(user_message.split())
+    return topic[:120] or None
+
+
+async def _create_explicit_episode(
+    agent_dir: Path,
+    memory_dir: Path,
+    user_message: str,
+) -> None:
+    topic = _episode_topic(user_message)
+    if topic is None:
+        return
+
+    try:
+        from .compile import _load_recent, compact_episode
+        from engine.llm.model_config import LLMUsage, build_llm_client, resolve_llm_config
+
+        related_entries = _load_recent(memory_dir)[-20:]
+        if not related_entries:
+            return
+
+        llm_cfg = resolve_llm_config(agent_dir.name, usage=LLMUsage.BACKGROUND)
+        if not llm_cfg.get("api_key"):
+            logger.warning("episode-memory generation skipped: no LLM API key configured")
+            return
+
+        llm = build_llm_client(llm_cfg)
+        try:
+            await compact_episode(memory_dir, llm, topic, related_entries)
+        finally:
+            await llm.close()
+    except Exception:
+        logger.warning("explicit episode-memory generation failed", exc_info=True)
+
+
+async def _run_periodic_compilation(agent_dir: Path, memory_dir: Path) -> bool:
+    try:
+        from .compile import run_compilation
+        from engine.llm.model_config import LLMUsage, build_llm_client, resolve_llm_config
+
+        llm_cfg = resolve_llm_config(agent_dir.name, usage=LLMUsage.BACKGROUND)
+        if not llm_cfg.get("api_key"):
+            logger.warning("conversation-memory compilation skipped: no LLM API key configured")
+            return False
+
+        llm = build_llm_client(llm_cfg)
+        try:
+            await run_compilation(memory_dir, llm, raise_on_error=True)
+        finally:
+            await llm.close()
+        return True
+    except Exception:
+        logger.warning("conversation-memory compilation failed", exc_info=True)
+        return False
+
+
+async def _run_periodic_dream(agent_dir: Path, memory_dir: Path) -> bool:
+    try:
+        from .dream import run_dream
+        from engine.llm.model_config import LLMUsage, build_llm_client, resolve_llm_config
+
+        llm_cfg = resolve_llm_config(agent_dir.name, usage=LLMUsage.BACKGROUND)
+        if not llm_cfg.get("api_key"):
+            logger.warning("conversation-memory Dream skipped: no LLM API key configured")
+            return False
+
+        llm = build_llm_client(llm_cfg)
+        try:
+            report = await run_dream(memory_dir, llm)
+        finally:
+            await llm.close()
+        if report.errors:
+            logger.warning("conversation-memory Dream failed: %s", "; ".join(report.errors))
+            return False
+        return True
+    except Exception:
+        logger.warning("conversation-memory Dream consolidation failed", exc_info=True)
+        return False
 
 
 async def save_conversation_memory(
@@ -241,62 +358,28 @@ async def save_conversation_memory(
 
     recent_file = memory_dir / "recent.jsonl"
     now = datetime.now(timezone.utc).isoformat()
-    entry = {"task": user_msg[:100], "summary": reply[:200], "timestamp": now}
+    entry = {
+        "task": _bounded_event_value(user_msg),
+        "summary": _bounded_event_value(reply),
+        "timestamp": now,
+    }
 
     with open(recent_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    await _create_explicit_episode(agent_dir, memory_dir, user_msg)
+
     # Periodic compilation (recent + durable)
     counter_file = memory_dir / ".compile_counter"
-    count = 0
-    if counter_file.is_file():
-        try:
-            count = int(counter_file.read_text().strip())
-        except (ValueError, OSError):
-            count = 0
-    count += 1
-    atomic_write_text(counter_file, str(count))
+    count = _increment_counter(counter_file, _COMPILE_INTERVAL)
 
-    if count >= _COMPILE_INTERVAL:
+    if count >= _COMPILE_INTERVAL and await _run_periodic_compilation(agent_dir, memory_dir):
         atomic_write_text(counter_file, "0")
-        try:
-            from .compile import run_compilation
-            from engine.llm.model_config import resolve_llm_config, build_llm_client
-
-            llm_cfg = resolve_llm_config(agent_dir.name)
-            if llm_cfg.get("api_key"):
-                llm = build_llm_client(llm_cfg)
-                try:
-                    await run_compilation(memory_dir, llm)
-                finally:
-                    await llm.close()
-        except Exception:
-            logger.warning("conversation-memory compilation failed", exc_info=True)
 
     # Low-frequency Dream consolidation (separate counter)
     from .dream import DREAM_INTERVAL
     dream_counter = memory_dir / ".dream_counter"
-    d_count = 0
-    if dream_counter.is_file():
-        try:
-            d_count = int(dream_counter.read_text().strip())
-        except (ValueError, OSError):
-            d_count = 0
-    d_count += 1
-    atomic_write_text(dream_counter, str(d_count))
+    d_count = _increment_counter(dream_counter, DREAM_INTERVAL)
 
-    if d_count >= DREAM_INTERVAL:
+    if d_count >= DREAM_INTERVAL and await _run_periodic_dream(agent_dir, memory_dir):
         atomic_write_text(dream_counter, "0")
-        try:
-            from .dream import run_dream
-            from engine.llm.model_config import resolve_llm_config, build_llm_client
-
-            llm_cfg = resolve_llm_config(agent_dir.name)
-            if llm_cfg.get("api_key"):
-                llm = build_llm_client(llm_cfg)
-                try:
-                    await run_dream(memory_dir, llm)
-                finally:
-                    await llm.close()
-        except Exception:
-            logger.warning("conversation-memory dream consolidation failed", exc_info=True)

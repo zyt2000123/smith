@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from ._files import atomic_write_text
 
 if TYPE_CHECKING:
-    from engine.llm.client import LLMClient
+    from engine.llm.port import LLMPort
 
 
 logger = logging.getLogger(__name__)
@@ -103,7 +103,7 @@ Content to consolidate:
 DREAM_INTERVAL = 50
 
 
-async def run_dream(memory_dir: Path, llm: "LLMClient") -> DreamReport:
+async def run_dream(memory_dir: Path, llm: "LLMPort") -> DreamReport:
     """Run Dream consolidation on durable.md. Returns a report."""
     report = DreamReport()
     durable_path = memory_dir / "durable.md"

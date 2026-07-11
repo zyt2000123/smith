@@ -3,7 +3,7 @@
 Three compilation targets:
   compile_recent()   → recent.md     (last 7-14 days, budget-capped)
   compile_durable()  → durable.md    (incremental merge of stable facts)
-  compact_episode()  → episodes/*.md (on topic completion, not automatic)
+  compact_episode()  → episodes/*.md (on an explicit user summary request)
   assemble_memory()  → combined str  (for prompt injection)
 
 Fingerprint caching: MD5 of input keys. Same input → skip compilation.
@@ -22,10 +22,13 @@ from typing import TYPE_CHECKING
 from ._files import atomic_write_text
 
 if TYPE_CHECKING:
-    from engine.llm.client import LLMClient
+    from engine.llm.port import LLMPort
 
 MAX_RECENT_CHARS = 8000
 MAX_DURABLE_CHARS = 10_000
+MAX_RECENT_SOURCE_CHARS = 24_000
+MAX_DURABLE_SOURCE_CHARS = 16_000
+MAX_EPISODE_SOURCE_CHARS = 16_000
 MIN_WINDOW_DAYS = 7
 MAX_WINDOW_DAYS = 14
 
@@ -74,15 +77,44 @@ def _filter_by_time(entries: list[dict], after: datetime) -> list[dict]:
     ]
 
 
-def _entries_to_source(entries: list[dict], summary_limit: int = 120) -> str:
-    return "\n".join(
-        f"- [{e.get('timestamp', '?')[:16]}] {e.get('task', '?')}: "
-        f"{e.get('summary', '?')[:summary_limit]}"
-        for e in entries
-    )
+def _truncate_source(text: str, limit: int) -> str:
+    """Keep both ends of long text while making prompt truncation explicit."""
+    if len(text) <= limit:
+        return text
+
+    marker = "\n[... event content omitted from this compilation input ...]\n"
+    available = limit - len(marker)
+    if available <= 0:
+        return text[:limit]
+
+    head = available // 2
+    tail = available - head
+    return f"{text[:head]}{marker}{text[-tail:]}"
 
 
-async def _llm_summarize(llm: "LLMClient", prompt: str) -> str:
+def _entries_to_source(
+    entries: list[dict],
+    summary_limit: int | None = None,
+    source_limit: int | None = None,
+) -> str:
+    """Render events without losing normal-sized content.
+
+    ``recent.jsonl`` keeps the durable event record. Limits here constrain only
+    LLM input, and include an explicit marker when they need to apply.
+    """
+    lines = []
+    for entry in entries:
+        task = str(entry.get("task", "?"))
+        summary = str(entry.get("summary", "?"))
+        if summary_limit is not None:
+            summary = _truncate_source(summary, summary_limit)
+        lines.append(f"- [{str(entry.get('timestamp', '?'))[:16]}] {task}: {summary}")
+
+    source = "\n".join(lines)
+    return _truncate_source(source, source_limit) if source_limit is not None else source
+
+
+async def _llm_summarize(llm: "LLMPort", prompt: str) -> str:
     resp = await llm.chat([
         {"role": "system", "content": (
             "You are a memory compiler. Extract ONLY user-relevant information: "
@@ -100,7 +132,7 @@ async def _llm_summarize(llm: "LLMClient", prompt: str) -> str:
 # compile_recent: replace today.md + week.md with a single budget-capped view
 # ---------------------------------------------------------------------------
 
-async def compile_recent(memory_dir: Path, llm: "LLMClient") -> bool:
+async def compile_recent(memory_dir: Path, llm: "LLMPort") -> bool:
     """Compile recent events into recent.md. Budget-capped, elastic 7-14 day window."""
     now = datetime.now(timezone.utc)
     all_entries = _load_recent(memory_dir)
@@ -118,7 +150,7 @@ async def compile_recent(memory_dir: Path, llm: "LLMClient") -> bool:
     if _read_fp(fp_file) == fp:
         return False
 
-    source = _entries_to_source(entries)
+    source = _entries_to_source(entries, source_limit=MAX_RECENT_SOURCE_CHARS)
     if len(source) > MAX_RECENT_CHARS:
         summary = await _llm_summarize(
             llm,
@@ -159,7 +191,7 @@ New events:
 {new_events}"""
 
 
-async def compile_durable(memory_dir: Path, llm: "LLMClient") -> bool:
+async def compile_durable(memory_dir: Path, llm: "LLMPort") -> bool:
     """Incrementally merge new events into durable.md."""
     all_entries = _load_recent(memory_dir)
 
@@ -171,7 +203,11 @@ async def compile_durable(memory_dir: Path, llm: "LLMClient") -> bool:
         return False
 
     existing = out.read_text(encoding="utf-8").strip() if out.is_file() else ""
-    new_source = _entries_to_source(all_entries[-20:], 100)
+    new_source = _entries_to_source(
+        all_entries[-20:],
+        summary_limit=1000,
+        source_limit=MAX_DURABLE_SOURCE_CHARS,
+    )
 
     if not new_source.strip():
         return False
@@ -199,7 +235,7 @@ async def compile_durable(memory_dir: Path, llm: "LLMClient") -> bool:
 
 async def compact_episode(
     memory_dir: Path,
-    llm: "LLMClient",
+    llm: "LLMPort",
     topic: str,
     related_entries: list[dict],
 ) -> Path | None:
@@ -219,7 +255,11 @@ async def compact_episode(
     if not out.is_relative_to(episodes_root):
         raise ValueError("episode path escaped its storage directory")
 
-    source = _entries_to_source(related_entries)
+    source = _entries_to_source(
+        related_entries[-20:],
+        summary_limit=1200,
+        source_limit=MAX_EPISODE_SOURCE_CHARS,
+    )
     summary = await _llm_summarize(llm, (
         f"Write a concise episode summary for the topic: {topic}\n\n"
         f"Include: background, process, key decisions, and outcome.\n"
@@ -256,16 +296,26 @@ def assemble_memory(memory_dir: Path) -> str:
 # run_compilation: entry point called by store.py after Dream
 # ---------------------------------------------------------------------------
 
-async def run_compilation(memory_dir: Path, llm: "LLMClient") -> dict:
-    """Run compilation pipeline. Returns {layer: recompiled_bool}."""
+async def run_compilation(
+    memory_dir: Path,
+    llm: "LLMPort",
+    *,
+    raise_on_error: bool = False,
+) -> dict:
+    """Run compilation pipeline. Optionally surface failures for retry control."""
     memory_dir.mkdir(parents=True, exist_ok=True)
     results = {"recent": False, "durable": False}
+    errors: list[str] = []
     try:
         results["recent"] = await compile_recent(memory_dir, llm)
     except Exception:
         logger.warning("recent-memory compilation failed", exc_info=True)
+        errors.append("recent-memory compilation failed")
     try:
         results["durable"] = await compile_durable(memory_dir, llm)
     except Exception:
         logger.warning("durable-memory compilation failed", exc_info=True)
+        errors.append("durable-memory compilation failed")
+    if errors and raise_on_error:
+        raise RuntimeError("; ".join(errors))
     return results
