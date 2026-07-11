@@ -5,6 +5,7 @@ import asyncio
 from engine.execution.agent_loop import _react_event_loop, _react_loop, _react_stream_loop
 from engine.execution.events import EventType
 from engine.llm.client import ChatResponse, ToolCallData
+from engine.llm.events import ProviderEvent, ProviderEventType
 from engine.react_budget import (
     MAX_FAILED_TOOL_RECOVERY_ITERS,
     MAX_PREFLIGHT_CHALLENGE_ITERS,
@@ -47,6 +48,23 @@ class FakeLLM:
         self.stream_calls.append(messages)
         for chunk in self.stream_chunks:
             yield chunk
+
+
+class StreamingFakeLLM(FakeLLM):
+    stream = True
+
+    def __init__(self, event_turns: list[list[ProviderEvent]]) -> None:
+        super().__init__([])
+        self.event_turns = list(event_turns)
+
+    async def chat_events(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ):
+        self.chat_calls.append({"messages": messages, "tools": tools})
+        for event in self.event_turns.pop(0):
+            yield event
 
 
 def _tool_call(name: str = "fail", call_id: str = "call-1") -> ToolCallData:
@@ -109,6 +127,77 @@ def test_react_event_loop_failed_tool_round_can_still_stream_final_text():
         if event.type == EventType.TEXT_DELTA
     )
     assert text == "recovered"
+
+
+def test_react_event_loop_forwards_provider_text_deltas_without_duplicate_final_text() -> None:
+    async def run():
+        llm = StreamingFakeLLM([[
+            ProviderEvent(ProviderEventType.RESPONSE_CREATED),
+            ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": "live "}),
+            ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": "reply"}),
+            ProviderEvent(
+                ProviderEventType.RESPONSE_COMPLETED,
+                {"finish_reason": "stop", "raw_finish_reason": "stop"},
+            ),
+        ]])
+        events = []
+        async for event in _react_event_loop(
+            llm,
+            [{"role": "user", "content": "hello"}],
+            _registry(),
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    raw_text = "".join(
+        event.data.get("data", {}).get("delta", "")
+        for event in events
+        if event.type == EventType.RAW_RESPONSE_EVENT
+    )
+    final = [event for event in events if event.type == EventType.TEXT_DELTA]
+
+    assert raw_text == "live reply"
+    assert len(final) == 1
+    assert final[0].data == {"text": "live reply", "already_streamed": True}
+
+
+def test_react_event_loop_never_executes_a_length_truncated_tool_call() -> None:
+    async def run():
+        llm = StreamingFakeLLM([[
+            ProviderEvent(ProviderEventType.RESPONSE_CREATED),
+            ProviderEvent(
+                ProviderEventType.FUNCTION_CALL_ARGUMENTS_DELTA,
+                {
+                    "index": 0,
+                    "id": "call-1",
+                    "name": "ok",
+                    "arguments_delta": '{"path":"partial',
+                },
+            ),
+            ProviderEvent(
+                ProviderEventType.RESPONSE_COMPLETED,
+                {"finish_reason": "length", "raw_finish_reason": "length"},
+            ),
+        ]])
+        events = []
+        async for event in _react_event_loop(
+            llm,
+            [{"role": "user", "content": "read a file"}],
+            _registry(),
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    incomplete = [event for event in events if event.type == EventType.INCOMPLETE]
+
+    assert not any(event.type == EventType.TOOL_CALL_START for event in events)
+    assert incomplete[0].data == {
+        "reason": "model_output_limit",
+        "phase": "tool_call",
+        "continuations": 0,
+    }
 
 
 def test_react_event_loop_returns_preflight_to_model_without_executing_or_failing():
@@ -201,7 +290,11 @@ def test_preflight_budget_counts_rounds_that_also_have_successful_tools() -> Non
             fact_gate=gate,
         )
 
-    assert asyncio.run(run()).startswith(PREFLIGHT_BUDGET_MESSAGE)
+    try:
+        asyncio.run(run())
+        assert False, "should have raised IncompleteAgentRunError"
+    except IncompleteAgentRunError as exc:
+        assert exc.reason == "preflight_budget"
 
 
 def test_react_event_loop_uses_decision_response_as_final_text():
@@ -228,6 +321,68 @@ def test_react_event_loop_uses_decision_response_as_final_text():
     )
     assert text == "decision final"
     assert llm.stream_calls == []
+
+
+def test_react_event_loop_continues_after_model_length_finish_reason():
+    async def run():
+        llm = FakeLLM([
+            ChatResponse(text="first half ", finish_reason="length"),
+            ChatResponse(text="second half", finish_reason="stop"),
+        ])
+        events = []
+        async for event in _react_event_loop(
+            llm,
+            [{"role": "user", "content": "answer completely"}],
+            _registry(),
+            max_iters=1,
+        ):
+            events.append(event)
+        return events, llm
+
+    events, llm = asyncio.run(run())
+    text = "".join(
+        event.data.get("text", "")
+        for event in events
+        if event.type == EventType.TEXT_DELTA
+    )
+
+    assert text == "first half second half"
+    assert len(llm.chat_calls) == 2
+    assert llm.chat_calls[1]["messages"][-2] == {
+        "role": "assistant",
+        "content": "first half ",
+    }
+    assert "cut off" in llm.chat_calls[1]["messages"][-1]["content"]
+
+
+def test_react_event_loop_marks_repeated_model_length_as_incomplete():
+    async def run():
+        llm = FakeLLM([
+            ChatResponse(text="part-1 ", finish_reason="length"),
+            ChatResponse(text="part-2 ", finish_reason="length"),
+            ChatResponse(text="part-3", finish_reason="length"),
+        ])
+        events = []
+        async for event in _react_event_loop(
+            llm,
+            [{"role": "user", "content": "answer completely"}],
+            _registry(),
+            max_iters=1,
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    text = "".join(
+        event.data.get("text", "")
+        for event in events
+        if event.type == EventType.TEXT_DELTA
+    )
+    incomplete = [event for event in events if event.type == EventType.INCOMPLETE]
+
+    assert text == "part-1 part-2 part-3"
+    assert len(incomplete) == 1
+    assert incomplete[0].data == {"reason": "model_output_limit", "continuations": 2}
 
 
 def test_react_loop_collects_decision_response_from_canonical_events():
@@ -396,19 +551,101 @@ def test_react_loop_failed_tool_recovery_budget_forces_text_finalization():
             for idx in range(MAX_FAILED_TOOL_RECOVERY_ITERS)
         ]
         llm = FakeLLM([*failures, ChatResponse(text="unused no-tool final")])
-        output = await _react_loop(
+        await _react_loop(
             llm,
             [{"role": "user", "content": "keep trying"}],
             _registry(),
             max_iters=1,
         )
-        return output, llm
 
-    output, llm = asyncio.run(run())
+    try:
+        asyncio.run(run())
+        assert False, "should have raised IncompleteAgentRunError"
+    except IncompleteAgentRunError as exc:
+        assert exc.reason == "tool_failure_budget"
 
-    assert output.startswith(TOOL_FAILURE_BUDGET_MESSAGE)
-    assert llm.chat_calls[-1]["tools"] is not None
-    assert llm.stream_calls == []
+
+# ---------------------------------------------------------------------------
+# P0 regression: text adapters must propagate all terminal states
+# ---------------------------------------------------------------------------
+
+from engine.execution.react_loop import FailedAgentRunError, IncompleteAgentRunError
+
+
+def test_react_loop_raises_on_content_filter():
+    """content_filter INCOMPLETE must not be silently swallowed."""
+    async def run():
+        llm = FakeLLM([ChatResponse(text="partial", finish_reason="content_filter")])
+        return await _react_loop(
+            llm,
+            [{"role": "user", "content": "hi"}],
+            _registry(),
+        )
+
+    try:
+        asyncio.run(run())
+        assert False, "should have raised"
+    except IncompleteAgentRunError as exc:
+        assert exc.reason == "content_filter"
+
+
+def test_react_loop_raises_on_tool_failure_budget():
+    """tool_failure_budget INCOMPLETE must raise, not return partial text."""
+    async def run():
+        failures = [
+            ChatResponse(tool_calls=[_tool_call(call_id=f"call-{i}")])
+            for i in range(MAX_FAILED_TOOL_RECOVERY_ITERS)
+        ]
+        llm = FakeLLM([*failures, ChatResponse(text="unreachable")])
+        return await _react_loop(
+            llm,
+            [{"role": "user", "content": "try"}],
+            _registry(),
+            max_iters=1,
+        )
+
+    try:
+        asyncio.run(run())
+        assert False, "should have raised"
+    except IncompleteAgentRunError as exc:
+        assert exc.reason == "tool_failure_budget"
+
+
+def test_react_loop_raises_on_provider_failure():
+    """FAILED event (provider_finish_error) must raise FailedAgentRunError."""
+    async def run():
+        llm = FakeLLM([ChatResponse(text="oops", finish_reason="error")])
+        return await _react_loop(
+            llm,
+            [{"role": "user", "content": "hi"}],
+            _registry(),
+        )
+
+    try:
+        asyncio.run(run())
+        assert False, "should have raised"
+    except FailedAgentRunError as exc:
+        assert exc.reason == "provider_finish_error"
+
+
+def test_react_stream_loop_raises_on_content_filter():
+    """Stream adapter must also propagate INCOMPLETE."""
+    async def run():
+        llm = FakeLLM([ChatResponse(text="partial", finish_reason="content_filter")])
+        chunks = []
+        async for chunk in _react_stream_loop(
+            llm,
+            [{"role": "user", "content": "hi"}],
+            _registry(),
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    try:
+        asyncio.run(run())
+        assert False, "should have raised"
+    except IncompleteAgentRunError as exc:
+        assert exc.reason == "content_filter"
 
 
 if __name__ == "__main__":

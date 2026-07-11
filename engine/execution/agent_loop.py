@@ -15,17 +15,20 @@ from engine.prompt.assembler import PromptAssembler
 from engine.react_budget import DEFAULT_MAX_REACT_ITERS
 from engine.safety.fact_gate import FactGate, FactGateContext, use_fact_gate
 from engine.safety.tool_guard import ToolGuard
-from engine.skill.executor import execute_skill
+from engine.skill.executor import execute_skill_events
 from engine.skill.registry import SkillRegistry
 from engine.tool.registry import ToolRegistry
 from .backtrack import FailureLoopGuard, FailureSignature
 from .events import EventType, ExecutionEvent
 from .gate import LLMGate, SkillRubricGate
 from .react_loop import (
+    FailedAgentRunError,
+    IncompleteAgentRunError,
     react_event_loop as _react_event_loop,
     react_loop as _react_loop,
     react_stream_loop as _react_stream_loop,
 )
+from .run_stream import AgentRunStream
 from .runtime import EngineRequest, EngineResult, RuntimeContext, RuntimeServices
 from .skill_chain import SkillChain
 from .task_router import (
@@ -115,6 +118,9 @@ async def run_agent_stream(
         rubric_passed = False
 
         while rubric_attempt < _RUBRIC_MAX_RETRIES:
+            output_parts: list[str] = []
+            incomplete_reason: str | None = None
+            output_was_streamed = False
             skill = skill_registry.get(node.skill_name)
             if skill is None:
                 messages = base_messages + [{"role": "user", "content": f"[Skill: {node.skill_name}] {user_message}"}]
@@ -122,7 +128,13 @@ async def run_agent_stream(
                     messages.append({"role": "user", "content": context["_rubric_retry_hint"]})
                 elif rubric_attempt == 2:
                     messages.append({"role": "user", "content": "Switch strategy: try a completely different approach."})
-                output = await _react_loop(llm, messages, tool_registry, tool_guard, max_react_iters)
+                event_stream = _react_event_loop(
+                    llm,
+                    messages,
+                    tool_registry,
+                    tool_guard,
+                    max_react_iters,
+                )
             else:
                 skill_context = dict(context)
                 if rubric_attempt == 1 and skill_context.get("_rubric_retry_hint"):
@@ -130,7 +142,41 @@ async def run_agent_stream(
                 elif rubric_attempt == 2:
                     skill_context["rubric_feedback"] = "Switch strategy: try a completely different approach."
                 messages = [{"role": "user", "content": user_message}]
-                output = await execute_skill(skill, llm, tool_registry, messages, skill_context, max_react_iters, tool_guard=tool_guard)
+                event_stream = execute_skill_events(
+                    skill,
+                    llm,
+                    tool_registry,
+                    messages,
+                    skill_context,
+                    max_react_iters,
+                    tool_guard=tool_guard,
+                )
+
+            async for event in event_stream:
+                if event.type == EventType.TEXT_DELTA:
+                    output_parts.append(str(event.data.get("text", "")))
+                    output_was_streamed = output_was_streamed or bool(
+                        event.data.get("already_streamed")
+                    )
+                    # This node's semantic final text is consumed by its gate
+                    # and emitted once at the end of the whole skill chain.
+                    # Raw provider deltas above remain available for live
+                    # progress without making EngineResult duplicate every
+                    # intermediate skill output.
+                    continue
+                elif event.type == EventType.INCOMPLETE:
+                    incomplete_reason = str(event.data.get("reason", "agent_incomplete"))
+                yield event
+
+            if incomplete_reason:
+                if output_parts:
+                    data: dict[str, object] = {"text": "".join(output_parts)}
+                    if output_was_streamed:
+                        data["already_streamed"] = True
+                    yield ExecutionEvent(EventType.TEXT_DELTA, data)
+                yield ExecutionEvent(EventType.DONE, {})
+                return
+            output = "".join(output_parts)
 
             rubric_result = await _rubric_gate.check(output, context)
             if rubric_result.verdict == "pass":
@@ -155,6 +201,7 @@ async def run_agent_stream(
 
         if gate_result.verdict == "pass":
             context[f"{node.skill_name}_output"] = output
+            context[f"_{node.skill_name}_output_was_streamed"] = output_was_streamed
             # Checkpoint save after each successful skill node
             session_id = str(context.get("session_id") or "")
             profile_dir = str(context.get("_profile_dir") or "")
@@ -201,7 +248,10 @@ async def run_agent_stream(
     for node in reversed(skill_chain.nodes):
         key = f"{node.skill_name}_output"
         if key in context:
-            yield ExecutionEvent(EventType.TEXT_DELTA, {"text": context[key]})
+            data: dict[str, object] = {"text": context[key]}
+            if context.get(f"_{node.skill_name}_output_was_streamed"):
+                data["already_streamed"] = True
+            yield ExecutionEvent(EventType.TEXT_DELTA, data)
             break
 
     # Clear checkpoint on successful completion
@@ -397,7 +447,10 @@ async def _run_forced_skill_stream(
     yield ExecutionEvent(EventType.SKILL_START, {"skill": forced_skill, "index": 0})
     messages = [*(history or []), {"role": "user", "content": user_message}]
     context = {"user_message": user_message, "task_type": "skill", "forced_skill": forced_skill}
-    output = await execute_skill(
+    output_parts: list[str] = []
+    incomplete_reason: str | None = None
+    output_was_streamed = False
+    async for event in execute_skill_events(
         skill,
         llm,
         tool_registry,
@@ -405,9 +458,28 @@ async def _run_forced_skill_stream(
         context,
         max_react_iters,
         tool_guard=tool_guard,
-    )
+    ):
+        if event.type == EventType.TEXT_DELTA:
+            output_parts.append(str(event.data.get("text", "")))
+            output_was_streamed = output_was_streamed or bool(event.data.get("already_streamed"))
+            continue
+        elif event.type == EventType.INCOMPLETE:
+            incomplete_reason = str(event.data.get("reason", "agent_incomplete"))
+        yield event
+    if incomplete_reason:
+        if output_parts:
+            data: dict[str, object] = {"text": "".join(output_parts)}
+            if output_was_streamed:
+                data["already_streamed"] = True
+            yield ExecutionEvent(EventType.TEXT_DELTA, data)
+        yield ExecutionEvent(EventType.DONE, {})
+        return
+    output = "".join(output_parts)
     yield ExecutionEvent(EventType.SKILL_END, {"skill": forced_skill, "status": "passed"})
-    yield ExecutionEvent(EventType.TEXT_DELTA, {"text": output})
+    data: dict[str, object] = {"text": output}
+    if output_was_streamed:
+        data["already_streamed"] = True
+    yield ExecutionEvent(EventType.TEXT_DELTA, data)
     yield ExecutionEvent(EventType.DONE, {})
 
 
@@ -447,18 +519,60 @@ def _fact_gate_for_request(request: EngineRequest, runtime: RuntimeContext) -> F
     ))
 
 
-async def reply_with_runtime(
+async def _persist_completed_runtime_learning(
+    runtime: RuntimeContext,
+    user_message: str,
+    reply_text: str,
+    had_tools: bool,
+) -> None:
+    try:
+        await _persist_runtime_learning(runtime, user_message, reply_text, had_tools)
+    except Exception:
+        logger.warning("failed to finalize conversation memory", exc_info=True)
+
+
+async def _close_runtime_services(services: RuntimeServices) -> None:
+    try:
+        await services.close()
+    except Exception:
+        logger.warning("failed to close engine runtime services", exc_info=True)
+
+
+def run_stream_with_runtime(
     request: EngineRequest,
     runtime: RuntimeContext,
     services: RuntimeServices,
-) -> EngineResult:
-    """Run one engine request using an explicit runtime contract."""
-    s = await prepare_runtime(request, runtime, services)
-    guard = FailureLoopGuard()
+) -> AgentRunStream:
+    """Create a typed, single-consumer stream for one Agent run.
 
+    The shape deliberately follows the useful lifecycle of
+    ``Runner.run_streamed()``: callers receive a stream object, drain its
+    events, and only then rely on its terminal state.
+    """
+    run_id = uuid4().hex
+    return AgentRunStream(
+        run_id,
+        _run_events_with_runtime(request, runtime, services, run_id),
+    )
+
+
+async def _run_events_with_runtime(
+    request: EngineRequest,
+    runtime: RuntimeContext,
+    services: RuntimeServices,
+    run_id: str,
+) -> AsyncGenerator[ExecutionEvent, None]:
+    """Produce one complete run, including persistence and cleanup before terminal state."""
+    full_text: list[str] = []
+    had_tools = False
+    terminal_status = "completed"
+    terminal_reason: str | None = None
+    drained = False
+
+    yield ExecutionEvent(EventType.RUN_STARTED, {"run_id": run_id})
     try:
-        full_text: list[str] = []
-        had_tools = False
+        s = await prepare_runtime(request, runtime, services)
+        guard = FailureLoopGuard()
         with use_fact_gate(_fact_gate_for_request(request, runtime)):
             async for event in run_agent_stream(
                 services.llm,
@@ -475,15 +589,81 @@ async def reply_with_runtime(
                 execution_context=_runtime_execution_context(runtime),
             ):
                 if event.type == EventType.TEXT_DELTA:
-                    full_text.append(event.data.get("text", ""))
+                    full_text.append(str(event.data.get("text", "")))
+                elif event.type == EventType.INCOMPLETE:
+                    terminal_status = "incomplete"
+                    terminal_reason = str(event.data.get("reason", "agent_incomplete"))
+                elif event.type == EventType.FAILED:
+                    terminal_status = "failed"
+                    terminal_reason = str(event.data.get("reason", "agent_failed"))
+                elif event.type == EventType.BLOCKED and terminal_status == "completed":
+                    terminal_status = "incomplete"
+                    terminal_reason = "blocked"
                 elif _has_memory_worthy_activity(event):
                     had_tools = True
-
-        result = "".join(full_text)
-        await _persist_runtime_learning(runtime, request.message, result, had_tools)
-        return EngineResult(text=result, had_tools=had_tools)
+                yield event
+        drained = True
+    except Exception as exc:
+        # 准备运行时、LLM、网络和工具异常都转为显式终态，避免 SSE 静默断开。
+        # 异常详情只进服务端日志，不透给前端（可能含 base_url / 请求细节）。
+        logger.exception("agent execution failed (agent=%s)", runtime.agent_id)
+        terminal_status = "failed"
+        terminal_reason = "execution_error"
+        yield ExecutionEvent(EventType.TEXT_DELTA, {
+            "text": f"⚠️ 执行失败：{type(exc).__name__}（详情见服务端日志）",
+        })
+        yield ExecutionEvent(EventType.FAILED, {"reason": terminal_reason})
+        yield ExecutionEvent(EventType.DONE, {})
+        drained = True
     finally:
-        await services.close()
+        # A client-side cancellation closes this generator before it drains.
+        # Do not write a successful memory record for a partial abandoned run.
+        if drained and terminal_status == "completed":
+            await _persist_completed_runtime_learning(
+                runtime,
+                request.message,
+                "".join(full_text),
+                had_tools,
+            )
+        await _close_runtime_services(services)
+
+    if drained:
+        terminal_data: dict[str, str] = {"run_id": run_id, "status": terminal_status}
+        if terminal_reason:
+            terminal_data["reason"] = terminal_reason
+        yield ExecutionEvent(EventType.RUN_FINISHED, terminal_data)
+
+
+async def reply_with_runtime(
+    request: EngineRequest,
+    runtime: RuntimeContext,
+    services: RuntimeServices,
+) -> EngineResult:
+    """Run one engine request using the same complete stream lifecycle as SSE."""
+    full_text: list[str] = []
+    had_tools = False
+    incomplete_reason: str | None = None
+    failed_reason: str | None = None
+
+    stream = run_stream_with_runtime(request, runtime, services)
+    async for event in stream.stream_events():
+        if event.type == EventType.TEXT_DELTA:
+            full_text.append(str(event.data.get("text", "")))
+        elif event.type == EventType.INCOMPLETE:
+            incomplete_reason = str(event.data.get("reason", "agent_incomplete"))
+        elif event.type == EventType.FAILED:
+            failed_reason = str(event.data.get("reason", "agent_failed"))
+        elif _has_memory_worthy_activity(event):
+            had_tools = True
+
+    if not stream.is_complete:
+        raise RuntimeError("Agent run ended before a terminal state was emitted.")
+    if stream.status == "failed" or failed_reason:
+        raise RuntimeError(failed_reason or stream.reason or "agent_failed")
+    if stream.status == "incomplete" or incomplete_reason:
+        raise IncompleteAgentRunError(incomplete_reason or stream.reason or "agent_incomplete")
+
+    return EngineResult(text="".join(full_text), had_tools=had_tools)
 
 
 async def reply_events_with_runtime(
@@ -491,46 +671,10 @@ async def reply_events_with_runtime(
     runtime: RuntimeContext,
     services: RuntimeServices,
 ) -> AsyncGenerator[ExecutionEvent, None]:
-    """Event-streaming entry point over an explicit runtime contract."""
-    s = await prepare_runtime(request, runtime, services)
-    guard = FailureLoopGuard()
-
-    full_text = []
-    had_tools = False
-    try:
-        try:
-            with use_fact_gate(_fact_gate_for_request(request, runtime)):
-                async for event in run_agent_stream(
-                    services.llm,
-                    s.system_prompt,
-                    _merge_context(request.message, request.context),
-                    services.tool_registry,
-                    services.skill_registry,
-                    s.task_type,
-                    s.chain,
-                    guard,
-                    tool_guard=services.tool_guard,
-                    history=request.history,
-                    forced_skill=request.forced_skill,
-                    execution_context=_runtime_execution_context(runtime),
-                ):
-                    if event.type == EventType.TEXT_DELTA:
-                        full_text.append(event.data.get("text", ""))
-                    elif _has_memory_worthy_activity(event):
-                        had_tools = True
-                    yield event
-        except Exception as e:
-            # 任一环节失败（LLM 超长上下文/网络/工具崩溃）：优雅收尾，SSE 流不裸断。
-            # 异常详情只进服务端日志，不透给前端（可能含 base_url / 请求细节）。
-            logger.exception("agent execution failed (agent=%s)", runtime.agent_id)
-            yield ExecutionEvent(EventType.TEXT_DELTA, {
-                "text": f"⚠️ 执行失败：{type(e).__name__}（详情见服务端日志）",
-            })
-            yield ExecutionEvent(EventType.DONE, {})
-    finally:
-        full = "".join(full_text)
-        await _persist_runtime_learning(runtime, request.message, full, had_tools)
-        await services.close()
+    """Compatibility adapter over :func:`run_stream_with_runtime`."""
+    stream = run_stream_with_runtime(request, runtime, services)
+    async for event in stream.stream_events():
+        yield event
 
 
 async def reply(
@@ -581,8 +725,16 @@ async def reply_stream_with_runtime(
 ) -> AsyncGenerator[str, None]:
     """Text-only stream adapter over reply_events_with_runtime()."""
     async for event in reply_events_with_runtime(request, runtime, services):
-        if event.type == EventType.TEXT_DELTA:
-            yield event.data.get("text", "")
+        if event.type == EventType.RAW_RESPONSE_EVENT:
+            raw_type = event.data.get("type")
+            raw_data = event.data.get("data")
+            if raw_type == "response.output_text.delta" and isinstance(raw_data, dict):
+                text = raw_data.get("delta")
+                if isinstance(text, str) and text:
+                    yield text
+        elif event.type == EventType.TEXT_DELTA:
+            if not event.data.get("already_streamed"):
+                yield event.data.get("text", "")
         elif event.type == EventType.SKILL_START:
             yield f"\n[⚙ {event.data.get('skill', '')}]\n"
         elif event.type == EventType.GATE_RESULT:
