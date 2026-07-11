@@ -10,6 +10,7 @@ from engine.execution.gate import GateResult
 from engine.execution.skill_chain import SkillChain, SkillNode
 from engine.execution.task_router import TaskType
 from engine.llm.client import ChatResponse
+from engine.llm.events import ProviderEvent, ProviderEventType
 from engine.skill.loader import SkillBody, SkillMeta
 
 
@@ -25,6 +26,26 @@ class FakeLLM:
                 "Completed the requested work with evidence in "
                 "engine/execution/agent_loop.py and enough detail for review."
             )
+        )
+
+
+class StreamingFakeLLM(FakeLLM):
+    stream = True
+
+    async def chat_events(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ):
+        text = (
+            "Completed the requested work with evidence in "
+            "engine/execution/agent_loop.py and enough detail for review."
+        )
+        yield ProviderEvent(ProviderEventType.RESPONSE_CREATED)
+        yield ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": text})
+        yield ProviderEvent(
+            ProviderEventType.RESPONSE_COMPLETED,
+            {"finish_reason": "stop", "raw_finish_reason": "stop"},
         )
 
 
@@ -70,3 +91,29 @@ def test_run_agent_stream_saves_and_clears_checkpoint(tmp_path: Path) -> None:
         return saw_checkpoint
 
     assert asyncio.run(run())
+
+
+def test_run_agent_stream_forwards_provider_events_from_skill_nodes() -> None:
+    async def run():
+        events = []
+        async for event in run_agent_stream(
+            StreamingFakeLLM(),
+            "system prompt",
+            "build a feature",
+            FakeToolRegistry(),
+            FakeSkillRegistry(),
+            TaskType.FEATURE,
+            SkillChain([SkillNode("planning", PassingGate())]),
+            FailureLoopGuard(),
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+
+    assert any(event.type == EventType.PROVISIONAL_TEXT_DELTA for event in events)
+    assert any(event.type == EventType.PROVISIONAL_COMMIT for event in events)
+    assert [event.data["text"] for event in events if event.type == EventType.TEXT_DELTA] == [
+        "Completed the requested work with evidence in "
+        "engine/execution/agent_loop.py and enough detail for review."
+    ]

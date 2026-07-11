@@ -18,6 +18,8 @@ from typing import Any
 class EventType(str, Enum):
     """All event types emitted during agent execution."""
 
+    RUN_STARTED = "run_started"             # 一次 Agent run 已开始
+    RAW_RESPONSE_EVENT = "raw_response_event"  # Provider 原始流事件（已规范化）
     THINKING = "thinking"                   # LLM 推理中（一轮 ReAct 决策开始）
     TEXT_DELTA = "text_delta"               # 增量文本输出
     TOOL_CALL_START = "tool_call_start"     # 工具执行开始
@@ -29,7 +31,13 @@ class EventType(str, Enum):
     BACKTRACK = "backtrack"                 # 回溯到更早的节点
     BLOCKED = "blocked"                     # 执行阻塞，需要人工介入
     TOKEN_USAGE = "token_usage"             # LLM token 使用量
+    PROVISIONAL_TEXT_DELTA = "provisional_text_delta"  # 技能链内未过门禁的草稿文本
+    PROVISIONAL_COMMIT = "provisional_commit"        # 门禁通过，草稿转正
+    PROVISIONAL_RETRACT = "provisional_retract"      # 门禁失败，撤回草稿
+    INCOMPLETE = "incomplete"               # 因预算或模型输出限制而未完成
+    FAILED = "failed"                       # 执行异常，未能正常完成
     DONE = "done"                           # 执行完成
+    RUN_FINISHED = "run_finished"           # 所有后处理完成后的 run 终态
 
 
 @dataclass

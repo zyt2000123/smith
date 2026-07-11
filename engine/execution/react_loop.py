@@ -326,18 +326,22 @@ async def react_event_loop(
         stream_events = getattr(llm, "chat_events", None)
         if getattr(llm, "stream", False) and callable(stream_events):
             accumulator = _ProviderResponseAccumulator()
-            saw_provider_event = False
+            saw_content_event = False
             try:
                 async for provider_event in stream_events(conversation, tools=tools):
-                    saw_provider_event = True
                     accumulator.add(provider_event)
                     yield _raw_response_event(provider_event)
+                    # ponytail: only block fallback after user-visible content
+                    if not saw_content_event and provider_event.type in (
+                        ProviderEventType.OUTPUT_TEXT_DELTA,
+                        ProviderEventType.FUNCTION_CALL_ARGUMENTS_DELTA,
+                    ):
+                        saw_content_event = True
             except Exception:
-                # A provider that rejects streaming before sending any event can
-                # still use the established non-streaming path.  Once any
-                # delta is observed, retrying would risk duplicate tool calls
-                # or duplicate user-visible text, so the run must fail.
-                if saw_provider_event:
+                # Fallback to non-streaming only if no text/tool content was
+                # emitted.  Metadata events (response.created, usage) are safe
+                # to discard; text or tool-call fragments are not.
+                if saw_content_event:
                     raise
                 response = await llm.chat(conversation, tools=tools)
             else:
@@ -438,6 +442,8 @@ async def react_event_loop(
                 continue
             if final_text:
                 yield _text_event(final_text, already_streamed=final_text_was_streamed)
+            elif not had_successful_tool:
+                yield ExecutionEvent(EventType.INCOMPLETE, {"reason": "empty_model_response"})
             return
 
         policy.begin_round()

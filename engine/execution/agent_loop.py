@@ -152,17 +152,24 @@ async def run_agent_stream(
                     tool_guard=tool_guard,
                 )
 
+            provision_id = f"{node.skill_name}:{node_idx}:{rubric_attempt}"
             async for event in event_stream:
                 if event.type == EventType.TEXT_DELTA:
                     output_parts.append(str(event.data.get("text", "")))
                     output_was_streamed = output_was_streamed or bool(
                         event.data.get("already_streamed")
                     )
-                    # This node's semantic final text is consumed by its gate
-                    # and emitted once at the end of the whole skill chain.
-                    # Raw provider deltas above remain available for live
-                    # progress without making EngineResult duplicate every
-                    # intermediate skill output.
+                    continue
+                elif event.type == EventType.RAW_RESPONSE_EVENT:
+                    raw_type = event.data.get("type")
+                    raw_data = event.data.get("data")
+                    if raw_type == "response.output_text.delta" and isinstance(raw_data, dict):
+                        delta = raw_data.get("delta")
+                        if isinstance(delta, str) and delta:
+                            yield ExecutionEvent(EventType.PROVISIONAL_TEXT_DELTA, {
+                                "text": delta,
+                                "provision_id": provision_id,
+                            })
                     continue
                 elif event.type == EventType.INCOMPLETE:
                     incomplete_reason = str(event.data.get("reason", "agent_incomplete"))
@@ -188,6 +195,9 @@ async def run_agent_stream(
         context.pop("_rubric_retry_hint", None)
 
         if not rubric_passed:
+            yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
+                "provision_id": provision_id, "reason": rubric_result.reason,
+            })
             yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": rubric_result.reason})
             yield ExecutionEvent(EventType.DONE, {})
             return
@@ -200,6 +210,7 @@ async def run_agent_stream(
         })
 
         if gate_result.verdict == "pass":
+            yield ExecutionEvent(EventType.PROVISIONAL_COMMIT, {"provision_id": provision_id})
             context[f"{node.skill_name}_output"] = output
             context[f"_{node.skill_name}_output_was_streamed"] = output_was_streamed
             # Checkpoint save after each successful skill node
@@ -225,6 +236,10 @@ async def run_agent_stream(
 
         sig = FailureSignature(error_type=node.skill_name, context_hash=hashlib.md5(output.encode()).hexdigest()[:8])
         action = guard.record(sig)
+
+        yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
+            "provision_id": provision_id, "reason": gate_result.reason,
+        })
 
         if action == "blocked":
             yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": gate_result.reason})
