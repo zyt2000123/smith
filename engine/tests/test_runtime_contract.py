@@ -3,7 +3,14 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from engine.execution.agent_loop import reply_events_with_runtime, reply_with_runtime
+import pytest
+
+from engine.execution import agent_loop as agent_loop_module
+from engine.execution.agent_loop import (
+    reply_events_with_runtime,
+    reply_with_runtime,
+    run_stream_with_runtime,
+)
 from engine.execution.events import EventType
 from engine.execution.runtime import EngineRequest, RuntimeContext, RuntimeServices
 from engine.llm.client import ChatResponse, ToolCallData
@@ -74,7 +81,6 @@ def _runtime(tmp_path: Path) -> tuple[RuntimeContext, RuntimeServices, FakeLLM]:
     _write_profile(profile_dir)
     (agents_dir / "tools").mkdir(parents=True)
     (agents_dir / "skills").mkdir(parents=True)
-
     llm = FakeLLM()
     runtime = RuntimeContext(
         agent_id="smith",
@@ -144,4 +150,65 @@ def test_reply_events_with_runtime_emits_decision_reply_and_closes(tmp_path: Pat
 
     chunks, llm = asyncio.run(run())
     assert chunks == ["runtime reply"]
+    assert llm.closed is True
+
+
+def test_runtime_services_close_closes_the_gate_client(tmp_path: Path) -> None:
+    runtime, services, llm = _runtime(tmp_path)
+    gate_llm = FakeLLM()
+    services.gate_llm = gate_llm  # type: ignore[assignment]
+
+    asyncio.run(services.close())
+
+    assert runtime.agent_id == "smith"
+    assert llm.closed is True
+    assert gate_llm.closed is True
+
+
+def test_run_stream_reports_terminal_state_only_after_it_is_drained(tmp_path: Path) -> None:
+    async def run():
+        runtime, services, _ = _runtime(tmp_path)
+        stream = run_stream_with_runtime(EngineRequest(message="hello"), runtime, services)
+        assert stream.is_complete is False
+        events = [event async for event in stream.stream_events()]
+        return stream, events
+
+    stream, events = asyncio.run(run())
+
+    assert events[0].type == EventType.RUN_STARTED
+    assert events[-1].type == EventType.RUN_FINISHED
+    assert events[-1].data["run_id"] == stream.run_id
+    assert events[-1].data["status"] == "completed"
+    assert stream.is_complete is True
+    assert stream.status == "completed"
+
+
+def test_reply_events_with_runtime_reports_prepare_failure_and_closes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def broken_prepare(*args, **kwargs):
+        raise RuntimeError("profile setup failed")
+
+    async def run() -> tuple[list[EventType], FakeLLM]:
+        runtime, services, llm = _runtime(tmp_path)
+        events = []
+        async for event in reply_events_with_runtime(
+            EngineRequest(message="hello"),
+            runtime,
+            services,
+        ):
+            events.append(event)
+        return [event.type for event in events], llm
+
+    monkeypatch.setattr(agent_loop_module, "prepare_runtime", broken_prepare)
+    event_types, llm = asyncio.run(run())
+
+    assert event_types == [
+        EventType.RUN_STARTED,
+        EventType.TEXT_DELTA,
+        EventType.FAILED,
+        EventType.DONE,
+        EventType.RUN_FINISHED,
+    ]
     assert llm.closed is True

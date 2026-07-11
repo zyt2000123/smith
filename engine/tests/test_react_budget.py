@@ -7,7 +7,11 @@ from engine.execution.events import EventType
 from engine.llm.client import ChatResponse, ToolCallData
 from engine.llm.events import ProviderEvent, ProviderEventType
 from engine.react_budget import (
+    CONVERSATION_HARD_LIMIT,
+    CONVERSATION_KEEP_HEAD,
+    CONVERSATION_KEEP_RECENT,
     MAX_FAILED_TOOL_RECOVERY_ITERS,
+    MAX_IDENTICAL_TOOL_ERRORS,
     MAX_PREFLIGHT_CHALLENGE_ITERS,
     PREFLIGHT_BUDGET_MESSAGE,
     TOOL_FAILURE_BUDGET_MESSAGE,
@@ -77,10 +81,14 @@ def _registry() -> ToolRegistry:
     async def fail():
         return "Error: boom"
 
+    async def fail_alt():
+        return "Error: kaboom"
+
     async def ok():
         return "OK"
 
     registry.register("fail", "Always fails", {}, fail)
+    registry.register("fail_alt", "Also fails", {}, fail_alt)
     registry.register("ok", "Succeeds", {}, ok)
     return registry
 
@@ -160,6 +168,79 @@ def test_react_event_loop_forwards_provider_text_deltas_without_duplicate_final_
     assert raw_text == "live reply"
     assert len(final) == 1
     assert final[0].data == {"text": "live reply", "already_streamed": True}
+
+
+def test_react_event_loop_retracts_streamed_draft_before_repairing_final_answer() -> None:
+    async def run():
+        llm = StreamingFakeLLM([
+            [
+                ProviderEvent(
+                    ProviderEventType.FUNCTION_CALL_ARGUMENTS_DELTA,
+                    {"index": 0, "id": "tool-1", "name": "ok", "arguments_delta": "{}"},
+                ),
+                ProviderEvent(ProviderEventType.RESPONSE_COMPLETED, {"finish_reason": "stop"}),
+            ],
+            [
+                ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": "让我再查一下。"}),
+                ProviderEvent(ProviderEventType.RESPONSE_COMPLETED, {"finish_reason": "stop"}),
+            ],
+            [
+                ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": "最终答案。"}),
+                ProviderEvent(ProviderEventType.RESPONSE_COMPLETED, {"finish_reason": "stop"}),
+            ],
+        ])
+        return [
+            event
+            async for event in _react_event_loop(
+                llm,
+                [{"role": "user", "content": "answer with evidence"}],
+                _registry(),
+                max_iters=2,
+            )
+        ]
+
+    events = asyncio.run(run())
+    drafts = [event.data for event in events if event.type == EventType.PROVISIONAL_TEXT_DELTA]
+    retractions = [event.data for event in events if event.type == EventType.PROVISIONAL_RETRACT]
+    commits = [event.data for event in events if event.type == EventType.PROVISIONAL_COMMIT]
+    finals = [event.data for event in events if event.type == EventType.TEXT_DELTA]
+
+    assert [draft["text"] for draft in drafts] == ["让我再查一下。", "最终答案。"]
+    assert retractions == [{"provision_id": drafts[0]["provision_id"], "reason": "incomplete_final_repair"}]
+    assert commits == [{"provision_id": drafts[1]["provision_id"]}]
+    assert finals == [{"text": "最终答案。", "already_streamed": True}]
+
+
+def test_react_stream_loop_hides_retracted_provisional_draft() -> None:
+    async def run() -> list[str]:
+        llm = StreamingFakeLLM([
+            [
+                ProviderEvent(
+                    ProviderEventType.FUNCTION_CALL_ARGUMENTS_DELTA,
+                    {"index": 0, "id": "tool-1", "name": "ok", "arguments_delta": "{}"},
+                ),
+                ProviderEvent(ProviderEventType.RESPONSE_COMPLETED, {"finish_reason": "stop"}),
+            ],
+            [
+                ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": "让我再查一下。"}),
+                ProviderEvent(ProviderEventType.RESPONSE_COMPLETED, {"finish_reason": "stop"}),
+            ],
+            [
+                ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": "最终答案。"}),
+                ProviderEvent(ProviderEventType.RESPONSE_COMPLETED, {"finish_reason": "stop"}),
+            ],
+        ])
+        return [
+            chunk
+            async for chunk in _react_stream_loop(
+                llm,
+                [{"role": "user", "content": "answer with evidence"}],
+                _registry(),
+                max_iters=2,
+            )
+        ]
+
+    assert asyncio.run(run()) == ["最终答案。"]
 
 
 def test_react_event_loop_never_executes_a_length_truncated_tool_call() -> None:
@@ -355,6 +436,58 @@ def test_react_event_loop_continues_after_model_length_finish_reason():
     assert "cut off" in llm.chat_calls[1]["messages"][-1]["content"]
 
 
+def test_react_event_loop_discards_length_draft_when_continuation_calls_tool():
+    async def run():
+        llm = StreamingFakeLLM([
+            [
+                ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": "partial "}),
+                ProviderEvent(
+                    ProviderEventType.RESPONSE_COMPLETED,
+                    {"finish_reason": "length", "raw_finish_reason": "length"},
+                ),
+            ],
+            [
+                ProviderEvent(
+                    ProviderEventType.FUNCTION_CALL_ARGUMENTS_DELTA,
+                    {"index": 0, "id": "tool-1", "name": "ok", "arguments_delta": "{}"},
+                ),
+                ProviderEvent(
+                    ProviderEventType.RESPONSE_COMPLETED,
+                    {"finish_reason": "tool_calls", "raw_finish_reason": "tool_calls"},
+                ),
+            ],
+            [
+                ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": "answer"}),
+                ProviderEvent(
+                    ProviderEventType.RESPONSE_COMPLETED,
+                    {"finish_reason": "stop", "raw_finish_reason": "stop"},
+                ),
+            ],
+        ])
+        return [
+            event
+            async for event in _react_event_loop(
+                llm,
+                [{"role": "user", "content": "answer completely"}],
+                _registry(),
+                max_iters=2,
+            )
+        ]
+
+    events = asyncio.run(run())
+    drafts = [event.data for event in events if event.type == EventType.PROVISIONAL_TEXT_DELTA]
+    retractions = [event.data for event in events if event.type == EventType.PROVISIONAL_RETRACT]
+    commits = [event.data for event in events if event.type == EventType.PROVISIONAL_COMMIT]
+    finals = [event.data for event in events if event.type == EventType.TEXT_DELTA]
+
+    assert [draft["text"] for draft in drafts] == ["partial ", "answer"]
+    assert retractions == [
+        {"provision_id": drafts[0]["provision_id"], "reason": "tool_call_pending"},
+    ]
+    assert commits == [{"provision_id": drafts[1]["provision_id"]}]
+    assert finals == [{"text": "answer", "already_streamed": True}]
+
+
 def test_react_event_loop_marks_repeated_model_length_as_incomplete():
     async def run():
         llm = FakeLLM([
@@ -547,7 +680,9 @@ def test_execute_skill_failed_tool_round_does_not_consume_main_budget():
 def test_react_loop_failed_tool_recovery_budget_forces_text_finalization():
     async def run():
         failures = [
-            ChatResponse(tool_calls=[_tool_call(call_id=f"call-{idx}")])
+            ChatResponse(tool_calls=[
+                _tool_call(name="fail" if idx % 2 == 0 else "fail_alt", call_id=f"call-{idx}")
+            ])
             for idx in range(MAX_FAILED_TOOL_RECOVERY_ITERS)
         ]
         llm = FakeLLM([*failures, ChatResponse(text="unused no-tool final")])
@@ -572,6 +707,49 @@ def test_react_loop_failed_tool_recovery_budget_forces_text_finalization():
 from engine.execution.react_loop import FailedAgentRunError, IncompleteAgentRunError
 
 
+def test_react_event_loop_marks_empty_final_after_successful_tool_incomplete():
+    async def run():
+        llm = FakeLLM([
+            ChatResponse(tool_calls=[_tool_call("ok")]),
+            ChatResponse(text=""),
+        ])
+        return [
+            event
+            async for event in _react_event_loop(
+                llm,
+                [{"role": "user", "content": "use a tool"}],
+                _registry(),
+                max_iters=2,
+            )
+        ]
+
+    events = asyncio.run(run())
+
+    assert [event.data for event in events if event.type == EventType.INCOMPLETE] == [
+        {"reason": "empty_model_response"},
+    ]
+
+
+def test_react_loop_raises_on_empty_final_after_successful_tool():
+    async def run():
+        llm = FakeLLM([
+            ChatResponse(tool_calls=[_tool_call("ok")]),
+            ChatResponse(text=""),
+        ])
+        return await _react_loop(
+            llm,
+            [{"role": "user", "content": "use a tool"}],
+            _registry(),
+            max_iters=2,
+        )
+
+    try:
+        asyncio.run(run())
+        assert False, "should have raised"
+    except IncompleteAgentRunError as exc:
+        assert exc.reason == "empty_model_response"
+
+
 def test_react_loop_raises_on_content_filter():
     """content_filter INCOMPLETE must not be silently swallowed."""
     async def run():
@@ -593,7 +771,9 @@ def test_react_loop_raises_on_tool_failure_budget():
     """tool_failure_budget INCOMPLETE must raise, not return partial text."""
     async def run():
         failures = [
-            ChatResponse(tool_calls=[_tool_call(call_id=f"call-{i}")])
+            ChatResponse(tool_calls=[
+                _tool_call(name="fail" if i % 2 == 0 else "fail_alt", call_id=f"call-{i}")
+            ])
             for i in range(MAX_FAILED_TOOL_RECOVERY_ITERS)
         ]
         llm = FakeLLM([*failures, ChatResponse(text="unreachable")])
@@ -646,6 +826,87 @@ def test_react_stream_loop_raises_on_content_filter():
         assert False, "should have raised"
     except IncompleteAgentRunError as exc:
         assert exc.reason == "content_filter"
+
+
+def test_react_event_loop_identical_tool_error_short_circuits():
+    """Repeated identical tool errors should exit before recovery budget."""
+    async def run():
+        failures = [
+            ChatResponse(tool_calls=[_tool_call(call_id=f"call-{i}")])
+            for i in range(MAX_IDENTICAL_TOOL_ERRORS)
+        ]
+        llm = FakeLLM([*failures, ChatResponse(text="unreachable")])
+        return [
+            event
+            async for event in _react_event_loop(
+                llm,
+                [{"role": "user", "content": "try"}],
+                _registry(),
+                max_iters=MAX_IDENTICAL_TOOL_ERRORS + 5,
+            )
+        ]
+
+    events = asyncio.run(run())
+    incomplete = [e for e in events if e.type == EventType.INCOMPLETE]
+    assert len(incomplete) == 1
+    assert incomplete[0].data["reason"] == "identical_tool_error_loop"
+
+
+def test_react_event_loop_conversation_pruning_keeps_head():
+    """Pruning must keep system + first user message, not just conversation[0]."""
+    async def run():
+        base = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "important initial question"},
+        ]
+        padding = []
+        for i in range(CONVERSATION_HARD_LIMIT):
+            padding.append({"role": "assistant", "content": f"reply-{i}"})
+            padding.append({"role": "user", "content": f"follow-up-{i}"})
+        llm = FakeLLM([ChatResponse(text="final")])
+        events = []
+        async for event in _react_event_loop(
+            llm,
+            base + padding,
+            _registry(),
+            max_iters=1,
+        ):
+            events.append(event)
+        return llm.chat_calls[0]["messages"]
+
+    messages = asyncio.run(run())
+    assert messages[0] == {"role": "system", "content": "system prompt"}
+    assert messages[1] == {"role": "user", "content": "important initial question"}
+    assert len(messages) == CONVERSATION_KEEP_HEAD + CONVERSATION_KEEP_RECENT
+
+
+def test_react_event_loop_stream_fallback_on_early_error():
+    """If streaming fails before any content, fall back to llm.chat()."""
+    async def run():
+        class FailStreamLLM(FakeLLM):
+            stream = True
+
+            async def chat_events(self, messages, tools=None):
+                raise ConnectionError("stream died")
+                yield  # make it an async generator
+
+        llm = FailStreamLLM([ChatResponse(text="fallback result")])
+        return [
+            event
+            async for event in _react_event_loop(
+                llm,
+                [{"role": "user", "content": "hello"}],
+                _registry(),
+            )
+        ]
+
+    events = asyncio.run(run())
+    text = "".join(
+        e.data.get("text", "")
+        for e in events
+        if e.type == EventType.TEXT_DELTA
+    )
+    assert text == "fallback result"
 
 
 if __name__ == "__main__":

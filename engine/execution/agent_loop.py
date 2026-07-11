@@ -20,7 +20,7 @@ from uuid import uuid4
 if TYPE_CHECKING:
     pass
 
-from engine.llm.client import LLMClient
+from engine.llm.port import LLMPort
 from engine.prompt.assembler import PromptAssembler
 from engine.react_budget import DEFAULT_MAX_REACT_ITERS
 from engine.safety.fact_gate import FactGate, FactGateContext, use_fact_gate
@@ -66,7 +66,7 @@ _HIDDEN_DEFAULT_TOOLS = frozenset({
 
 
 async def run_agent_stream(
-    llm: LLMClient,
+    llm: LLMPort,
     system_prompt: str,
     user_message: str,
     tool_registry: ToolRegistry,
@@ -79,6 +79,7 @@ async def run_agent_stream(
     history: list[dict] | None = None,
     forced_skill: str | None = None,
     execution_context: dict | None = None,
+    gate_llm: LLMPort | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Route to the right execution path and yield events."""
     if forced_skill:
@@ -111,7 +112,7 @@ async def run_agent_stream(
     async for event in run_pipeline(
         skill_chain, llm, user_message, base_messages,
         tool_registry, skill_registry, tool_guard, guard,
-        max_react_iters, context,
+        max_react_iters, context, gate_llm=gate_llm,
     ):
         yield event
 
@@ -122,7 +123,7 @@ async def run_agent_stream(
 
 
 async def _run_forced_skill_stream(
-    llm: LLMClient,
+    llm: LLMPort,
     system_prompt: str,
     tool_registry: ToolRegistry,
     skill_registry: SkillRegistry,
@@ -153,7 +154,7 @@ async def _run_forced_skill_stream(
     if execution_context:
         context.update({k: v for k, v in execution_context.items() if v is not None})
     output_parts: list[str] = []
-    terminal_reason: str | None = None
+    output_was_streamed = False
     terminal_type: str | None = None
     async for event in execute_skill_events(
         skill, llm, tool_registry, messages, context,
@@ -161,23 +162,28 @@ async def _run_forced_skill_stream(
     ):
         if event.type == EventType.TEXT_DELTA:
             output_parts.append(str(event.data.get("text", "")))
+            output_was_streamed = output_was_streamed or bool(event.data.get("already_streamed"))
             continue
         elif event.type == EventType.INCOMPLETE:
-            terminal_reason = str(event.data.get("reason", "agent_incomplete"))
             terminal_type = "incomplete"
         elif event.type == EventType.FAILED:
-            terminal_reason = str(event.data.get("reason", "agent_failed"))
             terminal_type = "failed"
         yield event
     if terminal_type:
         yield ExecutionEvent(EventType.SKILL_END, {"skill": forced_skill, "status": terminal_type})
         if output_parts:
-            yield ExecutionEvent(EventType.TEXT_DELTA, {"text": "".join(output_parts)})
+            data: dict[str, object] = {"text": "".join(output_parts)}
+            if output_was_streamed:
+                data["already_streamed"] = True
+            yield ExecutionEvent(EventType.TEXT_DELTA, data)
         yield ExecutionEvent(EventType.DONE, {})
         return
     output = "".join(output_parts)
     yield ExecutionEvent(EventType.SKILL_END, {"skill": forced_skill, "status": "passed"})
-    yield ExecutionEvent(EventType.TEXT_DELTA, {"text": output})
+    data: dict[str, object] = {"text": output}
+    if output_was_streamed:
+        data["already_streamed"] = True
+    yield ExecutionEvent(EventType.TEXT_DELTA, data)
     yield ExecutionEvent(EventType.DONE, {})
 
 
@@ -422,6 +428,7 @@ async def _run_events_with_runtime(
                 history=request.history,
                 forced_skill=request.forced_skill,
                 execution_context=_runtime_execution_context(runtime),
+                gate_llm=services.gate_llm,
             ):
                 if event.type == EventType.TEXT_DELTA:
                     full_text.append(str(event.data.get("text", "")))
@@ -556,20 +563,22 @@ async def reply_stream_with_runtime(
     services: RuntimeServices,
 ) -> AsyncGenerator[str, None]:
     """Text-only stream adapter."""
+    saw_raw_text = False
     async for event in reply_events_with_runtime(request, runtime, services):
         if event.type == EventType.RAW_RESPONSE_EVENT:
             raw_type = event.data.get("type")
             raw_data = event.data.get("data")
-            if raw_type == "response.output_text.delta" and isinstance(raw_data, dict):
+            if (
+                raw_type == "response.output_text.delta"
+                and not event.data.get("provision_id")
+                and isinstance(raw_data, dict)
+            ):
                 text = raw_data.get("delta")
                 if isinstance(text, str) and text:
+                    saw_raw_text = True
                     yield text
-        elif event.type == EventType.PROVISIONAL_TEXT_DELTA:
-            text = event.data.get("text")
-            if isinstance(text, str) and text:
-                yield text
         elif event.type == EventType.TEXT_DELTA:
-            if not event.data.get("already_streamed"):
+            if not event.data.get("already_streamed") or not saw_raw_text:
                 yield event.data.get("text", "")
         elif event.type == EventType.SKILL_START:
             yield f"\n[⚙ {event.data.get('skill', '')}]\n"

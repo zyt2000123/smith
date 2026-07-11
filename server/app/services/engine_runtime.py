@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from common.config import LEGACY_AGENT_PROFILES_DIR, PATHS, SAFETY_RULES_PATH
 from engine.execution.runtime import RuntimeContext, RuntimeServices
-from engine.llm.model_config import build_llm_client, resolve_llm_config
+from engine.llm.model_config import LLMUsage, build_llm_client, resolve_llm_config
 from engine.safety.tool_guard import ToolGuard
 from engine.skill.registry import SkillRegistry
 from engine.tool.registry import ToolRegistry
@@ -22,8 +22,11 @@ def build_engine_runtime(
         agents_dir=PATHS.project_root / "agents",
         session_id=session_id,
     )
+    interactive_config = resolve_llm_config(agent_id, usage=LLMUsage.INTERACTIVE)
+    gate_config = resolve_llm_config(agent_id, usage=LLMUsage.GATE)
     services = RuntimeServices(
-        llm=build_llm_client(resolve_llm_config(agent_id)),
+        llm=build_llm_client(interactive_config),
+        gate_llm=build_llm_client(gate_config),
         tool_registry=ToolRegistry(),
         skill_registry=SkillRegistry(),
         tool_guard=ToolGuard(SAFETY_RULES_PATH),

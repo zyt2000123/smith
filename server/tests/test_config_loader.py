@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from common.yaml_utils import YamlConfigError  # noqa: E402
+from app.services import engine_runtime  # noqa: E402
 from engine.llm import model_config  # noqa: E402
 
 
@@ -183,3 +184,28 @@ llm:
     finally:
         import asyncio
         asyncio.run(client.close())
+
+
+def test_build_engine_runtime_selects_interactive_and_gate_clients(monkeypatch) -> None:
+    selected_usages: list[model_config.LLMUsage] = []
+    clients: list[object] = []
+
+    def fake_resolve(agent_id: str, *, usage: model_config.LLMUsage) -> dict:
+        assert agent_id == "smith-id"
+        selected_usages.append(usage)
+        return {"usage": usage.value}
+
+    def fake_build(config: dict) -> object:
+        client = object()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(engine_runtime, "resolve_llm_config", fake_resolve)
+    monkeypatch.setattr(engine_runtime, "build_llm_client", fake_build)
+    monkeypatch.setattr(engine_runtime, "ToolRegistry", lambda: object())
+    monkeypatch.setattr(engine_runtime, "SkillRegistry", lambda: object())
+    monkeypatch.setattr(engine_runtime, "ToolGuard", lambda _path: object())
+
+    runtime, services = engine_runtime.build_engine_runtime("smith-id", "Smith")
+
+    assert runtime.agent_id == "smith-id"

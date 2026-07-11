@@ -12,7 +12,26 @@ const REQUIRED_PATHS = [
   "/api/agent/skills",
   "/api/agent/sessions/{session_id}/messages/stream",
 ] as const;
+
+type ServerConnection = {
+  baseUrl: string;
+  started: boolean;
+  note?: string;
+};
+
+type ServerTarget = {
+  baseUrl: string;
+  envOverride: boolean;
+  preferredPort: number;
+};
+
+type LaunchedServer = {
+  child: ChildProcess;
+  getSpawnError: () => Error | undefined;
+};
+
 let ownedServer: ChildProcess | null = null;
+let cleanupRegistered = false;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -21,13 +40,14 @@ function sleep(ms: number): Promise<void> {
 }
 
 function cleanupOwnedServer(): void {
-  if (ownedServer && ownedServer.exitCode === null) {
-    ownedServer.kill("SIGTERM");
-  }
+  if (ownedServer?.exitCode === null) ownedServer.kill("SIGTERM");
   ownedServer = null;
 }
 
 function registerCleanup(): void {
+  if (cleanupRegistered) return;
+
+  cleanupRegistered = true;
   process.once("exit", cleanupOwnedServer);
   process.once("SIGINT", () => {
     cleanupOwnedServer();
@@ -44,10 +64,20 @@ export function resolveRepoRoot(): string {
   return path.resolve(distDir, "..", "..");
 }
 
+function serverTarget(): ServerTarget {
+  const baseUrl = process.env.SMITH_SERVER_URL ?? DEFAULT_SERVER_URL;
+  const parsedUrl = new URL(baseUrl);
+  const fallbackPort = parsedUrl.protocol === "https:" ? "443" : "80";
+  return {
+    baseUrl,
+    envOverride: Boolean(process.env.SMITH_SERVER_URL),
+    preferredPort: Number.parseInt(parsedUrl.port || fallbackPort, 10),
+  };
+}
+
 async function isHealthy(baseUrl: string): Promise<boolean> {
   try {
-    const response = await fetch(`${baseUrl}/api/health`);
-    return response.ok;
+    return (await fetch(`${baseUrl}/api/health`)).ok;
   } catch {
     return false;
   }
@@ -56,124 +86,113 @@ async function isHealthy(baseUrl: string): Promise<boolean> {
 async function compatibilityIssue(baseUrl: string): Promise<string | null> {
   try {
     const response = await fetch(`${baseUrl}/openapi.json`);
-    if (!response.ok) {
-      return `openapi responded with HTTP ${response.status}`;
-    }
+    if (!response.ok) return `openapi responded with HTTP ${response.status}`;
 
     const payload = (await response.json()) as { paths?: Record<string, unknown> };
     const paths = payload.paths ?? {};
     const missingPaths = REQUIRED_PATHS.filter((route) => !(route in paths));
-    if (missingPaths.length === 0) {
-      return null;
-    }
-
-    return `missing API routes: ${missingPaths.join(", ")}`;
+    return missingPaths.length === 0 ? null : `missing API routes: ${missingPaths.join(", ")}`;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return `could not inspect OpenAPI schema: ${message}`;
   }
 }
 
+async function inspectExistingServer(
+  target: ServerTarget,
+): Promise<{ healthy: boolean; connection: ServerConnection | null }> {
+  const healthy = await isHealthy(target.baseUrl);
+  if (!healthy) return { healthy: false, connection: null };
+
+  const issue = await compatibilityIssue(target.baseUrl);
+  if (!issue) return { healthy: true, connection: { baseUrl: target.baseUrl, started: false } };
+  if (target.envOverride) throw new Error(`Configured SMITH_SERVER_URL points to an incompatible server: ${issue}`);
+  return { healthy: true, connection: null };
+}
+
 async function canListenOnPort(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = createServer();
     server.unref();
-    server.once("error", () => {
-      resolve(false);
-    });
+    server.once("error", () => resolve(false));
     server.listen(port, "127.0.0.1", () => {
-      server.close(() => {
-        resolve(true);
-      });
+      server.close(() => resolve(true));
     });
   });
 }
 
 async function findAvailablePort(startPort: number, maxPort = startPort + 20): Promise<number> {
   for (let port = startPort; port <= maxPort; port += 1) {
-    if (await canListenOnPort(port)) {
-      return port;
-    }
+    if (await canListenOnPort(port)) return port;
   }
-
   throw new Error(`Could not find a free local port between ${startPort} and ${maxPort}.`);
 }
 
-export async function ensureLocalServer(): Promise<{
-  baseUrl: string;
-  started: boolean;
-  note?: string;
-}> {
-  const baseUrl = process.env.SMITH_SERVER_URL ?? DEFAULT_SERVER_URL;
-  const envOverride = Boolean(process.env.SMITH_SERVER_URL);
-  const parsedUrl = new URL(baseUrl);
-  const preferredPort = Number.parseInt(parsedUrl.port || (parsedUrl.protocol === "https:" ? "443" : "80"), 10);
+async function launchUrl(target: ServerTarget, existingServerWasHealthy: boolean): Promise<string> {
+  const port = existingServerWasHealthy ? await findAvailablePort(target.preferredPort + 1) : target.preferredPort;
+  const url = new URL(target.baseUrl);
+  url.port = String(port);
+  return url.toString().replace(/\/$/, "");
+}
 
-  const healthy = await isHealthy(baseUrl);
-  if (healthy) {
-    const issue = await compatibilityIssue(baseUrl);
-    if (!issue) {
-      return { baseUrl, started: false };
-    }
-
-    if (envOverride) {
-      throw new Error(`Configured SMITH_SERVER_URL points to an incompatible server: ${issue}`);
-    }
-  }
-
-  if (envOverride) {
-    throw new Error(`Configured SMITH_SERVER_URL is unreachable: ${baseUrl}`);
-  }
-
-  const launchPort = healthy ? await findAvailablePort(preferredPort + 1) : preferredPort;
-  const launchUrl = new URL(baseUrl);
-  launchUrl.port = String(launchPort);
-  const launchedBaseUrl = launchUrl.toString().replace(/\/$/, "");
-
-  const serverDir = path.join(resolveRepoRoot(), "server");
-  ownedServer = spawn("uv", ["run", "uvicorn", "app.main:app", "--port", String(launchPort)], {
-    cwd: serverDir,
+function launchLocalServer(baseUrl: string): LaunchedServer {
+  const port = new URL(baseUrl).port;
+  const child = spawn("uv", ["run", "uvicorn", "app.main:app", "--port", port], {
+    cwd: path.join(resolveRepoRoot(), "server"),
     stdio: "ignore",
-    env: {
-      ...process.env,
-      PYTHONUNBUFFERED: "1",
-    },
+    env: { ...process.env, PYTHONUNBUFFERED: "1" },
   });
-
-  // spawn failures (e.g. `uv` missing from PATH) are emitted async; without a
-  // listener the "error" event becomes an uncaught exception and crashes the shell.
   let spawnError: Error | undefined;
-  ownedServer.once("error", (error) => {
+  child.once("error", (error) => {
     spawnError = error;
   });
 
+  ownedServer = child;
   registerCleanup();
+  return { child, getSpawnError: () => spawnError };
+}
 
+async function waitForCompatibleServer(
+  baseUrl: string,
+  launch: LaunchedServer,
+  priorServerWasHealthy: boolean,
+): Promise<ServerConnection> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    if (await isHealthy(launchedBaseUrl)) {
-      const issue = await compatibilityIssue(launchedBaseUrl);
+    if (await isHealthy(baseUrl)) {
+      const issue = await compatibilityIssue(baseUrl);
       if (!issue) {
         return {
-          baseUrl: launchedBaseUrl,
+          baseUrl,
           started: true,
-          note: healthy
-            ? `Found an older Smith server on ${baseUrl}; started an isolated shell server on ${launchedBaseUrl}.`
+          note: priorServerWasHealthy
+            ? `Found an older Smith server; started an isolated shell server on ${baseUrl}.`
             : undefined,
         };
       }
     }
 
-    if (ownedServer.exitCode !== null) {
+    if (launch.child.exitCode !== null) {
+      const spawnError = launch.getSpawnError();
       throw new Error(
         spawnError
           ? `Could not launch the local Smith server: ${spawnError.message}`
           : "Local server exited before becoming healthy.",
       );
     }
-
     await sleep(500);
   }
 
   cleanupOwnedServer();
   throw new Error("Timed out while starting the local Smith server.");
+}
+
+export async function ensureLocalServer(): Promise<ServerConnection> {
+  const target = serverTarget();
+  const existing = await inspectExistingServer(target);
+  if (existing.connection) return existing.connection;
+  if (target.envOverride) throw new Error(`Configured SMITH_SERVER_URL is unreachable: ${target.baseUrl}`);
+
+  const baseUrl = await launchUrl(target, existing.healthy);
+  const launch = launchLocalServer(baseUrl);
+  return waitForCompatibleServer(baseUrl, launch, existing.healthy);
 }

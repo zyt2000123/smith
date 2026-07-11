@@ -4,12 +4,18 @@ import re
 from typing import TYPE_CHECKING, AsyncGenerator
 
 if TYPE_CHECKING:
-    from engine.llm.client import LLMClient
+    from engine.llm.port import LLMPort
 
 DEFAULT_MAX_REACT_ITERS = 60
 MAX_FAILED_TOOL_RECOVERY_ITERS = 20
 MAX_PREFLIGHT_CHALLENGE_ITERS = 20
 MAX_INCOMPLETE_FINAL_REPAIRS = 2
+MAX_LENGTH_CONTINUATIONS = 2
+CONVERSATION_HARD_LIMIT = 40
+CONVERSATION_KEEP_RECENT = 28
+CONVERSATION_KEEP_HEAD = 2
+MAX_IDENTICAL_TOOL_ERRORS = 6
+COMPRESS_MIN_MESSAGES = 10
 TOOL_FAILURE_HINT = (
     "Multiple tool calls have failed consecutively. Change your approach - "
     "try a different tool, simplify the command, or explain what you need without using tools."
@@ -18,6 +24,11 @@ INCOMPLETE_FINAL_AFTER_TOOL_HINT = (
     "Your last message described a next action instead of completing the user's request. "
     "Continue now: call the appropriate tool if more evidence is still needed, or provide "
     "a complete final answer. Do not only say what you will do next."
+)
+CONTINUE_AFTER_LENGTH_HINT = (
+    "Your previous response was cut off by the model output limit. Continue exactly "
+    "from where it stopped. Do not repeat prior text, restart the answer, or mention "
+    "this instruction."
 )
 TOOL_FAILURE_BUDGET_MESSAGE = (
     "Tool failure recovery budget reached before a final answer."
@@ -78,7 +89,7 @@ def budget_exhausted_message(reason: str) -> str:
 
 
 async def final_text_response(
-    llm: "LLMClient",
+    llm: "LLMPort",
     conversation: list[dict],
     reason: str,
 ) -> str:
@@ -95,7 +106,7 @@ async def final_text_response(
 
 
 async def stream_final_text(
-    llm: "LLMClient",
+    llm: "LLMPort",
     conversation: list[dict],
     reason: str,
 ) -> AsyncGenerator[str, None]:

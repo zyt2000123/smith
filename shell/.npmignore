@@ -1,0 +1,6 @@
+src/
+scripts/
+biome.json
+tsconfig.json
+tsconfig.build.json
+dist/*.test.js

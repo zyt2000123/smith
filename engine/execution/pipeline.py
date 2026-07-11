@@ -19,7 +19,7 @@ from .gate import LLMGate, SkillRubricGate
 from .react_loop import react_event_loop
 
 if TYPE_CHECKING:
-    from engine.llm.client import LLMClient
+    from engine.llm.port import LLMPort
     from engine.safety.tool_guard import ToolGuard
     from engine.skill.registry import SkillRegistry
     from engine.tool.registry import ToolRegistry
@@ -38,7 +38,7 @@ _RUBRIC_MAX_RETRIES = 3
 
 async def run_pipeline(
     chain: "SkillChain",
-    llm: "LLMClient",
+    llm: "LLMPort",
     user_message: str,
     base_messages: list[dict],
     tool_registry: "ToolRegistry",
@@ -47,6 +47,7 @@ async def run_pipeline(
     guard: FailureLoopGuard,
     max_react_iters: int,
     context: dict,
+    gate_llm: "LLMPort | None" = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Execute a pipeline: walk nodes sequentially, ReAct each, gate-check."""
     from engine.skill.executor import execute_skill_events
@@ -54,6 +55,7 @@ async def run_pipeline(
     node_idx = 0
     max_backtracks = 5
     backtrack_count = 0
+    committed_provisional_output: dict[str, bool] = {}
 
     while node_idx < len(chain.nodes):
         node = chain.nodes[node_idx]
@@ -68,119 +70,132 @@ async def run_pipeline(
         output = ""
         rubric_passed = False
         provision_id = ""
-        prev_provision_id: str | None = None
+        provision_settled = True
 
-        while rubric_attempt < _RUBRIC_MAX_RETRIES:
-            if prev_provision_id:
-                yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
-                    "provision_id": prev_provision_id, "reason": "rubric_retry",
-                })
-            provision_id = f"{node.skill_name}:{node_idx}:{rubric_attempt}:{uuid4().hex[:8]}"
-            skill = skill_registry.get(node.skill_name)
+        try:
+            while rubric_attempt < _RUBRIC_MAX_RETRIES:
+                provision_id = f"{node.skill_name}:{node_idx}:{rubric_attempt}:{uuid4().hex}"
+                provision_settled = False
+                skill = skill_registry.get(node.skill_name)
 
-            if skill is None:
-                messages = base_messages + [{"role": "user", "content": f"[Skill: {node.skill_name}] {user_message}"}]
-                if rubric_attempt == 1 and context.get("_rubric_retry_hint"):
-                    messages.append({"role": "user", "content": context["_rubric_retry_hint"]})
-                elif rubric_attempt == 2:
-                    messages.append({"role": "user", "content": "Switch strategy: try a completely different approach."})
-                event_stream = react_event_loop(
-                    llm, messages, tool_registry, tool_guard, max_react_iters,
-                )
-            else:
-                skill_context = dict(context)
-                if rubric_attempt == 1 and skill_context.get("_rubric_retry_hint"):
-                    skill_context["rubric_feedback"] = skill_context["_rubric_retry_hint"]
-                elif rubric_attempt == 2:
-                    skill_context["rubric_feedback"] = "Switch strategy: try a completely different approach."
-                messages = [{"role": "user", "content": user_message}]
-                event_stream = execute_skill_events(
-                    skill, llm, tool_registry, messages, skill_context,
-                    max_react_iters, tool_guard=tool_guard,
-                )
-
-            result = _NodeResult()
-            async for event in _collect_node_events(event_stream, provision_id):
-                if isinstance(event, _NodeResult):
-                    result = event
+                if skill is None:
+                    messages = base_messages + [{"role": "user", "content": f"[Skill: {node.skill_name}] {user_message}"}]
+                    if rubric_attempt == 1 and context.get("_rubric_retry_hint"):
+                        messages.append({"role": "user", "content": context["_rubric_retry_hint"]})
+                    elif rubric_attempt == 2:
+                        messages.append({"role": "user", "content": "Switch strategy: try a completely different approach."})
+                    event_stream = react_event_loop(
+                        llm, messages, tool_registry, tool_guard, max_react_iters,
+                        provisional_lifecycle=False,
+                    )
                 else:
-                    yield event
+                    skill_context = dict(context)
+                    if rubric_attempt == 1 and skill_context.get("_rubric_retry_hint"):
+                        skill_context["rubric_feedback"] = skill_context["_rubric_retry_hint"]
+                    elif rubric_attempt == 2:
+                        skill_context["rubric_feedback"] = "Switch strategy: try a completely different approach."
+                    messages = [{"role": "user", "content": user_message}]
+                    event_stream = execute_skill_events(
+                        skill, llm, tool_registry, messages, skill_context,
+                        max_react_iters, tool_guard=tool_guard, provisional_lifecycle=False,
+                    )
 
-            if result.incomplete_reason or result.failed_reason:
-                reason = result.failed_reason or result.incomplete_reason
+                result = _NodeResult()
+                async for event in _collect_node_events(event_stream, provision_id):
+                    if isinstance(event, _NodeResult):
+                        result = event
+                    else:
+                        yield event
+
+                if result.incomplete_reason or result.failed_reason:
+                    reason = result.failed_reason or result.incomplete_reason
+                    yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
+                        "provision_id": provision_id, "reason": reason,
+                    })
+                    provision_settled = True
+                    if result.text:
+                        yield ExecutionEvent(EventType.TEXT_DELTA, {"text": result.text})
+                    yield ExecutionEvent(EventType.DONE, {})
+                    return
+                output = result.text
+
+                rubric_result = await _rubric_gate.check(output, context)
+                if rubric_result.verdict == "pass":
+                    rubric_passed = True
+                    break
+                context["_rubric_retry_hint"] = rubric_result.retry_hint or ""
                 yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
-                    "provision_id": provision_id, "reason": reason,
+                    "provision_id": provision_id, "reason": "rubric_retry",
                 })
-                if result.text:
-                    yield ExecutionEvent(EventType.TEXT_DELTA, {"text": result.text})
+                provision_settled = True
+                rubric_attempt += 1
+
+            context.pop("_rubric_retry_hint", None)
+
+            if not rubric_passed:
+                yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": rubric_result.reason})
                 yield ExecutionEvent(EventType.DONE, {})
                 return
-            output = result.text
 
-            rubric_result = await _rubric_gate.check(output, context)
-            if rubric_result.verdict == "pass":
-                rubric_passed = True
-                break
-            context["_rubric_retry_hint"] = rubric_result.retry_hint or ""
-            prev_provision_id = provision_id
-            rubric_attempt += 1
-
-        context.pop("_rubric_retry_hint", None)
-
-        if not rubric_passed:
-            yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
-                "provision_id": provision_id, "reason": rubric_result.reason,
+            if isinstance(node.gate, LLMGate):
+                node.gate.set_llm(gate_llm or llm)
+            gate_result = await node.gate.check(output, context)
+            yield ExecutionEvent(EventType.GATE_RESULT, {
+                "skill": node.skill_name, "verdict": gate_result.verdict, "reason": gate_result.reason,
             })
-            yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": rubric_result.reason})
-            yield ExecutionEvent(EventType.DONE, {})
-            return
 
-        if isinstance(node.gate, LLMGate):
-            node.gate.set_llm(llm)
-        gate_result = await node.gate.check(output, context)
-        yield ExecutionEvent(EventType.GATE_RESULT, {
-            "skill": node.skill_name, "verdict": gate_result.verdict, "reason": gate_result.reason,
-        })
+            if gate_result.verdict == "pass":
+                yield ExecutionEvent(EventType.PROVISIONAL_COMMIT, {"provision_id": provision_id})
+                provision_settled = True
+                context[f"{node.skill_name}_output"] = output
+                committed_provisional_output[node.skill_name] = result.was_provisional
+                _save_checkpoint(context, node_idx)
+                yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "passed"})
+                node_idx += 1
+                continue
 
-        if gate_result.verdict == "pass":
-            yield ExecutionEvent(EventType.PROVISIONAL_COMMIT, {"provision_id": provision_id})
-            context[f"{node.skill_name}_output"] = output
-            _save_checkpoint(context, node_idx)
-            yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "passed"})
-            node_idx += 1
-            continue
+            sig = FailureSignature(error_type=node.skill_name, context_hash=hashlib.md5(output.encode()).hexdigest()[:8])
+            action = guard.record(sig)
 
-        sig = FailureSignature(error_type=node.skill_name, context_hash=hashlib.md5(output.encode()).hexdigest()[:8])
-        action = guard.record(sig)
+            yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
+                "provision_id": provision_id, "reason": gate_result.reason,
+            })
+            provision_settled = True
 
-        yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
-            "provision_id": provision_id, "reason": gate_result.reason,
-        })
-
-        if action == "blocked":
-            yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": gate_result.reason})
-            yield ExecutionEvent(EventType.DONE, {})
-            return
-
-        if action == "switch" and node.skill_name in chain.backtrack_map:
-            backtrack_count += 1
-            if backtrack_count > max_backtracks:
-                yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": "max backtracks"})
+            if action == "blocked":
+                yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": gate_result.reason})
                 yield ExecutionEvent(EventType.DONE, {})
                 return
-            target = chain.backtrack_map[node.skill_name]
-            yield ExecutionEvent(EventType.BACKTRACK, {"from": node.skill_name, "to": target})
-            node_idx = next((i for i, n in enumerate(chain.nodes) if n.skill_name == target), 0)
-            continue
 
-        yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "retry"})
+            if action == "switch" and node.skill_name in chain.backtrack_map:
+                backtrack_count += 1
+                if backtrack_count > max_backtracks:
+                    yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": "max backtracks"})
+                    yield ExecutionEvent(EventType.DONE, {})
+                    return
+                target = chain.backtrack_map[node.skill_name]
+                yield ExecutionEvent(EventType.BACKTRACK, {"from": node.skill_name, "to": target})
+                node_idx = next((i for i, n in enumerate(chain.nodes) if n.skill_name == target), 0)
+                continue
 
-    # Emit final output — never mark already_streamed since provisional
-    # events are not yet consumed by session_service/shell
+            yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "retry"})
+        except Exception:
+            if not provision_settled:
+                yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
+                    "provision_id": provision_id, "reason": "execution_error",
+                })
+            raise
+
+    # Provisional events now reach the session UI.  The final semantic text is
+    # still emitted for persistence, but consumers that rendered the accepted
+    # provisional text must not append it again.
     for node in reversed(chain.nodes):
         key = f"{node.skill_name}_output"
         if key in context:
-            yield ExecutionEvent(EventType.TEXT_DELTA, {"text": context[key]})
+            data: dict[str, object] = {"text": context[key]}
+            if committed_provisional_output.get(node.skill_name):
+                data["already_streamed"] = True
+            yield ExecutionEvent(EventType.TEXT_DELTA, data)
             break
 
     _clear_checkpoint(context)
@@ -193,11 +208,11 @@ async def run_pipeline(
 
 
 class _NodeResult:
-    __slots__ = ("text", "was_streamed", "incomplete_reason", "failed_reason")
+    __slots__ = ("text", "was_provisional", "incomplete_reason", "failed_reason")
 
     def __init__(self) -> None:
         self.text = ""
-        self.was_streamed = False
+        self.was_provisional = False
         self.incomplete_reason: str | None = None
         self.failed_reason: str | None = None
 
@@ -211,14 +226,13 @@ async def _collect_node_events(
     Yields ExecutionEvents to forward, then a final _NodeResult with collected text.
     """
     parts: list[str] = []
-    was_streamed = False
+    was_provisional = False
     incomplete_reason: str | None = None
     failed_reason: str | None = None
 
     async for event in event_stream:
         if event.type == EventType.TEXT_DELTA:
             parts.append(str(event.data.get("text", "")))
-            was_streamed = was_streamed or bool(event.data.get("already_streamed"))
             continue
         elif event.type == EventType.RAW_RESPONSE_EVENT:
             raw_type = event.data.get("type")
@@ -226,6 +240,7 @@ async def _collect_node_events(
             if raw_type == "response.output_text.delta" and isinstance(raw_data, dict):
                 delta = raw_data.get("delta")
                 if isinstance(delta, str) and delta:
+                    was_provisional = True
                     yield ExecutionEvent(EventType.PROVISIONAL_TEXT_DELTA, {
                         "text": delta, "provision_id": provision_id,
                     })
@@ -238,7 +253,7 @@ async def _collect_node_events(
 
     result = _NodeResult()
     result.text = "".join(parts)
-    result.was_streamed = was_streamed
+    result.was_provisional = was_provisional
     result.incomplete_reason = incomplete_reason
     result.failed_reason = failed_reason
     yield result

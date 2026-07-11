@@ -1,0 +1,195 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import type { Message } from "./api.js";
+import {
+  applyStreamEvent,
+  createSystemEntry,
+  createTurnEntry,
+  restoreTranscript,
+  splitTranscript,
+  type TranscriptEntry,
+  type TurnEntry,
+} from "./transcript-state.js";
+
+function lastTurn(entries: TranscriptEntry[]): TurnEntry {
+  const entry = entries[entries.length - 1];
+  assert.equal(entry?.kind, "turn");
+  return entry as TurnEntry;
+}
+
+function freshTurn(): TranscriptEntry[] {
+  return [createTurnEntry("hello")];
+}
+
+test("message text accumulates and finalizes an open thinking block", () => {
+  let entries = freshTurn();
+  entries = applyStreamEvent(entries, { type: "thinking", text: "pondering", done: false });
+  entries = applyStreamEvent(entries, { type: "message", text: "first " });
+  entries = applyStreamEvent(entries, { type: "message", text: "second" });
+
+  const turn = lastTurn(entries);
+  assert.equal(turn.assistantText, "first second");
+  assert.deepEqual(
+    turn.blocks.map((block) => block.type === "thinking" && block.done),
+    [true],
+  );
+});
+
+test("provisional text retracts or commits by provision id", () => {
+  let entries = freshTurn();
+  entries = applyStreamEvent(entries, { type: "provisional_text_delta", provisionId: "draft-1", text: "discard" });
+
+  let turn = lastTurn(entries);
+  assert.equal(turn.assistantText, "");
+  assert.deepEqual(turn.provisional, [{ provisionId: "draft-1", text: "discard" }]);
+
+  entries = applyStreamEvent(entries, { type: "provisional_retract", provisionId: "draft-1", reason: "retry" });
+  turn = lastTurn(entries);
+  assert.equal(turn.assistantText, "");
+  assert.deepEqual(turn.provisional, []);
+
+  entries = applyStreamEvent(entries, { type: "provisional_text_delta", provisionId: "draft-2", text: "accepted" });
+  entries = applyStreamEvent(entries, { type: "provisional_commit", provisionId: "draft-2" });
+  turn = lastTurn(entries);
+  assert.equal(turn.assistantText, "accepted");
+  assert.deepEqual(turn.provisional, []);
+});
+
+test("thinking deltas merge into the open block; empty finished thinking is dropped", () => {
+  let entries = freshTurn();
+  entries = applyStreamEvent(entries, { type: "thinking", text: "step one", done: false });
+  entries = applyStreamEvent(entries, { type: "thinking", text: "step two", done: false });
+
+  let turn = lastTurn(entries);
+  assert.equal(turn.blocks.length, 1);
+  assert.equal(turn.blocks[0]?.type === "thinking" && turn.blocks[0].text, "step two");
+
+  entries = applyStreamEvent(freshTurn(), { type: "thinking", text: "  ", done: false });
+  turn = lastTurn(entries);
+  assert.equal(turn.blocks.length, 0);
+});
+
+test("tool_call opens a running block and a repeated id re-marks it running", () => {
+  let entries = freshTurn();
+  entries = applyStreamEvent(entries, { type: "tool_call", id: "t1", name: "read", hint: "a.ts" });
+  entries = applyStreamEvent(entries, {
+    type: "tool_result",
+    id: "t1",
+    error: false,
+    blocked: false,
+    preflight: false,
+    summary: "ok",
+  });
+  entries = applyStreamEvent(entries, { type: "tool_call", id: "t1", name: "read", hint: "b.ts" });
+
+  const turn = lastTurn(entries);
+  assert.equal(turn.blocks.length, 1);
+  const block = turn.blocks[0];
+  assert.ok(block?.type === "tool");
+  assert.equal(block.state, "running");
+  assert.equal(block.hint, "b.ts");
+});
+
+test("tool_result pairs with the latest matching call and maps status flags", () => {
+  let entries = freshTurn();
+  entries = applyStreamEvent(entries, { type: "tool_call", id: "t1", name: "bash", hint: "" });
+  entries = applyStreamEvent(entries, {
+    type: "tool_result",
+    id: "t1",
+    error: true,
+    blocked: false,
+    preflight: false,
+    summary: "boom",
+  });
+
+  const turn = lastTurn(entries);
+  const block = turn.blocks[0];
+  assert.ok(block?.type === "tool");
+  assert.equal(block.state, "error");
+  assert.equal(block.summary, "boom");
+});
+
+test("an unmatched tool_result creates a fallback block instead of being dropped", () => {
+  const entries = applyStreamEvent(freshTurn(), {
+    type: "tool_result",
+    id: "ghost",
+    error: false,
+    blocked: true,
+    preflight: false,
+    summary: "denied",
+  });
+
+  const turn = lastTurn(entries);
+  const block = turn.blocks[0];
+  assert.ok(block?.type === "tool");
+  assert.equal(block.name, "tool");
+  assert.equal(block.state, "blocked");
+});
+
+test("skill start/end events pair by name", () => {
+  let entries = freshTurn();
+  entries = applyStreamEvent(entries, { type: "skill", name: "debug", status: "start" });
+  entries = applyStreamEvent(entries, { type: "skill", name: "debug", status: "end" });
+
+  const turn = lastTurn(entries);
+  assert.equal(turn.blocks.length, 1);
+  const block = turn.blocks[0];
+  assert.ok(block?.type === "skill");
+  assert.equal(block.state, "done");
+});
+
+test("done closes the streaming turn", () => {
+  const entries = applyStreamEvent(freshTurn(), { type: "done", status: "completed" });
+  assert.equal(lastTurn(entries).streaming, false);
+});
+
+test("stream events without any turn are no-ops", () => {
+  const entries: TranscriptEntry[] = [createSystemEntry("note")];
+  const next = applyStreamEvent(entries, { type: "message", text: "lost" });
+  assert.equal(next, entries);
+});
+
+test("restoreTranscript merges consecutive assistant messages into one turn", () => {
+  const messages: Message[] = [
+    { id: "1", session_id: "s", role: "user", content: "hi", created_at: "" },
+    { id: "2", session_id: "s", role: "assistant", content: "partial", created_at: "" },
+    { id: "3", session_id: "s", role: "assistant", content: "full answer", created_at: "" },
+    { id: "4", session_id: "s", role: "user", content: "next", created_at: "" },
+  ];
+
+  const entries = restoreTranscript(messages);
+  assert.equal(entries.length, 2);
+  const first = entries[0];
+  assert.ok(first?.kind === "turn");
+  assert.equal(first.assistantText, "partial\n\nfull answer");
+  assert.equal(first.streaming, false);
+});
+
+test("restoreTranscript keeps a leading assistant message as an orphan turn", () => {
+  const messages: Message[] = [{ id: "1", session_id: "s", role: "assistant", content: "hello", created_at: "" }];
+
+  const entries = restoreTranscript(messages);
+  assert.equal(entries.length, 1);
+  const turn = entries[0];
+  assert.ok(turn?.kind === "turn");
+  assert.equal(turn.userText, "");
+  assert.equal(turn.assistantText, "hello");
+});
+
+test("splitTranscript keeps the streaming turn and everything after it dynamic", () => {
+  const closed = createTurnEntry("a");
+  closed.streaming = false;
+  const open = createTurnEntry("b");
+  const entries: TranscriptEntry[] = [createSystemEntry("sys"), closed, open];
+
+  const { done, active } = splitTranscript(entries);
+  assert.deepEqual(
+    done.map((entry) => entry.id),
+    [entries[0]?.id, closed.id],
+  );
+  assert.deepEqual(
+    active.map((entry) => entry.id),
+    [open.id],
+  );
+});

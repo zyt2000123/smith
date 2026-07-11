@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import AsyncGenerator
 
 from fastapi import HTTPException
 
 from engine.execution.agent_loop import (
-    reply_events_with_runtime as engine_reply_events_with_runtime,
+    run_stream_with_runtime as engine_run_stream_with_runtime,
     reply_with_runtime as engine_reply_with_runtime,
 )
 from engine.execution.runtime import EngineRequest
@@ -19,6 +20,7 @@ from .engine_runtime import build_engine_runtime
 
 # Recent messages passed to the engine as short-term conversational context
 _HISTORY_LIMIT = 10
+logger = logging.getLogger(__name__)
 
 
 class SessionService:
@@ -114,11 +116,13 @@ class SessionService:
         def sse(event: str, data: dict) -> dict:
             return {"event": event, "data": json.dumps(data, ensure_ascii=False)}
 
-        full_reply = []
+        full_reply: list[str] = []
         msg: dict | None = None
-        runtime, services = build_engine_runtime(agent_id, emp_name, session_id=session_id)
+        terminal_status = "completed"
+        terminal_notice: str | None = None
         try:
-            async for ev in engine_reply_events_with_runtime(
+            runtime, services = build_engine_runtime(agent_id, emp_name, session_id=session_id)
+            run = engine_run_stream_with_runtime(
                 EngineRequest(
                     message=content,
                     history=history,
@@ -127,12 +131,45 @@ class SessionService:
                 ),
                 runtime,
                 services,
-            ):
+            )
+            async for ev in run.stream_events():
                 t = ev.type.value
-                if t == "text_delta":
+                if t == "raw_response_event":
+                    raw_type = ev.data.get("type")
+                    raw_data = ev.data.get("data")
+                    if (
+                        raw_type == "response.output_text.delta"
+                        and not ev.data.get("provision_id")
+                        and isinstance(raw_data, dict)
+                    ):
+                        delta = raw_data.get("delta")
+                        if isinstance(delta, str) and delta:
+                            yield sse("message", {"text": delta})
+                elif t == "provisional_text_delta":
+                    provision_id = str(ev.data.get("provision_id", ""))
+                    text = ev.data.get("text")
+                    if provision_id and isinstance(text, str) and text:
+                        yield sse("provisional_text_delta", {
+                            "provision_id": provision_id,
+                            "text": text,
+                        })
+                elif t == "provisional_commit":
+                    provision_id = str(ev.data.get("provision_id", ""))
+                    if provision_id:
+                        yield sse("provisional_commit", {"provision_id": provision_id})
+                elif t == "provisional_retract":
+                    provision_id = str(ev.data.get("provision_id", ""))
+                    if provision_id:
+                        payload = {"provision_id": provision_id}
+                        reason = ev.data.get("reason")
+                        if isinstance(reason, str) and reason:
+                            payload["reason"] = reason
+                        yield sse("provisional_retract", payload)
+                elif t == "text_delta":
                     chunk = ev.data.get("text", "")
                     full_reply.append(chunk)
-                    yield sse("message", {"text": chunk})
+                    if not ev.data.get("already_streamed"):
+                        yield sse("message", {"text": chunk})
                 elif t == "thinking":
                     yield sse("thinking", {"text": ev.data.get("text", ""), "done": bool(ev.data.get("done"))})
                 elif t == "tool_call_start":
@@ -157,14 +194,33 @@ class SessionService:
                         "output_tokens": ev.data.get("output_tokens", 0),
                         "total_tokens": ev.data.get("total_tokens", 0),
                     })
-                # route_decided / gate_result / backtrack / done：前端暂不展示，跳过
+                elif t == "incomplete":
+                    terminal_status = "incomplete"
+                elif t == "failed":
+                    terminal_status = "failed"
+                elif t == "run_finished":
+                    status = ev.data.get("status")
+                    if status in ("completed", "incomplete", "failed"):
+                        terminal_status = status
+                # route_decided / gate_result / backtrack / done / run_started：前端暂不展示，跳过
+        except Exception:
+            logger.exception("agent SSE execution failed (session=%s)", session_id)
+            terminal_status = "failed"
+            terminal_notice = "执行失败（详情见服务端日志）"
         finally:
             # 客户端断连/引擎异常时生成器在 yield 处被终止，async for 之后的代码不会执行；
             # 落库放 finally 并用 shield 保护，请求被取消也能保住已生成的部分回复。
             reply_text = "".join(full_reply)
             if reply_text:
-                msg = await asyncio.shield(
-                    self.session_repo.add_message(session_id, "assistant", reply_text)
-                )
+                try:
+                    msg = await asyncio.shield(
+                        self.session_repo.add_message(session_id, "assistant", reply_text)
+                    )
+                except Exception:
+                    logger.exception("failed to persist streamed reply (session=%s)", session_id)
+                    terminal_status = "failed"
+                    terminal_notice = "回复保存失败（详情见服务端日志）"
 
-        yield {"event": "done", "data": json.dumps({"id": msg["id"] if msg else None}, ensure_ascii=False)}
+        if terminal_notice:
+            yield sse("message", {"text": f"\n⚠️ {terminal_notice}\n"})
+        yield sse("done", {"id": msg["id"] if msg else None, "status": terminal_status})

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from engine.llm.client import LLMClient
+from engine.llm.port import LLMPort
 from engine.safety.tool_guard import ToolGuard
 from engine.skill.registry import SkillRegistry
 from engine.tool.registry import ToolRegistry
@@ -37,9 +37,10 @@ class RuntimeContext:
 class RuntimeServices:
     """Per-request services owned by the caller and consumed by the engine."""
 
-    llm: LLMClient
+    llm: LLMPort
     tool_registry: ToolRegistry
     skill_registry: SkillRegistry
+    gate_llm: LLMPort | None = None
     tool_guard: ToolGuard | None = None
     mcp_clients: list[Any] = field(default_factory=list)
 
@@ -52,12 +53,17 @@ class RuntimeServices:
             if inspect.isawaitable(result):
                 await result
 
-        close_llm = getattr(self.llm, "close", None)
-        if close_llm is None:
-            return
-        result = close_llm()
-        if inspect.isawaitable(result):
-            await result
+        closed_llms: set[int] = set()
+        for llm in (self.gate_llm, self.llm):
+            if llm is None or id(llm) in closed_llms:
+                continue
+            closed_llms.add(id(llm))
+            close_llm = getattr(llm, "close", None)
+            if close_llm is None:
+                continue
+            result = close_llm()
+            if inspect.isawaitable(result):
+                await result
 
 
 @dataclass(frozen=True)

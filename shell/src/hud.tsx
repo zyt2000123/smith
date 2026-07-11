@@ -1,19 +1,11 @@
 import { execFile } from "node:child_process";
 import { Box, Text, useWindowSize } from "ink";
-import { Fragment, type ReactNode, useEffect, useState } from "react";
+import { Fragment, memo, type ReactNode, useEffect, useState } from "react";
 
+import type { ToolActivity } from "./activity.js";
 import type { TokenUsage } from "./api.js";
-import type { ToolBlock, TranscriptEntry, TranscriptViewMode } from "./transcript.js";
-
-const BORDER = "#5c5c63";
-const MUTED = "#8b8b91";
-const SUCCESS = "#93f77b";
-const WARNING = "#ffd166";
-const ERROR = "#e06c75";
-const MODEL = "#e5c07b";
-const PROJECT = "#98c379";
-const SESSION = "#61afef";
-const GIT = "#c678dd";
+import { BORDER, ERROR, GIT, MODEL, MUTED, PROJECT, SESSION, SUCCESS, WARNING } from "./theme.js";
+import type { TranscriptViewMode } from "./transcript-state.js";
 
 type HudSegment = {
   text: string;
@@ -160,10 +152,6 @@ function HudLine({ parts, separator = " │ " }: { parts: HudPart[]; separator?:
   );
 }
 
-function countTurns(transcript: TranscriptEntry[]): number {
-  return transcript.filter((entry) => entry.kind === "turn").length;
-}
-
 function execGit(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile("git", args, { cwd, encoding: "utf8", timeout: 500 }, (error, stdout) => {
@@ -228,80 +216,30 @@ function withUniqueKeys<T>(items: T[], getKey: (item: T) => string): Array<{ ite
   });
 }
 
-type ToolBuckets = {
-  running: string[];
-  completed: Map<string, number>;
-  errors: Map<string, number>;
-};
-
-function increment(map: Map<string, number>, key: string): void {
-  map.set(key, (map.get(key) ?? 0) + 1);
-}
-
-function recordToolBlock(buckets: ToolBuckets, block: ToolBlock): void {
-  if (block.state === "running") {
-    buckets.running.push(block.name);
-    return;
-  }
-
-  if (block.state === "error" || block.state === "blocked") {
-    increment(buckets.errors, block.name);
-    return;
-  }
-
-  increment(buckets.completed, block.name);
-}
-
-function collectToolBuckets(transcript: TranscriptEntry[]): ToolBuckets {
-  const buckets: ToolBuckets = {
-    running: [],
-    completed: new Map<string, number>(),
-    errors: new Map<string, number>(),
-  };
-  for (const entry of transcript) {
-    if (entry.kind !== "turn") continue;
-    for (const block of entry.blocks) {
-      if (block.type !== "tool") continue;
-      recordToolBlock(buckets, block);
-    }
-  }
-  return buckets;
-}
-
-function runningToolParts(names: string[]): HudPart[] {
+function runningToolParts(running: Record<string, string>): HudPart[] {
+  const names = Object.values(running);
   return names.slice(-2).map((name) => [{ text: "◐", color: WARNING }, { text: " " }, { text: name, color: SESSION }]);
 }
 
-function completedToolParts(counts: Map<string, number>): HudPart[] {
-  return Array.from(counts.entries())
+function countedToolParts(counts: Record<string, number>, marker: string, color: string, limit: number): HudPart[] {
+  return Object.entries(counts)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 4)
+    .slice(0, limit)
     .map<HudPart>(([name, count]) => [
-      { text: "✓", color: SUCCESS },
+      { text: marker, color },
       { text: " " },
       { text: name },
       { text: ` ×${count}`, color: MUTED },
     ]);
 }
 
-function errorToolParts(counts: Map<string, number>): HudPart[] {
-  return Array.from(counts.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 2)
-    .map<HudPart>(([name, count]) => [
-      { text: "!", color: ERROR },
-      { text: " " },
-      { text: name },
-      { text: ` ×${count}`, color: MUTED },
-    ]);
-}
-
-function collectToolParts(transcript: TranscriptEntry[]): HudPart[] {
-  const buckets = collectToolBuckets(transcript);
+function collectToolParts(activity: ToolActivity): HudPart[] {
   return [
-    ...runningToolParts(buckets.running),
-    ...completedToolParts(buckets.completed),
-    ...errorToolParts(buckets.errors),
+    ...runningToolParts(activity.running),
+    ...countedToolParts(activity.successes, "✓", SUCCESS, 4),
+    ...countedToolParts(activity.blocked, "⛔", WARNING, 2),
+    ...countedToolParts(activity.preflight, "◆", WARNING, 2),
+    ...countedToolParts(activity.errors, "!", ERROR, 2),
   ];
 }
 
@@ -310,11 +248,10 @@ function buildHeaderParts(options: {
   projectName: string;
   gitBranch: string | null;
   sessionId?: string;
-  transcript: TranscriptEntry[];
+  turnCount: number;
   viewMode: TranscriptViewMode;
   tokenUsage: TokenUsage;
 }): HudPart[] {
-  const turns = countTurns(options.transcript);
   const parts: HudPart[] = [
     [{ text: `[${options.model || "-"}]`, color: MODEL }],
     [{ text: options.projectName || "-", color: PROJECT }],
@@ -332,7 +269,7 @@ function buildHeaderParts(options: {
       { text: "session ", color: MUTED },
       { text: options.sessionId || "new", color: SESSION },
     ],
-    [{ text: `${turns} turn${turns === 1 ? "" : "s"}`, color: MUTED }],
+    [{ text: `${options.turnCount} turn${options.turnCount === 1 ? "" : "s"}`, color: MUTED }],
     [{ text: options.viewMode, color: MUTED }],
   );
 
@@ -346,20 +283,21 @@ function buildHeaderParts(options: {
   return parts;
 }
 
-export function StatusHud(options: {
+export const StatusHud = memo(function StatusHud(options: {
   model: string;
   projectName: string;
   cwd: string;
   sessionId?: string;
-  transcript: TranscriptEntry[];
+  turnCount: number;
   viewMode: TranscriptViewMode;
   tokenUsage: TokenUsage;
+  toolActivity: ToolActivity;
 }) {
   const { columns } = useWindowSize();
   const gitBranch = useGitBranch(options.cwd);
   const maxWidth = Math.max(24, columns - 4);
   const headerLines = wrapParts(buildHeaderParts({ ...options, gitBranch }), maxWidth);
-  const activityLines = wrapParts(collectToolParts(options.transcript), maxWidth);
+  const activityLines = wrapParts(collectToolParts(options.toolActivity), maxWidth);
 
   return (
     <Box flexDirection="column">
@@ -371,7 +309,7 @@ export function StatusHud(options: {
       ))}
     </Box>
   );
-}
+});
 
 function formatTokenCount(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;

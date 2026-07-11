@@ -1,15 +1,16 @@
 {
   "name": "smith-shell",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "private": false,
   "type": "module",
   "bin": {
     "smith": "./bin/smith.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "check": "biome check src/",
-    "format": "biome format --write src/"
+    "format": "biome format --write src/",
+    "test": "tsc -p tsconfig.json && node scripts/run-tests.mjs"
   },
   "dependencies": {
     "@assistant-ui/react-ink-markdown": "^0.0.30",

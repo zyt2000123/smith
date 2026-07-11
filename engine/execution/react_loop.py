@@ -5,14 +5,19 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, AsyncGenerator
+from uuid import uuid4
 
-from engine.llm.client import ChatResponse, ToolCallData
+from engine.llm.contracts import ChatResponse, ToolCallData
 from engine.llm.events import ProviderEvent, ProviderEventType
 from engine.react_budget import (
     CONTINUE_AFTER_LENGTH_HINT,
+    CONVERSATION_HARD_LIMIT,
+    CONVERSATION_KEEP_HEAD,
+    CONVERSATION_KEEP_RECENT,
     DEFAULT_MAX_REACT_ITERS,
     INCOMPLETE_FINAL_AFTER_TOOL_HINT,
     MAX_FAILED_TOOL_RECOVERY_ITERS,
+    MAX_IDENTICAL_TOOL_ERRORS,
     MAX_INCOMPLETE_FINAL_REPAIRS,
     MAX_LENGTH_CONTINUATIONS,
     MAX_PREFLIGHT_CHALLENGE_ITERS,
@@ -31,7 +36,7 @@ from .compression import compress
 from .events import EventType, ExecutionEvent
 
 if TYPE_CHECKING:
-    from engine.llm.client import LLMClient
+    from engine.llm.port import LLMPort
     from engine.safety.tool_guard import ToolGuard
     from engine.tool.registry import ToolRegistry
 
@@ -153,10 +158,17 @@ class _ProviderResponseAccumulator:
         )
 
 
-def _raw_response_event(event: ProviderEvent) -> ExecutionEvent:
+def _raw_response_event(
+    event: ProviderEvent,
+    *,
+    provision_id: str | None = None,
+) -> ExecutionEvent:
+    data: dict[str, object] = {"type": event.type.value, "data": event.data}
+    if provision_id:
+        data["provision_id"] = provision_id
     return ExecutionEvent(
         EventType.RAW_RESPONSE_EVENT,
-        {"type": event.type.value, "data": event.data},
+        data,
     )
 
 
@@ -165,6 +177,24 @@ def _text_event(text: str, *, already_streamed: bool = False) -> ExecutionEvent:
     if already_streamed:
         data["already_streamed"] = True
     return ExecutionEvent(EventType.TEXT_DELTA, data)
+
+
+def _provisional_text_event(provision_id: str, text: str) -> ExecutionEvent:
+    return ExecutionEvent(EventType.PROVISIONAL_TEXT_DELTA, {
+        "provision_id": provision_id,
+        "text": text,
+    })
+
+
+def _provisional_commit_event(provision_id: str) -> ExecutionEvent:
+    return ExecutionEvent(EventType.PROVISIONAL_COMMIT, {"provision_id": provision_id})
+
+
+def _provisional_retract_event(provision_id: str, reason: str) -> ExecutionEvent:
+    return ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
+        "provision_id": provision_id,
+        "reason": reason,
+    })
 
 
 def _usage_event_data(usage: dict | None) -> dict | None:
@@ -218,7 +248,7 @@ def _append_length_continuation(conversation: list[dict], text: str) -> None:
 
 
 async def react_loop(
-    llm: "LLMClient",
+    llm: "LLMPort",
     messages: list[dict],
     tool_registry: "ToolRegistry",
     tool_guard: "ToolGuard | None" = None,
@@ -250,7 +280,7 @@ async def react_loop(
 
 
 async def react_stream_loop(
-    llm: "LLMClient",
+    llm: "LLMPort",
     messages: list[dict],
     tool_registry: "ToolRegistry",
     tool_guard: "ToolGuard | None" = None,
@@ -258,7 +288,11 @@ async def react_stream_loop(
     *,
     fact_gate: FactGate | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Run the canonical ReAct event loop and expose text deltas only."""
+    """Run the canonical ReAct event loop and expose text deltas only.
+
+    Live streaming is handled by provisional events in the canonical loop;
+    this adapter yields only the final committed TEXT_DELTA.
+    """
     async for event in react_event_loop(
         llm,
         messages,
@@ -267,16 +301,9 @@ async def react_stream_loop(
         max_iters,
         fact_gate=fact_gate,
     ):
-        if event.type == EventType.RAW_RESPONSE_EVENT:
-            raw_type = event.data.get("type")
-            raw_data = event.data.get("data")
-            if raw_type == ProviderEventType.OUTPUT_TEXT_DELTA.value and isinstance(raw_data, dict):
-                text = raw_data.get("delta")
-                if isinstance(text, str) and text:
-                    yield text
-        elif event.type == EventType.TEXT_DELTA:
+        if event.type == EventType.TEXT_DELTA:
             text = event.data.get("text", "")
-            if text and not event.data.get("already_streamed"):
+            if text:
                 yield str(text)
         elif event.type == EventType.INCOMPLETE:
             raise IncompleteAgentRunError(
@@ -289,13 +316,14 @@ async def react_stream_loop(
 
 
 async def react_event_loop(
-    llm: "LLMClient",
+    llm: "LLMPort",
     messages: list[dict],
     tool_registry: "ToolRegistry",
     tool_guard: "ToolGuard | None" = None,
     max_iters: int = DEFAULT_MAX_REACT_ITERS,
     *,
     fact_gate: FactGate | None = None,
+    provisional_lifecycle: bool = True,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """ReAct loop: model response, tool calls, results, and next turn in one history."""
     tools = tool_registry.get_schemas() or None
@@ -315,22 +343,39 @@ async def react_event_loop(
     length_continuations = 0
     final_text_parts: list[str] = []
     final_text_was_streamed = False
+    active_provision_ids: list[str] = []
+    last_error_key: str | None = None
+    identical_error_count = 0
 
     while productive_iters < max_iters:
         conversation = await compress(conversation, llm)
-        if len(conversation) > 40:
-            conversation = [conversation[0]] + conversation[-30:]
+        if len(conversation) > CONVERSATION_HARD_LIMIT:
+            # ponytail: keep head (system + initial user) and recent tail
+            head = conversation[:CONVERSATION_KEEP_HEAD]
+            tail = conversation[-CONVERSATION_KEEP_RECENT:]
+            conversation = head + tail
 
         yield ExecutionEvent(EventType.THINKING, {})
         response_text_was_streamed = False
+        response_provision_id: str | None = None
         stream_events = getattr(llm, "chat_events", None)
         if getattr(llm, "stream", False) and callable(stream_events):
             accumulator = _ProviderResponseAccumulator()
             saw_content_event = False
+            if provisional_lifecycle:
+                response_provision_id = uuid4().hex
             try:
                 async for provider_event in stream_events(conversation, tools=tools):
                     accumulator.add(provider_event)
-                    yield _raw_response_event(provider_event)
+                    is_text_delta = provider_event.type == ProviderEventType.OUTPUT_TEXT_DELTA
+                    raw_provision_id = response_provision_id if is_text_delta else None
+                    yield _raw_response_event(provider_event, provision_id=raw_provision_id)
+                    if raw_provision_id:
+                        delta = provider_event.data.get("delta")
+                        if isinstance(delta, str) and delta:
+                            if raw_provision_id not in active_provision_ids:
+                                active_provision_ids.append(raw_provision_id)
+                            yield _provisional_text_event(raw_provision_id, delta)
                     # ponytail: only block fallback after user-visible content
                     if not saw_content_event and provider_event.type in (
                         ProviderEventType.OUTPUT_TEXT_DELTA,
@@ -339,13 +384,23 @@ async def react_event_loop(
                         saw_content_event = True
             except Exception:
                 # Fallback to non-streaming only if no text/tool content was
-                # emitted.  Metadata events (response.created, usage) are safe
-                # to discard; text or tool-call fragments are not.
-                if saw_content_event:
+                # emitted for this response and no earlier continuation is
+                # still visible as a provisional draft.  Otherwise the
+                # fallback could append an unseen suffix to a committed prefix.
+                if saw_content_event or active_provision_ids:
+                    for provision_id in active_provision_ids:
+                        yield _provisional_retract_event(provision_id, "stream_error")
+                    active_provision_ids.clear()
                     raise
                 response = await llm.chat(conversation, tools=tools)
             else:
-                response = accumulator.build()
+                try:
+                    response = accumulator.build()
+                except Exception:
+                    for provision_id in active_provision_ids:
+                        yield _provisional_retract_event(provision_id, "stream_error")
+                    active_provision_ids.clear()
+                    raise
                 response_text_was_streamed = accumulator.streamed_text
         else:
             response = await llm.chat(conversation, tools=tools)
@@ -356,6 +411,16 @@ async def react_event_loop(
         thought = (response.reasoning or (response.text if response.has_tool_calls else "")).strip()
         if thought:
             yield ExecutionEvent(EventType.THINKING, {"text": thought, "done": True})
+
+        if response.has_tool_calls:
+            # Any pending draft is a potential final response.  A tool call
+            # re-enters evidence gathering, so neither a current preamble nor
+            # an earlier length-continuation fragment may become durable text.
+            for provision_id in active_provision_ids:
+                yield _provisional_retract_event(provision_id, "tool_call_pending")
+            active_provision_ids.clear()
+            final_text_parts.clear()
+            final_text_was_streamed = False
 
         if response.finish_reason == "length" and response.has_tool_calls:
             # A length-limited tool call may have incomplete JSON arguments.
@@ -404,6 +469,9 @@ async def react_event_loop(
                     _append_length_continuation(conversation, response.text)
                     continue
                 if final_text:
+                    for provision_id in active_provision_ids:
+                        yield _provisional_commit_event(provision_id)
+                    active_provision_ids.clear()
                     yield _text_event(final_text, already_streamed=final_text_was_streamed)
                 yield ExecutionEvent(EventType.INCOMPLETE, {
                     "reason": "model_output_limit",
@@ -412,17 +480,28 @@ async def react_event_loop(
                 return
 
             if response.finish_reason == "content_filter":
-                if final_text:
+                if active_provision_ids:
+                    for provision_id in active_provision_ids:
+                        yield _provisional_retract_event(provision_id, "content_filter")
+                    active_provision_ids.clear()
+                elif final_text:
                     yield _text_event(final_text, already_streamed=final_text_was_streamed)
                 yield ExecutionEvent(EventType.INCOMPLETE, {"reason": "content_filter"})
                 return
 
             if response.finish_reason == "error":
+                for provision_id in active_provision_ids:
+                    yield _provisional_retract_event(provision_id, "provider_finish_error")
+                active_provision_ids.clear()
                 yield ExecutionEvent(EventType.FAILED, {"reason": "provider_finish_error"})
                 return
 
             if response.finish_reason == "other":
-                if final_text:
+                if active_provision_ids:
+                    for provision_id in active_provision_ids:
+                        yield _provisional_retract_event(provision_id, "unknown_provider_finish_reason")
+                    active_provision_ids.clear()
+                elif final_text:
                     yield _text_event(final_text, already_streamed=final_text_was_streamed)
                 yield ExecutionEvent(EventType.INCOMPLETE, {
                     "reason": "unknown_provider_finish_reason",
@@ -435,14 +514,23 @@ async def react_event_loop(
                 had_successful_tool=had_successful_tool,
                 repair_count=incomplete_final_repairs,
             ):
+                for provision_id in active_provision_ids:
+                    yield _provisional_retract_event(provision_id, "incomplete_final_repair")
+                active_provision_ids.clear()
                 incomplete_final_repairs += 1
                 _append_incomplete_final_repair(conversation, final_text)
                 final_text_parts.clear()
                 final_text_was_streamed = False
                 continue
             if final_text:
+                for provision_id in active_provision_ids:
+                    yield _provisional_commit_event(provision_id)
+                active_provision_ids.clear()
                 yield _text_event(final_text, already_streamed=final_text_was_streamed)
-            elif not had_successful_tool:
+            else:
+                # A successful tool call is evidence gathering, not a valid
+                # chat completion.  The caller still needs a final assistant
+                # response to render and persist.
                 yield ExecutionEvent(EventType.INCOMPLETE, {"reason": "empty_model_response"})
             return
 
@@ -509,6 +597,19 @@ async def react_event_loop(
             if result.is_error:
                 round_had_failure = True
                 consecutive_errors += 1
+                error_key = f"{tc.name}:{result.content[:120]}"
+                if error_key == last_error_key:
+                    identical_error_count += 1
+                else:
+                    last_error_key = error_key
+                    identical_error_count = 1
+                if identical_error_count >= MAX_IDENTICAL_TOOL_ERRORS:
+                    yield ExecutionEvent(
+                        EventType.TEXT_DELTA,
+                        {"text": budget_exhausted_message(TOOL_FAILURE_BUDGET_MESSAGE)},
+                    )
+                    yield ExecutionEvent(EventType.INCOMPLETE, {"reason": "identical_tool_error_loop"})
+                    return
                 if consecutive_errors >= 3:
                     conversation.append({"role": "system", "content": TOOL_FAILURE_HINT})
                     consecutive_errors = 0
@@ -516,6 +617,8 @@ async def react_event_loop(
                 round_had_success = True
                 had_successful_tool = True
                 consecutive_errors = 0
+                last_error_key = None
+                identical_error_count = 0
 
         if round_had_preflight:
             preflight_iters += 1
@@ -544,6 +647,8 @@ async def react_event_loop(
         if round_had_preflight:
             continue
 
+    for provision_id in active_provision_ids:
+        yield _provisional_retract_event(provision_id, "tool_call_budget")
     yield ExecutionEvent(
         EventType.TEXT_DELTA,
         {"text": budget_exhausted_message(TOOL_CALL_BUDGET_MESSAGE)},

@@ -104,7 +104,7 @@ def needs_compaction(conversation: list[dict], context_limit: int = 120000) -> b
     return _conversation_tokens(conversation) > context_limit * CONTEXT_TRIGGER_RATIO
 
 
-async def compress(conversation: list[dict], llm: "LLMClient" = None) -> list[dict]:
+async def compress(conversation: list[dict], llm: "LLMPort" = None) -> list[dict]:
     """Two-stage compression: prune first, compact if still over threshold.
 
     Returns the conversation list (mutated in-place for prune, replaced for compact).
@@ -115,7 +115,7 @@ async def compress(conversation: list[dict], llm: "LLMClient" = None) -> list[di
     return conversation
 
 
-async def compact_history(conversation: list[dict], llm: "LLMClient") -> list[dict]:
+async def compact_history(conversation: list[dict], llm: "LLMPort") -> list[dict]:
     """Replace conversation with a compacted summary via LLM.
 
     Returns a new conversation list: [system_prompt, summary_message].
