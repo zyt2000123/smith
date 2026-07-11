@@ -83,8 +83,9 @@ async def run_agent_stream(
     """Route to the right execution path and yield events."""
     if forced_skill:
         async for event in _run_forced_skill_stream(
-            llm, tool_registry, skill_registry, user_message, forced_skill,
-            tool_guard, max_react_iters, history=history,
+            llm, system_prompt, tool_registry, skill_registry,
+            user_message, forced_skill, tool_guard, max_react_iters,
+            history=history, execution_context=execution_context,
         ):
             yield event
         return
@@ -122,6 +123,7 @@ async def run_agent_stream(
 
 async def _run_forced_skill_stream(
     llm: LLMClient,
+    system_prompt: str,
     tool_registry: ToolRegistry,
     skill_registry: SkillRegistry,
     user_message: str,
@@ -129,6 +131,7 @@ async def _run_forced_skill_stream(
     tool_guard: ToolGuard | None,
     max_react_iters: int,
     history: list[dict] | None = None,
+    execution_context: dict | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     yield ExecutionEvent(EventType.ROUTE_DECIDED, {"type": "skill", "skill": forced_skill})
 
@@ -141,36 +144,40 @@ async def _run_forced_skill_stream(
         return
 
     yield ExecutionEvent(EventType.SKILL_START, {"skill": forced_skill, "index": 0})
-    messages = [*(history or []), {"role": "user", "content": user_message}]
-    context = {"user_message": user_message, "task_type": "skill", "forced_skill": forced_skill}
+    messages = [
+        {"role": "system", "content": system_prompt},
+        *(history or []),
+        {"role": "user", "content": user_message},
+    ]
+    context: dict = {"user_message": user_message, "task_type": "skill", "forced_skill": forced_skill}
+    if execution_context:
+        context.update({k: v for k, v in execution_context.items() if v is not None})
     output_parts: list[str] = []
-    incomplete_reason: str | None = None
-    output_was_streamed = False
+    terminal_reason: str | None = None
+    terminal_type: str | None = None
     async for event in execute_skill_events(
         skill, llm, tool_registry, messages, context,
         max_react_iters, tool_guard=tool_guard,
     ):
         if event.type == EventType.TEXT_DELTA:
             output_parts.append(str(event.data.get("text", "")))
-            output_was_streamed = output_was_streamed or bool(event.data.get("already_streamed"))
             continue
         elif event.type == EventType.INCOMPLETE:
-            incomplete_reason = str(event.data.get("reason", "agent_incomplete"))
+            terminal_reason = str(event.data.get("reason", "agent_incomplete"))
+            terminal_type = "incomplete"
+        elif event.type == EventType.FAILED:
+            terminal_reason = str(event.data.get("reason", "agent_failed"))
+            terminal_type = "failed"
         yield event
-    if incomplete_reason:
+    if terminal_type:
+        yield ExecutionEvent(EventType.SKILL_END, {"skill": forced_skill, "status": terminal_type})
         if output_parts:
-            data: dict[str, object] = {"text": "".join(output_parts)}
-            if output_was_streamed:
-                data["already_streamed"] = True
-            yield ExecutionEvent(EventType.TEXT_DELTA, data)
+            yield ExecutionEvent(EventType.TEXT_DELTA, {"text": "".join(output_parts)})
         yield ExecutionEvent(EventType.DONE, {})
         return
     output = "".join(output_parts)
     yield ExecutionEvent(EventType.SKILL_END, {"skill": forced_skill, "status": "passed"})
-    data: dict[str, object] = {"text": output}
-    if output_was_streamed:
-        data["already_streamed"] = True
-    yield ExecutionEvent(EventType.TEXT_DELTA, data)
+    yield ExecutionEvent(EventType.TEXT_DELTA, {"text": output})
     yield ExecutionEvent(EventType.DONE, {})
 
 

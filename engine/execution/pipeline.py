@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, AsyncGenerator
+from uuid import uuid4
 
 from .backtrack import FailureLoopGuard, FailureSignature
 from .events import EventType, ExecutionEvent
@@ -67,9 +68,14 @@ async def run_pipeline(
         output = ""
         rubric_passed = False
         provision_id = ""
+        prev_provision_id: str | None = None
 
         while rubric_attempt < _RUBRIC_MAX_RETRIES:
-            provision_id = f"{node.skill_name}:{node_idx}:{rubric_attempt}"
+            if prev_provision_id:
+                yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
+                    "provision_id": prev_provision_id, "reason": "rubric_retry",
+                })
+            provision_id = f"{node.skill_name}:{node_idx}:{rubric_attempt}:{uuid4().hex[:8]}"
             skill = skill_registry.get(node.skill_name)
 
             if skill is None:
@@ -100,12 +106,13 @@ async def run_pipeline(
                 else:
                     yield event
 
-            if result.incomplete_reason:
+            if result.incomplete_reason or result.failed_reason:
+                reason = result.failed_reason or result.incomplete_reason
+                yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
+                    "provision_id": provision_id, "reason": reason,
+                })
                 if result.text:
-                    data: dict[str, object] = {"text": result.text}
-                    if result.was_streamed:
-                        data["already_streamed"] = True
-                    yield ExecutionEvent(EventType.TEXT_DELTA, data)
+                    yield ExecutionEvent(EventType.TEXT_DELTA, {"text": result.text})
                 yield ExecutionEvent(EventType.DONE, {})
                 return
             output = result.text
@@ -115,6 +122,7 @@ async def run_pipeline(
                 rubric_passed = True
                 break
             context["_rubric_retry_hint"] = rubric_result.retry_hint or ""
+            prev_provision_id = provision_id
             rubric_attempt += 1
 
         context.pop("_rubric_retry_hint", None)
@@ -137,7 +145,6 @@ async def run_pipeline(
         if gate_result.verdict == "pass":
             yield ExecutionEvent(EventType.PROVISIONAL_COMMIT, {"provision_id": provision_id})
             context[f"{node.skill_name}_output"] = output
-            context[f"_{node.skill_name}_output_was_streamed"] = result.was_streamed
             _save_checkpoint(context, node_idx)
             yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "passed"})
             node_idx += 1
@@ -168,14 +175,12 @@ async def run_pipeline(
 
         yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "retry"})
 
-    # Emit final output
+    # Emit final output — never mark already_streamed since provisional
+    # events are not yet consumed by session_service/shell
     for node in reversed(chain.nodes):
         key = f"{node.skill_name}_output"
         if key in context:
-            data: dict[str, object] = {"text": context[key]}
-            if context.get(f"_{node.skill_name}_output_was_streamed"):
-                data["already_streamed"] = True
-            yield ExecutionEvent(EventType.TEXT_DELTA, data)
+            yield ExecutionEvent(EventType.TEXT_DELTA, {"text": context[key]})
             break
 
     _clear_checkpoint(context)
@@ -188,12 +193,13 @@ async def run_pipeline(
 
 
 class _NodeResult:
-    __slots__ = ("text", "was_streamed", "incomplete_reason")
+    __slots__ = ("text", "was_streamed", "incomplete_reason", "failed_reason")
 
     def __init__(self) -> None:
         self.text = ""
         self.was_streamed = False
         self.incomplete_reason: str | None = None
+        self.failed_reason: str | None = None
 
 
 async def _collect_node_events(
@@ -207,6 +213,7 @@ async def _collect_node_events(
     parts: list[str] = []
     was_streamed = False
     incomplete_reason: str | None = None
+    failed_reason: str | None = None
 
     async for event in event_stream:
         if event.type == EventType.TEXT_DELTA:
@@ -225,12 +232,15 @@ async def _collect_node_events(
             continue
         elif event.type == EventType.INCOMPLETE:
             incomplete_reason = str(event.data.get("reason", "agent_incomplete"))
+        elif event.type == EventType.FAILED:
+            failed_reason = str(event.data.get("reason", "agent_failed"))
         yield event
 
     result = _NodeResult()
     result.text = "".join(parts)
     result.was_streamed = was_streamed
     result.incomplete_reason = incomplete_reason
+    result.failed_reason = failed_reason
     yield result
 
 
