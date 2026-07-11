@@ -4,9 +4,9 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
-LEGACY_PROFILES_DIRNAME = "employees"  # disk compatibility until identity migration lands
 PROJECT_ROOT_ENV = "AGENT_SMITH_PROJECT_ROOT"
 PRIVATE_DIR_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
 
 
 def _default_project_root() -> Path:
@@ -53,10 +53,6 @@ class AppPaths:
         return self.data_dir / "agent"
 
     @property
-    def legacy_agent_profiles_dir(self) -> Path:
-        return self.data_dir / LEGACY_PROFILES_DIRNAME
-
-    @property
     def sqlite_path(self) -> Path:
         return self.data_dir / "sqlite" / "agent-smith.sqlite"
 
@@ -73,6 +69,10 @@ class AppPaths:
         return self.project_root / "agents" / "tools"
 
     @property
+    def builtin_identities_dir(self) -> Path:
+        return self.project_root / "agents" / "identities"
+
+    @property
     def safety_rules_path(self) -> Path:
         return self.project_root / "agents" / "safety" / "dangerous_commands.json"
 
@@ -87,5 +87,4 @@ class AppPaths:
     def ensure_base_dirs(self) -> None:
         _ensure_private_dir(self.data_dir)
         _ensure_private_dir(self.agent_dir)
-        _ensure_private_dir(self.legacy_agent_profiles_dir)
         _ensure_private_dir(self.sqlite_path.parent)

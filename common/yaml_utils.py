@@ -7,8 +7,7 @@ from typing import Any
 
 import yaml
 
-PRIVATE_DIR_MODE = 0o700
-PRIVATE_FILE_MODE = 0o600
+from .paths import PRIVATE_DIR_MODE, PRIVATE_FILE_MODE
 
 
 class YamlConfigError(ValueError):
