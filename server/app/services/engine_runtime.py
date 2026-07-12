@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from common.config import AGENT_DIR, BUILTIN_IDENTITIES_DIR, PATHS, SAFETY_RULES_PATH
-from engine.execution.skill_chain import SkillChain
+from engine.execution.skill_chain import SkillChain, load_gate_content
 from engine.identity_catalog import IdentityCatalog, load_identity_catalog
 from engine.execution.runtime import RuntimeContext, RuntimeServices
 from engine.llm.model_config import LLMUsage, build_llm_client, resolve_llm_config
@@ -13,6 +13,8 @@ from engine.tool.registry import ToolRegistry
 def load_runtime_identity_catalog(*, force: bool = False) -> IdentityCatalog:
     """Load the one catalog and validate its declared assets for every entry point."""
     catalog = load_identity_catalog(BUILTIN_IDENTITIES_DIR, force=force)
+    # 门禁/条件内容必须先于 pipeline YAML 解析注册，否则合法 gate key 报 unknown。
+    load_gate_content(PATHS.project_root / "agents")
     pipelines = SkillChain.load_pipelines(PATHS.project_root / "agents" / "pipelines")
     skill_registry = SkillRegistry()
     skill_registry.load_builtin(PATHS.project_root / "agents" / "skills")

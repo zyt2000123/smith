@@ -2,6 +2,9 @@ name: feature
 description: Feature development pipeline
 route: feature
 
+# 兜底层：每个节点产出先过 rubric（长度/证据/无错误标记），再过节点自己的 gate
+base_gate: rubric
+
 steps:
   - skill: understand
     gate: understanding
