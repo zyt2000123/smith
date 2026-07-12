@@ -63,6 +63,24 @@ class ToolCallingLLM(FakeLLM):
         return self.responses.pop(0)
 
 
+class ToolCallingMemoryLLM(ToolCallingLLM):
+    def __init__(self) -> None:
+        super().__init__()
+        self.chat_calls: list[list[dict]] = []
+
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        prefix_cache_key: str | None = None,
+    ) -> ChatResponse:
+        self.chat_calls.append(messages)
+        self.messages = messages
+        if self.responses:
+            return self.responses.pop(0)
+        return ChatResponse(text="stable memory summary")
+
+
 def _write_profile(profile_dir: Path) -> None:
     profile_dir.mkdir(parents=True)
     for filename, content in {
@@ -112,6 +130,27 @@ routes: []
     return runtime, services, llm
 
 
+def test_prepare_runtime_binds_memory_ops_but_keeps_it_hidden(tmp_path: Path) -> None:
+    async def run() -> tuple[list[str], list[dict]]:
+        runtime, services, _ = _runtime(tmp_path)
+        tools_dir = runtime.agents_dir / "tools"
+        tools_dir.mkdir(exist_ok=True)
+        memory_ops_src = Path(__file__).resolve().parents[2] / "agents" / "tools" / "memory_ops.py"
+        (tools_dir / "memory_ops.py").write_text(memory_ops_src.read_text(encoding="utf-8"), encoding="utf-8")
+        (runtime.profile_dir / "config.yaml").write_text("tools:\n  enabled: [memory_ops]\n", encoding="utf-8")
+
+        await prepare_runtime(EngineRequest(message="hello"), runtime, services)
+        return (
+            services.tool_registry.list_tool_names(include_disabled=True),
+            services.tool_registry.get_schemas(),
+        )
+
+    tool_names, schemas = asyncio.run(run())
+
+    assert "memory_ops" in tool_names
+    assert all(schema["function"]["name"] != "memory_ops" for schema in schemas)
+
+
 def test_reply_with_runtime_uses_explicit_profile_context(tmp_path: Path) -> None:
     async def run() -> FakeLLM:
         runtime, services, llm = _runtime(tmp_path)
@@ -150,6 +189,33 @@ def test_reply_with_runtime_marks_actual_tool_activity(tmp_path: Path) -> None:
     assert llm.closed is True
 
 
+def test_runtime_reuses_llm_for_memory_compilation(tmp_path: Path) -> None:
+    async def run() -> ToolCallingMemoryLLM:
+        runtime, services, _ = _runtime(tmp_path)
+        llm = ToolCallingMemoryLLM()
+        services.llm = llm  # type: ignore[assignment]
+        state_dir = runtime.profile_dir / "memory"
+        state_dir.mkdir(parents=True)
+        (state_dir / ".compile_counter").write_text("4", encoding="utf-8")
+
+        result = await reply_with_runtime(EngineRequest(message="use a tool"), runtime, services)
+
+        assert result.had_tools is True
+        assert (state_dir / "recent.md").is_file()
+        assert (state_dir / "durable.md").is_file()
+        assert (state_dir / ".compile_counter").read_text(encoding="utf-8") == "0"
+        return llm
+
+    llm = asyncio.run(run())
+
+    assert llm.closed is True
+    assert len(llm.chat_calls) >= 3
+    assert any(
+        messages[0]["content"].startswith("You are a memory compiler")
+        for messages in llm.chat_calls
+    )
+
+
 def test_prepare_runtime_resolves_a_yaml_route_to_its_pipeline(tmp_path: Path) -> None:
     async def run():
         runtime, services, _ = _runtime(tmp_path)
@@ -175,7 +241,21 @@ name: refactor
 route: refactor
 steps:
   - skill: planning
-    gate: planning
+    gate: runtime_contract_planning
+""".strip(),
+            encoding="utf-8",
+        )
+        gates_dir = runtime.agents_dir / "gates"
+        gates_dir.mkdir()
+        (gates_dir / "planning.py").write_text(
+            """
+from engine.execution.gate import Gate, GateResult
+
+class AlwaysPassGate(Gate):
+    async def check(self, output, context):
+        return GateResult("pass", "ok")
+
+GATES = {"runtime_contract_planning": AlwaysPassGate}
 """.strip(),
             encoding="utf-8",
         )
@@ -226,6 +306,19 @@ def test_runtime_services_close_closes_the_gate_client(tmp_path: Path) -> None:
     assert runtime.agent_id == "smith"
     assert llm.closed is True
     assert gate_llm.closed is True
+
+
+def test_runtime_services_close_leaves_borrowed_llm_clients_open(tmp_path: Path) -> None:
+    runtime, services, llm = _runtime(tmp_path)
+    gate_llm = FakeLLM()
+    services.gate_llm = gate_llm  # type: ignore[assignment]
+    services.owns_llm_clients = False
+
+    asyncio.run(services.close())
+
+    assert runtime.agent_id == "smith"
+    assert llm.closed is False
+    assert gate_llm.closed is False
 
 
 def test_run_stream_reports_terminal_state_only_after_it_is_drained(tmp_path: Path) -> None:

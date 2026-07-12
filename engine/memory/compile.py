@@ -23,6 +23,7 @@ from ._files import (
     atomic_write_text,
     contains_injection,
     contains_secret,
+    safe_file_in_dir,
     sanitize_memory_text,
 )
 
@@ -57,6 +58,17 @@ def _read_fp(path: Path) -> str:
 
 def _write_fp(path: Path, fp: str) -> None:
     atomic_write_text(path, fp)
+
+
+def _clear_recent_view(memory_dir: Path) -> bool:
+    """Remove stale derived recent-memory artifacts without touching events."""
+    removed = False
+    for name in ("recent.md", ".fp_recent"):
+        path = memory_dir / name
+        if path.exists():
+            path.unlink()
+            removed = True
+    return removed
 
 
 def _load_recent(
@@ -304,7 +316,7 @@ async def compile_recent(
     if not entries:
         entries = _filter_by_time(all_entries, now - timedelta(days=MAX_WINDOW_DAYS))
     if not entries:
-        return False
+        return _clear_recent_view(memory_dir)
 
     out = memory_dir / "recent.md"
     fp_file = memory_dir / ".fp_recent"
@@ -384,7 +396,8 @@ async def compile_durable(
             _write_durable_offset(memory_dir, total)
         return False
 
-    original = out.read_text(encoding="utf-8") if out.is_file() else ""
+    original_path = safe_file_in_dir(memory_dir, out)
+    original = original_path.read_text(encoding="utf-8") if original_path else ""
     existing, _, _ = sanitize_memory_text(original)
     existing = existing.strip()
     new_source = _entries_to_source(
@@ -500,8 +513,8 @@ def assemble_memory(memory_dir: Path) -> str:
     sections = []
 
     for name in ("durable.md", "recent.md"):
-        path = memory_dir / name
-        if path.is_file():
+        path = safe_file_in_dir(memory_dir, memory_dir / name)
+        if path is not None:
             content, _, _ = sanitize_memory_text(path.read_text(encoding="utf-8"))
             content = content.strip()
             if content:

@@ -307,25 +307,80 @@ async def _register_mcp_tools(
     if not isinstance(mcp_servers, list) or not mcp_servers:
         return
     try:
-        from engine.tool.mcp_client import MCPClient, register_mcp_tools
+        from engine.tool.mcp_client import (
+            MCPClient,
+            register_mcp_tools_with_prefix,
+        )
     except Exception:
         logger.exception("failed to import MCP client (agent=%s)", runtime.agent_id)
         return
     # 逐 server 隔离失败：一个 server 连不上不许拖垮其余 server 的注册。
     for srv in mcp_servers:
         try:
-            cmd = srv.get("command", []) if isinstance(srv, dict) else []
-            if not cmd:
+            if not isinstance(srv, dict):
                 continue
-            client = MCPClient(cmd, env=srv.get("env"))
+            transport = _mcp_transport_from_config(srv)
+            if transport is None:
+                continue
+            prefix = _mcp_tool_prefix_from_config(srv)
+            client = MCPClient(transport=transport)
             await client.connect()
             services.mcp_clients.append(client)
-            await register_mcp_tools(services.tool_registry, client)
+            await register_mcp_tools_with_prefix(services.tool_registry, client, prefix=prefix)
         except Exception:
             logger.exception(
-                "failed to register MCP server (agent=%s, command=%r)",
-                runtime.agent_id, srv.get("command") if isinstance(srv, dict) else srv,
+                "failed to register MCP server (agent=%s, server=%r)",
+                runtime.agent_id, _mcp_server_log_summary(srv),
             )
+
+
+def _mcp_transport_from_config(config: dict):
+    from engine.tool.mcp_client import StdioMCPTransport, StreamableHTTPMCPTransport
+
+    transport_type = str(config.get("type") or "").strip().lower().replace("-", "_")
+    if not transport_type:
+        transport_type = "streamable_http" if config.get("url") else "stdio"
+
+    if transport_type == "stdio":
+        command = config.get("command", [])
+        if not isinstance(command, list) or not command:
+            return None
+        env = config.get("env")
+        return StdioMCPTransport(command, env=env if isinstance(env, dict) else None)
+
+    if transport_type in {"http", "streamable_http"}:
+        url = config.get("url")
+        if not isinstance(url, str) or not url:
+            return None
+        headers = config.get("headers")
+        timeout = config.get("timeout", 30.0)
+        return StreamableHTTPMCPTransport(
+            url,
+            headers=headers if isinstance(headers, dict) else None,
+            timeout=float(timeout) if isinstance(timeout, (int, float)) else 30.0,
+        )
+
+    raise ValueError(f"unsupported MCP transport type: {transport_type}")
+
+
+def _mcp_tool_prefix_from_config(config: dict) -> str:
+    name = config.get("name") or config.get("alias")
+    if isinstance(name, str) and name:
+        return f"mcp_{name}"
+    return "mcp"
+
+
+def _mcp_server_log_summary(config: dict) -> dict[str, object]:
+    summary: dict[str, object] = {}
+    for key in ("type", "name", "alias", "url", "command", "timeout"):
+        value = config.get(key)
+        if value is not None:
+            summary[key] = value
+    if isinstance(config.get("headers"), dict):
+        summary["headers"] = sorted(config["headers"].keys())
+    if isinstance(config.get("env"), dict):
+        summary["env"] = sorted(config["env"].keys())
+    return summary
 
 
 async def prepare_runtime(
@@ -340,6 +395,7 @@ async def prepare_runtime(
     state_dir = _identity_state_dir(runtime, identity)
 
     services.tool_registry.load_providers(runtime.agents_dir / "tools")
+    _bind_memory_ops_tool(services, state_dir)
     profile_config = await _load_profile_config(runtime)
     await _register_mcp_tools(profile_config, runtime, services)
 
@@ -379,6 +435,29 @@ async def prepare_runtime(
     return _AgentSetup(system_prompt, identity, route, chain, state_dir)
 
 
+def _bind_memory_ops_tool(services: RuntimeServices, state_dir: Path) -> None:
+    memory_dir = state_dir / "memory"
+
+    async def episode_runner(memory_dir: Path, topic: str, related: list[dict]):
+        from engine.memory.compile import compact_episode
+        return await compact_episode(
+            memory_dir,
+            services.llm,
+            topic,
+            related,
+            reviewer=services.gate_llm,
+        )
+
+    def wrapper(func):
+        async def execute_with_memory_context(**kwargs):
+            kwargs["memory_dir"] = memory_dir
+            kwargs["episode_runner"] = episode_runner
+            return await func(**kwargs)
+        return execute_with_memory_context
+
+    services.tool_registry.wrap_tool("memory_ops", wrapper)
+
+
 def _resolve_pipeline(
     route: RouteDecision,
     runtime: RuntimeContext,
@@ -415,14 +494,80 @@ def _resolve_pipeline(
 # ---------------------------------------------------------------------------
 
 
+def _ensure_memory_lifecycle_hooks(services: RuntimeServices) -> None:
+    if getattr(services, "_memory_lifecycle_hooks_registered", False):
+        return
+    from engine.execution.memory_maintenance import (
+        MemoryLifecycleHooks,
+        MemoryMaintenanceService,
+    )
+    from engine.hook import HookManager
+
+    if services.hooks is None:
+        services.hooks = HookManager()
+    services.hooks.register(MemoryLifecycleHooks(
+        MemoryMaintenanceService(services.llm, reviewer=services.gate_llm)
+    ))
+    setattr(services, "_memory_lifecycle_hooks_registered", True)
+
+
+async def run_memory_idle_tick(memory_dir: Path, services: RuntimeServices) -> bool:
+    """Dispatch idle memory maintenance through lifecycle hooks."""
+    return await _dispatch_memory_maintenance_tick(
+        "memory_idle_tick",
+        memory_dir,
+        services,
+    )
+
+
+async def run_memory_daily_tick(memory_dir: Path, services: RuntimeServices) -> bool:
+    """Dispatch daily memory maintenance through lifecycle hooks."""
+    return await _dispatch_memory_maintenance_tick(
+        "memory_daily_tick",
+        memory_dir,
+        services,
+    )
+
+
+async def _dispatch_memory_maintenance_tick(
+    hook_name: str,
+    memory_dir: Path,
+    services: RuntimeServices,
+) -> bool:
+    _ensure_memory_lifecycle_hooks(services)
+    try:
+        from engine.hook import HookType
+
+        results = await services.hooks.apply(
+            hook_name,
+            HookType.PARALLEL,
+            args=(memory_dir,),
+        )
+        return all(result is not False for result in results)
+    except Exception:
+        logger.warning("failed to dispatch %s", hook_name, exc_info=True)
+        return False
+
+
 async def _persist_runtime_learning(
-    state_dir: Path, user_message: str, reply_text: str, had_tools: bool,
+    state_dir: Path,
+    user_message: str,
+    reply_text: str,
+    had_tools: bool,
+    services: RuntimeServices,
 ) -> bool:
     """Persist memory and preferences. Returns False if any write failed."""
     ok = True
+    _ensure_memory_lifecycle_hooks(services)
     try:
-        from engine.memory.store import save_conversation_memory
-        await save_conversation_memory(state_dir, user_message, reply_text, had_tools)
+        from engine.hook import HookType
+
+        results = await services.hooks.apply(
+            "memory_after_turn_completed",
+            HookType.PARALLEL,
+            args=(state_dir, user_message, reply_text, had_tools),
+        )
+        ok = all(result is not False for result in results)
     except Exception:
         ok = False
         logger.warning("failed to persist conversation memory", exc_info=True)
@@ -521,7 +666,7 @@ async def _run_events_with_runtime(
         if drained and terminal_status == "completed" and state_dir is not None:
             try:
                 memory_persist_failed = not await _persist_runtime_learning(
-                    state_dir, request.message, "".join(full_text), had_tools,
+                    state_dir, request.message, "".join(full_text), had_tools, services,
                 )
             except Exception:
                 memory_persist_failed = True

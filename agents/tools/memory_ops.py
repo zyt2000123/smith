@@ -12,6 +12,9 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Awaitable, Callable
+
+EpisodeRunner = Callable[[Path, str, list[dict]], Awaitable[Path | None]]
 
 TOOL_META = {
     "name": "memory_ops",
@@ -49,14 +52,10 @@ TOOL_META = {
     },
 }
 
-def _memory_dir() -> Path:
-    try:
-        from common.config import AGENT_DIR
-    except ModuleNotFoundError:
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from common.config import AGENT_DIR
-    return AGENT_DIR / "memory"
+def _memory_dir(memory_dir: str | Path | None = None) -> Path:
+    if memory_dir is not None:
+        return Path(memory_dir).expanduser()
+    return Path.home() / ".agent-smith" / "agent" / "memory"
 
 
 def _check_sensitive(text: str) -> str | None:
@@ -84,6 +83,36 @@ def _sanitize_for_tool_output(text: str) -> str:
     return sanitize_memory_text(text)[0]
 
 
+def _safe_file_in_dir(root: Path, path: Path) -> Path | None:
+    try:
+        from engine.memory._files import safe_file_in_dir
+    except ModuleNotFoundError:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from engine.memory._files import safe_file_in_dir
+    return safe_file_in_dir(root, path)
+
+
+def _safe_markdown_files(directory: Path) -> list[Path]:
+    try:
+        from engine.memory._files import safe_markdown_files
+    except ModuleNotFoundError:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from engine.memory._files import safe_markdown_files
+    return safe_markdown_files(directory)
+
+
+def _sanitize_event_value_for_storage(value: str) -> str:
+    try:
+        from engine.memory.store import _sanitize_event_value
+    except ModuleNotFoundError:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from engine.memory.store import _sanitize_event_value
+    return _sanitize_event_value(value)
+
+
 async def execute(
     *,
     action: str,
@@ -92,9 +121,11 @@ async def execute(
     evidence: str | None = None,
     topic: str | None = None,
     episode_id: str | None = None,
+    memory_dir: str | Path | None = None,
+    episode_runner: EpisodeRunner | None = None,
     **_: object,
 ) -> str:
-    mem_dir = _memory_dir()
+    mem_dir = _memory_dir(memory_dir)
     mem_dir.mkdir(parents=True, exist_ok=True)
 
     if action == "search":
@@ -118,7 +149,7 @@ async def execute(
         rejection = _check_sensitive(topic)
         if rejection:
             return rejection
-        return await _create_episode(mem_dir, topic)
+        return await _create_episode(mem_dir, topic, episode_runner=episode_runner)
 
     elif action == "update":
         if not episode_id:
@@ -143,8 +174,8 @@ def _append_event(mem_dir: Path, content: str, evidence: str) -> str:
     recent_file = mem_dir / "recent.jsonl"
     now = datetime.now(timezone.utc).isoformat()
     entry = {
-        "task": f"[memory] {content}",
-        "summary": f"Evidence: {evidence}",
+        "task": _sanitize_event_value_for_storage(f"[memory] {content}"),
+        "summary": _sanitize_event_value_for_storage(f"Evidence: {evidence}"),
         "timestamp": now,
     }
     with open(recent_file, "a", encoding="utf-8") as f:
@@ -161,18 +192,17 @@ async def _search(mem_dir: Path, query: str) -> str:
     matches: list[str] = []
 
     for name in ("durable.md", "recent.md"):
-        path = mem_dir / name
-        if path.is_file():
+        path = _safe_file_in_dir(mem_dir, mem_dir / name)
+        if path is not None:
             content = _sanitize_for_tool_output(path.read_text(encoding="utf-8"))
             if any(kw in content.lower() for kw in keywords):
                 matches.append(f"- [{name}] {content[:200]}")
 
     episodes_dir = mem_dir / "episodes"
-    if episodes_dir.is_dir():
-        for ep in sorted(episodes_dir.glob("*.md")):
-            content = _sanitize_for_tool_output(ep.read_text(encoding="utf-8"))
-            if any(kw in content.lower() for kw in keywords):
-                matches.append(f"- [episode:{ep.stem}] {content[:120]}")
+    for ep in _safe_markdown_files(episodes_dir):
+        content = _sanitize_for_tool_output(ep.read_text(encoding="utf-8"))
+        if any(kw in content.lower() for kw in keywords):
+            matches.append(f"- [episode:{ep.stem}] {content[:120]}")
 
     recent_file = mem_dir / "recent.jsonl"
     if recent_file.is_file():
@@ -199,7 +229,12 @@ async def _search(mem_dir: Path, query: str) -> str:
     return f"Found {len(matches)} match(es):\n" + "\n".join(matches)
 
 
-async def _create_episode(mem_dir: Path, topic: str) -> str:
+async def _create_episode(
+    mem_dir: Path,
+    topic: str,
+    *,
+    episode_runner: EpisodeRunner | None = None,
+) -> str:
     recent_file = mem_dir / "recent.jsonl"
     if not recent_file.is_file():
         return "Error: no recent events to summarize"
@@ -218,26 +253,11 @@ async def _create_episode(mem_dir: Path, topic: str) -> str:
     if not related:
         return f"No events found matching topic '{topic}'"
 
+    if episode_runner is None:
+        return "Error: episode generation unavailable — no episode runner configured"
+
     try:
-        from engine.memory.compile import compact_episode
-        from engine.llm.model_config import LLMUsage, resolve_llm_config, build_llm_client
-
-        gen_cfg = resolve_llm_config(usage=LLMUsage.BACKGROUND)
-        if not gen_cfg.get("api_key"):
-            return "Error: no LLM API key configured — cannot generate episode"
-
-        generator = build_llm_client(gen_cfg)
-        reviewer = None
-        try:
-            rev_cfg = resolve_llm_config(usage=LLMUsage.GATE)
-            if rev_cfg.get("api_key"):
-                reviewer = build_llm_client(rev_cfg)
-            path = await compact_episode(mem_dir, generator, topic, related, reviewer=reviewer)
-        finally:
-            await generator.close()
-            if reviewer:
-                await reviewer.close()
-
+        path = await episode_runner(mem_dir, topic, related)
         if path:
             return f"OK: episode saved to {path.name} ({len(related)} related events)"
         return "Error: episode generation returned no output"

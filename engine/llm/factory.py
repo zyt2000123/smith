@@ -7,7 +7,8 @@ from dataclasses import replace
 
 from .adapters.anthropic import AnthropicAdapter
 from .adapters.base import ProviderAdapter
-from .adapters.openai_compatible import OpenAICompatibleAdapter
+from .adapters.gemini import GeminiAdapter
+from .adapters.openai import OpenAIAdapter
 from .client import ProviderClient
 from .contracts import LLMProviderConfig, UnsupportedProviderError
 
@@ -42,7 +43,7 @@ class ProviderRegistry:
 
     def normalize(self, provider: object) -> str:
         if provider is None or (isinstance(provider, str) and not provider.strip()):
-            return "openai_compatible"
+            return "openai"
         if not isinstance(provider, str):
             raise UnsupportedProviderError("LLM provider must be a string.")
         name = self._clean_name(provider)
@@ -71,11 +72,12 @@ class ProviderRegistry:
 
 DEFAULT_PROVIDER_REGISTRY = ProviderRegistry()
 DEFAULT_PROVIDER_REGISTRY.register(
-    "openai_compatible",
-    OpenAICompatibleAdapter,
-    aliases=("openai",),
+    "openai",
+    OpenAIAdapter,
+    aliases=("openai_compatible",),
 )
 DEFAULT_PROVIDER_REGISTRY.register("anthropic", AnthropicAdapter)
+DEFAULT_PROVIDER_REGISTRY.register("gemini", GeminiAdapter)
 
 
 def normalize_provider_name(provider: object) -> str:

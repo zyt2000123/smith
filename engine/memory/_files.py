@@ -64,6 +64,32 @@ def sanitize_memory_text(text: str) -> tuple[str, int, int]:
     return "\n".join(clean), secrets_removed, injections_removed
 
 
+def safe_file_in_dir(root: Path, path: Path) -> Path | None:
+    """Return a resolved file only when it stays under *root*."""
+    try:
+        resolved_root = root.resolve()
+        resolved_path = path.resolve(strict=True)
+    except OSError:
+        return None
+    if not resolved_path.is_relative_to(resolved_root):
+        return None
+    if not resolved_path.is_file():
+        return None
+    return resolved_path
+
+
+def safe_markdown_files(directory: Path) -> list[Path]:
+    """List markdown files without following symlinks outside *directory*."""
+    if not directory.is_dir():
+        return []
+    files: list[Path] = []
+    for path in sorted(directory.glob("*.md")):
+        resolved = safe_file_in_dir(directory, path)
+        if resolved is not None:
+            files.append(resolved)
+    return files
+
+
 def atomic_write_text(path: Path, content: str) -> None:
     """Replace *path* atomically, keeping an existing file intact on failure."""
     path.parent.mkdir(parents=True, exist_ok=True)

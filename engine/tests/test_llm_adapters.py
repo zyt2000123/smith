@@ -10,7 +10,7 @@ from common.yaml_utils import YamlConfigError
 from engine.llm.adapters.anthropic import AnthropicAdapter
 from engine.llm.adapters._retry import MAX_RETRY_AFTER_SECONDS, retry_after_seconds
 from engine.llm.client import LLMClient, ProviderClient
-from engine.llm.contracts import LLMProviderConfig, LLMRequest
+from engine.llm.contracts import GEMINI_OPENAI_BASE_URL, LLMProviderConfig, LLMRequest
 from engine.llm.events import ProviderEventType
 from engine.llm.factory import create_llm_client, normalize_provider_name, supported_provider_names
 from engine.llm.model_config import build_llm_client
@@ -41,23 +41,44 @@ def _anthropic_config(**overrides: object) -> LLMProviderConfig:
     return LLMProviderConfig(**values)  # type: ignore[arg-type]
 
 
-def test_factory_selects_real_adapters_and_preserves_openai_alias() -> None:
+def test_factory_selects_real_adapters_and_preserves_openai_aliases() -> None:
     anthropic = create_llm_client(_anthropic_config())
     openai = create_llm_client(_anthropic_config(
         provider="openai",
+        base_url="https://openai.test/v1",
+    ))
+    gemini = create_llm_client(_anthropic_config(
+        provider="gemini",
+        base_url="",
+        model="gemini-3.5-flash",
+    ))
+    legacy_openai = create_llm_client(_anthropic_config(
+        provider="openai_compatible",
         base_url="https://openai.test/v1",
     ))
     try:
         assert isinstance(anthropic, LLMPort)
         assert anthropic.provider == "anthropic"
         assert type(anthropic.adapter).__name__ == "AnthropicAdapter"
-        assert openai.provider == "openai_compatible"
-        assert type(openai.adapter).__name__ == "OpenAICompatibleAdapter"
-        assert normalize_provider_name("openai") == "openai_compatible"
-        assert supported_provider_names() == ("anthropic", "openai", "openai_compatible")
+        assert openai.provider == "openai"
+        assert type(openai.adapter).__name__ == "OpenAIAdapter"
+        assert legacy_openai.provider == "openai"
+        assert gemini.provider == "gemini"
+        assert type(gemini.adapter).__name__ == "GeminiAdapter"
+        assert gemini.adapter.base_url == GEMINI_OPENAI_BASE_URL.rstrip("/")
+        assert normalize_provider_name("openai") == "openai"
+        assert normalize_provider_name("openai_compatible") == "openai"
+        assert supported_provider_names() == (
+            "anthropic",
+            "gemini",
+            "openai",
+            "openai_compatible",
+        )
     finally:
         asyncio.run(anthropic.close())
         asyncio.run(openai.close())
+        asyncio.run(gemini.close())
+        asyncio.run(legacy_openai.close())
 
 
 def test_build_llm_client_rejects_unknown_provider() -> None:
@@ -288,11 +309,11 @@ def test_anthropic_moves_late_system_instruction_into_ordered_user_turn() -> Non
 
 
 def test_openai_response_size_cap_aborts_before_full_parse() -> None:
-    from engine.llm.adapters.openai_compatible import _MAX_RESPONSE_BYTES, OpenAICompatibleAdapter
+    from engine.llm.adapters.openai import _MAX_RESPONSE_BYTES, OpenAIAdapter
     from engine.llm.contracts import LLMResponseError as _Err
 
-    adapter = OpenAICompatibleAdapter(LLMProviderConfig(
-        provider="openai_compatible", api_key="k",
+    adapter = OpenAIAdapter(LLMProviderConfig(
+        provider="openai", api_key="k",
         base_url="https://openai.test/v1", model="m",
     ))
     oversized = b"x" * (_MAX_RESPONSE_BYTES + 1)
@@ -411,7 +432,7 @@ def test_openai_stream_failure_raises_llm_response_error() -> None:
 
 def test_api_key_hidden_from_config_repr() -> None:
     config = LLMProviderConfig(
-        provider="openai_compatible", api_key="sk-secret-key",
+        provider="openai", api_key="sk-secret-key",
         base_url="https://api.test", model="m",
     )
     assert "sk-secret-key" not in repr(config)
