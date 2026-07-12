@@ -218,7 +218,7 @@ class UserPreferenceLearner:
             return False
 
         # Field not found at all — append to Preferences section if it exists
-        if "# Preferences" in content or "# 偏好" in content:
+        if "# Interaction Preferences" in content or "# Preferences" in content or "# 偏好" in content:
             content = content.rstrip() + f"\n- {field_label}: {value}\n"
             atomic_write_text(self._context_path, content)
             return True

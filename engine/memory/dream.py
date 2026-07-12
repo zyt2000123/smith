@@ -162,11 +162,12 @@ async def _consolidate_durable(
 
 
 def _cleanup_log(memory_dir: Path, report: DreamReport) -> None:
-    """Truncate recent.jsonl entries before the compile offset.
-
-    Only cleans if both recent.md and durable.md exist — proving
-    compilation has run successfully at least once.
+    """Truncate recent.jsonl entries that are both before the compile offset
+    AND older than MAX_WINDOW_DAYS, preserving the recent rolling window.
     """
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+
     recent = memory_dir / "recent.jsonl"
     offset_file = memory_dir / ".compile_offset"
 
@@ -185,13 +186,26 @@ def _cleanup_log(memory_dir: Path, report: DreamReport) -> None:
         return
 
     lines = recent.read_text(encoding="utf-8").strip().splitlines()
-    if offset >= len(lines):
-        atomic_write_text(recent, "")
-        report.log_lines_cleaned = len(lines)
-    else:
-        remaining = lines[offset:]
-        atomic_write_text(recent, "\n".join(remaining) + "\n")
-        report.log_lines_cleaned = offset
+    if not lines:
+        return
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    safe_offset = 0
+    for i, line in enumerate(lines[:offset]):
+        try:
+            ts = _json.loads(line).get("timestamp", "")
+            if ts and ts < cutoff:
+                safe_offset = i + 1
+        except (ValueError, _json.JSONDecodeError):
+            safe_offset = i + 1
+
+    if safe_offset <= 0:
+        return
+
+    remaining = lines[safe_offset:]
+    atomic_write_text(recent, "\n".join(remaining) + "\n" if remaining else "")
+    report.log_lines_cleaned = safe_offset
 
     if report.log_lines_cleaned > 0:
-        atomic_write_text(offset_file, "0")
+        new_offset = max(0, offset - safe_offset)
+        atomic_write_text(offset_file, str(new_offset))

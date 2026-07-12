@@ -131,6 +131,7 @@ class AgentService:
         context: str | None = None,
         skill_name: str | None = None,
         identity_id: str | None = None,
+        working_dir: str | None = None,
     ) -> MessageOut:
         return await self.session_service.send_message(
             await self._profile_id(),
@@ -139,6 +140,7 @@ class AgentService:
             context=context,
             skill_name=skill_name,
             identity_id=identity_id,
+            working_dir=working_dir,
         )
 
     async def stream_message(
@@ -149,6 +151,7 @@ class AgentService:
         context: str | None = None,
         skill_name: str | None = None,
         identity_id: str | None = None,
+        working_dir: str | None = None,
     ) -> AsyncGenerator[dict, None]:
         async for event in self.session_service.stream_message(
             await self._profile_id(),
@@ -157,6 +160,7 @@ class AgentService:
             context=context,
             skill_name=skill_name,
             identity_id=identity_id,
+            working_dir=working_dir,
         ):
             yield event
 

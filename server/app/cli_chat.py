@@ -20,7 +20,8 @@ def _context_from_args(args: Any) -> str | None:
 
 
 def _pick_initial_prompt(message: str) -> str:
-    first_line = message.strip().splitlines()[0].strip()
+    lines = message.strip().splitlines()
+    first_line = lines[0].strip() if lines else ""
     if not first_line:
         return "CLI Chat"
     return first_line[:40]

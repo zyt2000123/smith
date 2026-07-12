@@ -53,9 +53,10 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) 
 
             lines = ["## Relevant Episodes"]
             total_chars = 0
+            episodes_root = episodes_dir.resolve()
             for hit in hits:
-                ep_path = episodes_dir / f"{hit['id']}.md"
-                if not ep_path.is_file():
+                ep_path = (episodes_dir / f"{hit['id']}.md").resolve()
+                if not ep_path.is_relative_to(episodes_root) or not ep_path.is_file():
                     continue
                 content = ep_path.read_text(encoding="utf-8").strip()
                 if total_chars + len(content) > _MAX_EPISODE_CONTEXT_CHARS:

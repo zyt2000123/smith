@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     environment TEXT NOT NULL DEFAULT '',
     accent TEXT NOT NULL DEFAULT '',
     config_path TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(name, role)
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -82,7 +83,16 @@ async def _ensure_session_identity_column(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE sessions ADD COLUMN identity_id TEXT")
 
 
+async def _ensure_unique_profile_index(db: aiosqlite.Connection) -> None:
+    """Add UNIQUE(name, role) to existing databases that lack it."""
+    await db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_profiles_name_role "
+        "ON agent_profiles(name, role)"
+    )
+
+
 async def ensure_schema(db: aiosqlite.Connection) -> None:
     await db.executescript(APP_SCHEMA)
     await _ensure_session_identity_column(db)
+    await _ensure_unique_profile_index(db)
     await db.commit()

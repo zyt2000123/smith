@@ -342,9 +342,11 @@ async def prepare_runtime(
     from engine.memory.store import search_relevant_memories
     retrieved = await search_relevant_memories(state_dir, request.message)
     assembler = PromptAssembler()
+    wd = Path(request.working_dir) if request.working_dir else Path.cwd()
     system_prompt = assembler.assemble(
         runtime.profile_dir, services.tool_registry, services.skill_registry,
         _runtime_prompt_context(runtime, identity), retrieved_memory=retrieved,
+        working_dir=wd,
     )
     if identity.prompt:
         system_prompt += "\n\n---\n\n" + identity.prompt

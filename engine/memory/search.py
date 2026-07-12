@@ -29,21 +29,26 @@ class SearchIndex:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         needs_rebuild = self._needs_rebuild()
         self._db = await aiosqlite.connect(str(self._db_path))
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA busy_timeout=3000")
-        if needs_rebuild:
-            await self._db.execute("DROP TABLE IF EXISTS memory_fts")
-        await self._db.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts
-            USING fts5(entry_id, content, scope, tokenize='trigram')
-        """)
-        await self._db.commit()
-        if needs_rebuild:
-            self._version_path.write_text(_SCHEMA_VERSION, encoding="utf-8")
-            mtime_marker = self._db_path.parent / ".index_mtime"
-            if mtime_marker.exists():
-                mtime_marker.unlink()
+        try:
+            self._db.row_factory = aiosqlite.Row
+            await self._db.execute("PRAGMA journal_mode=WAL")
+            await self._db.execute("PRAGMA busy_timeout=3000")
+            if needs_rebuild:
+                await self._db.execute("DROP TABLE IF EXISTS memory_fts")
+            await self._db.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts
+                USING fts5(entry_id, content, scope, tokenize='trigram')
+            """)
+            await self._db.commit()
+            if needs_rebuild:
+                self._version_path.write_text(_SCHEMA_VERSION, encoding="utf-8")
+                mtime_marker = self._db_path.parent / ".index_mtime"
+                if mtime_marker.exists():
+                    mtime_marker.unlink()
+        except BaseException:
+            await self._db.close()
+            self._db = None
+            raise
 
     def _needs_rebuild(self) -> bool:
         if not self._db_path.exists():
@@ -77,12 +82,16 @@ class SearchIndex:
         await self._db.commit()
 
     async def search(self, query: str, top_k: int = 10) -> list[dict]:
-        if not self._db:
+        if not self._db or not query.strip():
             return []
-        rows = await self._db.execute_fetchall(
-            "SELECT entry_id, bm25(memory_fts) AS score "
-            "FROM memory_fts WHERE memory_fts MATCH ? "
-            "ORDER BY score LIMIT ?",
-            (query, top_k),
-        )
+        safe_query = '"' + query.replace('"', '""') + '"'
+        try:
+            rows = await self._db.execute_fetchall(
+                "SELECT entry_id, bm25(memory_fts) AS score "
+                "FROM memory_fts WHERE memory_fts MATCH ? "
+                "ORDER BY score LIMIT ?",
+                (safe_query, top_k),
+            )
+        except Exception:
+            return []
         return [{"id": r["entry_id"], "score": -r["score"]} for r in rows]

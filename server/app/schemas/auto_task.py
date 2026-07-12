@@ -1,10 +1,14 @@
+from typing import Literal
+
 from pydantic import BaseModel
+
+TriggerType = Literal["manual", "cron", "interval"]
 
 
 class AutoTaskCreate(BaseModel):
     title: str
     description: str = ""
-    trigger_type: str = "manual"  # manual | cron | interval
+    trigger_type: TriggerType = "manual"
     trigger_config: str = ""
     instruction: str
     enabled: bool = True
@@ -13,11 +17,10 @@ class AutoTaskCreate(BaseModel):
 class AutoTaskUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
-    trigger_type: str | None = None
+    trigger_type: TriggerType | None = None
     trigger_config: str | None = None
     instruction: str | None = None
     enabled: bool | None = None
-    status: str | None = None
 
 
 class AutoTaskOut(BaseModel):

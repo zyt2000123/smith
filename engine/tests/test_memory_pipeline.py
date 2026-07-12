@@ -376,7 +376,7 @@ def test_dream_cleans_log_with_offset(tmp_path: Path) -> None:
     memory_dir.mkdir()
     lines = []
     for i in range(10):
-        lines.append(json.dumps({"task": f"task {i}", "summary": f"reply {i}", "timestamp": "2026-07-10"}))
+        lines.append(json.dumps({"task": f"task {i}", "summary": f"reply {i}", "timestamp": "2026-06-01T00:00:00"}))
     (memory_dir / "recent.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (memory_dir / ".compile_offset").write_text("7", encoding="utf-8")
     (memory_dir / "recent.md").write_text("exists", encoding="utf-8")
@@ -407,7 +407,7 @@ def test_dream_sanitizes_all_layers(tmp_path: Path) -> None:
     episodes_dir = memory_dir / "episodes"
     episodes_dir.mkdir()
     (memory_dir / "durable.md").write_text("safe line\napi_key: sk-secret123456789012345\nmore safe", encoding="utf-8")
-    (episodes_dir / "test.md").write_text("clean\npassword: hunter2\nalso clean", encoding="utf-8")
+    (episodes_dir / "test.md").write_text("clean\npassword: hunter2hunter2\nalso clean", encoding="utf-8")
 
     report = asyncio.run(run_dream(memory_dir, StaticLLM()))
 

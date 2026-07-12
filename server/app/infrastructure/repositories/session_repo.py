@@ -78,10 +78,11 @@ class SessionRepo:
 
     async def get_messages(self, session_id: str, limit: int = 0, offset: int = 0) -> list[dict]:
         db = await get_app_db()
-        if limit > 0:
+        if limit > 0 or offset > 0:
+            effective_limit = limit if limit > 0 else -1
             rows = await db.execute_fetchall(
                 "SELECT * FROM messages WHERE session_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?",
-                (session_id, limit, offset),
+                (session_id, effective_limit, offset),
             )
         else:
             rows = await db.execute_fetchall(
