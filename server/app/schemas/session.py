@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SessionCreate(BaseModel):
@@ -18,10 +18,11 @@ class SessionOut(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    content: str
-    context: str | None = None
+    content: str = Field(max_length=100_000)
+    context: str | None = Field(default=None, max_length=50_000)
     skill_name: str | None = None
     identity_id: str | None = None
+    working_dir: str | None = None
 
 
 class MessageOut(BaseModel):

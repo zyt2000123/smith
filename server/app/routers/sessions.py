@@ -40,6 +40,7 @@ async def send_message(agent_id: str, session_id: str, body: MessageCreate, svc:
         body.content,
         context=body.context,
         skill_name=body.skill_name,
+        working_dir=body.working_dir,
     )
 
 
@@ -52,5 +53,6 @@ async def stream_message(agent_id: str, session_id: str, body: MessageCreate, sv
             body.content,
             context=body.context,
             skill_name=body.skill_name,
+            working_dir=body.working_dir,
         )
     )

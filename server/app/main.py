@@ -3,8 +3,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from fastapi import Depends
+
 from common.database import close_db
 
+from .infrastructure.auth import require_auth
 from .infrastructure.database import get_app_db
 from .routers import (
     agent,
@@ -23,8 +26,7 @@ plugins.set_service(_plugin_service)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await get_app_db()
-    identity_catalog = load_runtime_identity_catalog(force=True)
-    app.state.identity_catalog = identity_catalog
+    load_runtime_identity_catalog(force=True)
     scheduler_task = asyncio.create_task(run_scheduler())
     await _plugin_service.startup()
     yield
@@ -41,14 +43,18 @@ app = FastAPI(title="Agent-Smith Server", version="0.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost",
+        "http://127.0.0.1",
+    ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(agent.router)
-app.include_router(config.router)
-app.include_router(plugins.router)
+app.include_router(agent.router, dependencies=[Depends(require_auth)])
+app.include_router(config.router, dependencies=[Depends(require_auth)])
+app.include_router(plugins.router, dependencies=[Depends(require_auth)])
 
 
 @app.get("/api/health")

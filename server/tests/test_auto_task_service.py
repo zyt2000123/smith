@@ -16,6 +16,12 @@ class FakeAutoTaskRepo:
     def __init__(self) -> None:
         self.updates: list[dict] = []
 
+    async def claim_running(self, task_id: str) -> bool:
+        return True
+
+    async def finish_task(self, task_id: str, status: str, next_run_at: str | None) -> None:
+        self.updates.append({"task_id": task_id, "status": status, "next_run_at": next_run_at})
+
     async def update(self, task_id: str, updates: dict):
         self.updates.append(dict(updates))
 

@@ -100,6 +100,27 @@ class AutoTaskRepo:
         await db.commit()
         return True
 
+    async def claim_running(self, task_id: str) -> bool:
+        """CAS: set status='running' only if not already running."""
+        db = await get_app_db()
+        cursor = await db.execute(
+            "UPDATE auto_tasks SET status='running' WHERE id=? AND status != 'running'",
+            (task_id,),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
+
+    async def finish_task(self, task_id: str, status: str, next_run_at: str | None) -> None:
+        """Atomically set final status and increment run_count in SQL."""
+        db = await get_app_db()
+        now = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            "UPDATE auto_tasks SET status=?, last_run_at=?, next_run_at=?, "
+            "run_count = run_count + 1 WHERE id=?",
+            (status, now, next_run_at, task_id),
+        )
+        await db.commit()
+
     async def list_due_tasks(self) -> list[dict]:
         """Find enabled tasks whose next_run_at <= now."""
         db = await get_app_db()

@@ -144,7 +144,7 @@ def test_reply_with_runtime_marks_actual_tool_activity(tmp_path: Path) -> None:
 
         assert result.text == "tool-assisted reply"
         assert result.had_tools is True
-        assert (runtime.profile_dir / "identity-state" / "smith" / "memory" / "recent.jsonl").is_file()
+        assert (runtime.profile_dir / "memory" / "recent.jsonl").is_file()
         return llm
 
     llm = asyncio.run(run())

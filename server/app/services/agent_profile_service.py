@@ -33,16 +33,23 @@ class AgentProfileService:
             raise HTTPException(400, f"Unsupported agent role. Allowed: {allowed}")
         data = body.model_dump()
         row = await self.repo.create(data)
-        init_smith_profile_files(
-            profile_seed_dir=SMITH_PROFILE_DIR,
-            name=body.name,
-            role=body.role,
-            description=body.description,
-        )
+        try:
+            init_smith_profile_files(
+                profile_seed_dir=SMITH_PROFILE_DIR,
+                name=body.name,
+                role=body.role,
+                description=body.description,
+            )
+        except Exception:
+            await self.repo.delete(row["id"])
+            raise
         return AgentProfileOut(**row)
 
     async def update_profile(self, agent_id: str, body: AgentProfileUpdate) -> AgentProfileOut:
         updates = body.model_dump(exclude_none=True)
+        if "role" in updates and updates["role"] not in ACTIVE_TEMPLATE_IDS:
+            allowed = ", ".join(sorted(ACTIVE_TEMPLATE_IDS))
+            raise HTTPException(400, f"Unsupported agent role. Allowed: {allowed}")
         row = await self.repo.update(agent_id, updates)
         if row is None:
             raise HTTPException(404, "Agent profile not found")

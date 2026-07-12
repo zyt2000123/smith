@@ -84,6 +84,7 @@ async def send_message(
         context=body.context,
         skill_name=body.skill_name,
         identity_id=body.identity_id,
+        working_dir=body.working_dir,
     )
 
 
@@ -100,6 +101,7 @@ async def stream_message(
             context=body.context,
             skill_name=body.skill_name,
             identity_id=body.identity_id,
+            working_dir=body.working_dir,
         )
     )
 

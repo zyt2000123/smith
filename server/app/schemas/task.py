@@ -1,8 +1,10 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
 class TaskCreate(BaseModel):
-    type: str = "conversation"
+    type: Literal["conversation", "automation"] = "conversation"
     title: str = ""
 
 

@@ -17,7 +17,7 @@ async def test_schema_adds_identity_binding_to_existing_sessions() -> None:
     try:
         await db.executescript(
             """
-CREATE TABLE agent_profiles (id TEXT PRIMARY KEY);
+CREATE TABLE agent_profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '');
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,

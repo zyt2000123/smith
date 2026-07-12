@@ -1,10 +1,9 @@
 from .interface import MemoryEntry, MemoryStore
-from .store import FileMemoryStore, save_conversation_memory
+from .store import save_conversation_memory
 
 __all__ = [
     "MemoryEntry",
     "MemoryStore",
-    "FileMemoryStore",
     "save_conversation_memory",
 ]
 

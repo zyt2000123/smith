@@ -37,8 +37,8 @@ class AgentProfileRepo:
             data.get("knowledge", []), ensure_ascii=False
         )
 
-        await db.execute(
-            "INSERT INTO agent_profiles "
+        cursor = await db.execute(
+            "INSERT OR IGNORE INTO agent_profiles "
             "(id, name, role, device, online, description, knowledge, "
             "environment, accent, config_path, created_at) "
             "VALUES (?,?,?,?,1,?,?,?,?,?,?)",
@@ -57,7 +57,19 @@ class AgentProfileRepo:
         )
         await db.commit()
 
+        if cursor.rowcount == 0:
+            return await self.find_by_name_role(data["name"], data["role"])  # type: ignore[return-value]
         return (await self.get(eid))  # type: ignore[return-value]
+
+    async def find_by_name_role(self, name: str, role: str) -> dict | None:
+        db = await get_app_db()
+        rows = await db.execute_fetchall(
+            "SELECT * FROM agent_profiles WHERE name=? AND role=? LIMIT 1",
+            (name, role),
+        )
+        if not rows:
+            return None
+        return self._row_to_dict(rows[0])
 
     async def update(self, agent_id: str, updates: dict) -> dict | None:
         existing = await self.get(agent_id)

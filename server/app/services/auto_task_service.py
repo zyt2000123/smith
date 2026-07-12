@@ -87,22 +87,26 @@ class AutoTaskService:
         task = await self.repo.get(task_id)
         if task is None:
             raise HTTPException(404, "Auto task not found")
-        return await self.run_auto_task(task)
+        result = await self.run_auto_task(task)
+        if result is None:
+            raise HTTPException(409, "Auto task is already running")
+        return result
 
-    async def run_auto_task(self, task: dict) -> AutoTaskRunOut:
+    async def run_auto_task(self, task: dict) -> AutoTaskRunOut | None:
         """Execute: create a session, send the instruction to engine, save the run."""
         task_id = task["id"]
         agent_id = task["agent_id"]
 
-        # Mark running
-        await self.repo.update(task_id, {"status": "running"})
+        if not await self.repo.claim_running(task_id):
+            return None
+
         run = await self.repo.create_run(task_id)
+        next_run = self._calc_next_run(task["trigger_type"], task["trigger_config"])
 
         try:
             profile = await self.agent_profile_repo.get(agent_id)
             profile_name = profile["name"] if profile else "Agent"
 
-            # Bind this generated session to one declarative identity before execution.
             identity_id = load_runtime_identity_catalog().resolve(
                 task["instruction"]
             ).identity_id
@@ -112,12 +116,10 @@ class AutoTaskService:
                 identity_id,
             )
 
-            # Save the instruction as a user message
             await self.session_repo.add_message(
                 session["id"], "user", task["instruction"]
             )
 
-            # Call engine
             runtime, services = build_engine_runtime(
                 agent_id,
                 profile_name,
@@ -133,44 +135,25 @@ class AutoTaskService:
             )
             reply_text = result.text
 
-            # Save the reply
             await self.session_repo.add_message(
                 session["id"], "assistant", reply_text
             )
 
-            # Mark completed
-            now = datetime.now(timezone.utc).isoformat()
-            next_run = self._calc_next_run(
-                task["trigger_type"], task["trigger_config"]
-            )
-            await self.repo.update(task_id, {
-                "status": "idle",
-                "last_run_at": now,
-                "next_run_at": next_run,
-                "run_count": task["run_count"] + 1,
-            })
-
-            finished = await self.repo.finish_run(
-                run["id"], "completed", reply_text
-            )
-            return AutoTaskRunOut(**finished)  # type: ignore[arg-type]
+            await self.repo.finish_task(task_id, "idle", next_run)
+            finished = await self.repo.finish_run(run["id"], "completed", reply_text)
+            if finished is None:
+                raise HTTPException(500, "Failed to record auto task run")
+            return AutoTaskRunOut(**finished)
 
         except Exception as exc:
             log.exception("Auto task %s failed", task_id)
-            now = datetime.now(timezone.utc).isoformat()
-            next_run = self._calc_next_run(
-                task["trigger_type"], task["trigger_config"]
-            )
-            await self.repo.update(task_id, {
-                "status": "failed",
-                "last_run_at": now,
-                "next_run_at": next_run,
-                "run_count": task["run_count"] + 1,
-            })
+            await self.repo.finish_task(task_id, "failed", next_run)
             finished = await self.repo.finish_run(
                 run["id"], "failed", "", error=str(exc)
             )
-            return AutoTaskRunOut(**finished)  # type: ignore[arg-type]
+            if finished is None:
+                raise HTTPException(500, "Failed to record auto task run")
+            return AutoTaskRunOut(**finished)
 
     async def list_runs(self, task_id: str) -> list[AutoTaskRunOut]:
         rows = await self.repo.list_runs(task_id)

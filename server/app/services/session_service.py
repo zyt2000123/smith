@@ -135,6 +135,7 @@ class SessionService:
         context: str | None = None,
         skill_name: str | None = None,
         identity_id: str | None = None,
+        working_dir: str | None = None,
     ) -> MessageOut:
         selected_identity_id = await self._resolve_session_identity(
             agent_id,
@@ -152,23 +153,25 @@ class SessionService:
         # Save user message
         await self.session_repo.add_message(session_id, "user", content)
 
-        # Call engine
-        # context（工作目录/附件路径）由引擎侧拼接：LLM 可见，路由/记忆/落库均只用原文
-        runtime, services = build_engine_runtime(agent_id, profile_name, session_id=session_id)
-        result = await engine_reply_with_runtime(
-            EngineRequest(
-                message=content,
-                history=history,
-                context=context,
-                forced_skill=skill_name,
-                identity_id=selected_identity_id,
-            ),
-            runtime,
-            services,
-        )
-        reply_text = result.text
+        try:
+            runtime, services = build_engine_runtime(agent_id, profile_name, session_id=session_id)
+            result = await engine_reply_with_runtime(
+                EngineRequest(
+                    message=content,
+                    history=history,
+                    context=context,
+                    forced_skill=skill_name,
+                    identity_id=selected_identity_id,
+                    working_dir=working_dir,
+                ),
+                runtime,
+                services,
+            )
+            reply_text = result.text
+        except Exception:
+            logger.exception("send_message engine call failed (session=%s)", session_id)
+            reply_text = "执行失败（详情见服务端日志）"
 
-        # Save assistant message
         msg = await self.session_repo.add_message(session_id, "assistant", reply_text)
         return MessageOut(**msg)
 
@@ -180,6 +183,7 @@ class SessionService:
         context: str | None = None,
         skill_name: str | None = None,
         identity_id: str | None = None,
+        working_dir: str | None = None,
     ) -> AsyncGenerator[dict, None]:
         """Yield SSE event dicts. Streams text chunks as they arrive from the engine."""
         selected_identity_id = await self._resolve_session_identity(
@@ -215,6 +219,7 @@ class SessionService:
                     context=context,
                     forced_skill=skill_name,
                     identity_id=selected_identity_id,
+                    working_dir=working_dir,
                 ),
                 runtime,
                 services,
