@@ -9,7 +9,7 @@ import pytest
 from common.yaml_utils import YamlConfigError
 from engine.llm.adapters.anthropic import AnthropicAdapter
 from engine.llm.adapters._retry import MAX_RETRY_AFTER_SECONDS, retry_after_seconds
-from engine.llm.client import ProviderClient
+from engine.llm.client import LLMClient, ProviderClient
 from engine.llm.contracts import LLMProviderConfig, LLMRequest
 from engine.llm.events import ProviderEventType
 from engine.llm.factory import create_llm_client, normalize_provider_name, supported_provider_names
@@ -79,6 +79,15 @@ def test_provider_retry_after_is_bounded() -> None:
     assert retry_after_seconds(response) == MAX_RETRY_AFTER_SECONDS
 
 
+def _openai_fake_send(captured: dict[str, object]):
+    """Return a fake send that captures the request body and returns a valid response."""
+    async def fake_send(request, *, stream: bool = False):
+        captured["body"] = json.loads(request.content)
+        body = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+        return httpx.Response(200, request=request, stream=_SseStream([body]))
+    return fake_send
+
+
 def test_explicit_output_limit_is_forwarded_without_changing_openai_default() -> None:
     client = build_llm_client({
         "provider": "openai",
@@ -88,16 +97,7 @@ def test_explicit_output_limit_is_forwarded_without_changing_openai_default() ->
         "max_output_tokens": 123,
     })
     captured: dict[str, object] = {}
-
-    async def fake_post(url, json, *, timeout):
-        captured["body"] = json
-        return httpx.Response(
-            200,
-            request=httpx.Request("POST", "https://openai.test/v1/chat/completions"),
-            json={"choices": [{"message": {"content": "ok"}}]},
-        )
-
-    client.adapter._http.post = fake_post  # type: ignore[attr-defined, assignment]
+    client.adapter._http.send = _openai_fake_send(captured)  # type: ignore[attr-defined, assignment]
     try:
         response = asyncio.run(client.chat([{"role": "user", "content": "hello"}]))
     finally:
@@ -115,16 +115,7 @@ def test_openai_adapter_omits_output_limit_when_not_configured() -> None:
         "model": "model",
     })
     captured: dict[str, object] = {}
-
-    async def fake_post(url, json, *, timeout):
-        captured["body"] = json
-        return httpx.Response(
-            200,
-            request=httpx.Request("POST", "https://openai.test/v1/chat/completions"),
-            json={"choices": [{"message": {"content": "ok"}}]},
-        )
-
-    client.adapter._http.post = fake_post  # type: ignore[attr-defined, assignment]
+    client.adapter._http.send = _openai_fake_send(captured)  # type: ignore[attr-defined, assignment]
     try:
         response = asyncio.run(client.chat([{"role": "user", "content": "hello"}]))
     finally:
@@ -138,30 +129,27 @@ def test_anthropic_adapter_translates_tools_conversation_and_response() -> None:
     adapter = AnthropicAdapter(_anthropic_config())
     captured: dict[str, object] = {}
 
-    async def fake_post(url, json, *, timeout):
-        captured["url"] = url
-        captured["body"] = json
-        captured["timeout"] = timeout
-        return httpx.Response(
-            200,
-            request=httpx.Request("POST", "https://anthropic.test/v1/messages"),
-            json={
-                "content": [
-                    {"type": "thinking", "thinking": "check the tool result"},
-                    {"type": "text", "text": "I will look it up."},
-                    {
-                        "type": "tool_use",
-                        "id": "toolu-2",
-                        "name": "read_file",
-                        "input": {"path": "README.md"},
-                    },
-                ],
-                "stop_reason": "tool_use",
-                "usage": {"input_tokens": 11, "output_tokens": 7},
+    response_json = json.dumps({
+        "content": [
+            {"type": "thinking", "thinking": "check the tool result"},
+            {"type": "text", "text": "I will look it up."},
+            {
+                "type": "tool_use",
+                "id": "toolu-2",
+                "name": "read_file",
+                "input": {"path": "README.md"},
             },
-        )
+        ],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 11, "output_tokens": 7},
+    }).encode()
 
-    adapter._http.post = fake_post  # type: ignore[assignment]
+    async def fake_send(request, *, stream: bool = False):
+        captured["url"] = str(request.url.raw_path, "ascii")
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, request=request, stream=_SseStream([response_json]))
+
+    adapter._http.send = fake_send  # type: ignore[assignment]
     try:
         response = asyncio.run(adapter.complete(LLMRequest(
             messages=[
@@ -294,3 +282,140 @@ def test_anthropic_moves_late_system_instruction_into_ordered_user_turn() -> Non
         {"role": "assistant", "content": "Partial."},
         {"role": "user", "content": "Continue exactly."},
     ]
+
+
+# ── New validation coverage ──────────────────────────────────────────────
+
+
+def test_openai_response_size_cap_aborts_before_full_parse() -> None:
+    from engine.llm.adapters.openai_compatible import _MAX_RESPONSE_BYTES, OpenAICompatibleAdapter
+    from engine.llm.contracts import LLMResponseError as _Err
+
+    adapter = OpenAICompatibleAdapter(LLMProviderConfig(
+        provider="openai_compatible", api_key="k",
+        base_url="https://openai.test/v1", model="m",
+    ))
+    oversized = b"x" * (_MAX_RESPONSE_BYTES + 1)
+
+    async def fake_send(request, *, stream: bool = False):
+        return httpx.Response(200, request=request, stream=_SseStream([oversized]))
+
+    adapter._http.send = fake_send  # type: ignore[assignment]
+    with pytest.raises(_Err, match="exceeds"):
+        asyncio.run(adapter.complete(LLMRequest(
+            messages=[{"role": "user", "content": "hi"}],
+        )))
+    asyncio.run(adapter.close())
+
+
+def test_anthropic_response_size_cap() -> None:
+    from engine.llm.adapters.anthropic import _MAX_RESPONSE_BYTES
+    from engine.llm.contracts import LLMResponseError as _Err
+
+    adapter = AnthropicAdapter(_anthropic_config())
+    oversized = b"x" * (_MAX_RESPONSE_BYTES + 1)
+
+    async def fake_send(request, *, stream: bool = False):
+        return httpx.Response(200, request=request, stream=_SseStream([oversized]))
+
+    adapter._http.send = fake_send  # type: ignore[assignment]
+    with pytest.raises(_Err, match="exceeds"):
+        asyncio.run(adapter.complete(LLMRequest(
+            messages=[{"role": "user", "content": "hi"}],
+        )))
+    asyncio.run(adapter.close())
+
+
+def test_openai_non_string_content_raises() -> None:
+    from engine.llm.contracts import LLMResponseError as _Err
+
+    client = LLMClient(api_key="k", base_url="http://llm.test", model="m")
+    body = json.dumps({"choices": [{"message": {"content": 42}}]}).encode()
+
+    async def fake_send(request, *, stream: bool = False):
+        return httpx.Response(200, request=request, stream=_SseStream([body]))
+
+    client._http.send = fake_send  # type: ignore[assignment]
+    with pytest.raises(_Err, match="content must be a string"):
+        asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    asyncio.run(client.close())
+
+
+def test_openai_stream_malformed_delta_raises() -> None:
+    from engine.llm.contracts import LLMResponseError as _Err
+
+    client = LLMClient(api_key="k", base_url="http://llm.test", model="m")
+
+    async def fake_send(request, *, stream: bool):
+        return httpx.Response(200, request=request, stream=_SseStream([
+            b'data: {"choices":[{"delta":"not-a-dict"}]}\n\n',
+            b"data: [DONE]\n\n",
+        ]))
+
+    client._http.send = fake_send  # type: ignore[assignment]
+    with pytest.raises(_Err, match="delta must be an object"):
+        asyncio.run(_collect_events_generic(client))
+    asyncio.run(client.close())
+
+
+def test_anthropic_stream_malformed_delta_raises() -> None:
+    from engine.llm.contracts import LLMResponseError as _Err
+
+    adapter = AnthropicAdapter(_anthropic_config())
+    client = ProviderClient(adapter)
+
+    async def fake_send(request, *, stream: bool):
+        return httpx.Response(200, request=request, stream=_SseStream([
+            b'event: message_start\ndata: {"type":"message_start","message":{}}\n\n',
+            b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":"bad"}\n\n',
+        ]))
+
+    adapter._http.send = fake_send  # type: ignore[assignment]
+    with pytest.raises(_Err, match="content_block_delta must be an object"):
+        asyncio.run(_collect_events_generic(client))
+    asyncio.run(client.close())
+
+
+def test_anthropic_stream_tool_use_missing_id_raises() -> None:
+    from engine.llm.contracts import LLMResponseError as _Err
+
+    adapter = AnthropicAdapter(_anthropic_config())
+    client = ProviderClient(adapter)
+
+    async def fake_send(request, *, stream: bool):
+        return httpx.Response(200, request=request, stream=_SseStream([
+            b'event: message_start\ndata: {"type":"message_start","message":{}}\n\n',
+            b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","name":"lookup"}}\n\n',
+        ]))
+
+    adapter._http.send = fake_send  # type: ignore[assignment]
+    with pytest.raises(_Err, match="missing id or name"):
+        asyncio.run(_collect_events_generic(client))
+    asyncio.run(client.close())
+
+
+def test_openai_stream_failure_raises_llm_response_error() -> None:
+    """Streaming HTTP failures are wrapped as LLMResponseError, not raw httpx."""
+    from engine.llm.contracts import LLMResponseError as _Err
+
+    client = LLMClient(api_key="k", base_url="http://llm.test", model="m")
+
+    async def fake_send(request, *, stream: bool):
+        return httpx.Response(401, request=request, stream=_SseStream([b"unauthorized"]))
+
+    client._http.send = fake_send  # type: ignore[assignment]
+    with pytest.raises(_Err, match="HTTP 401"):
+        asyncio.run(_collect_events_generic(client))
+    asyncio.run(client.close())
+
+
+def test_api_key_hidden_from_config_repr() -> None:
+    config = LLMProviderConfig(
+        provider="openai_compatible", api_key="sk-secret-key",
+        base_url="https://api.test", model="m",
+    )
+    assert "sk-secret-key" not in repr(config)
+
+
+async def _collect_events_generic(client):
+    return [event async for event in client.chat_events([{"role": "user", "content": "hi"}])]

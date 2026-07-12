@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -60,7 +60,7 @@ _ROUTE_FIELDS = (
 
 @dataclass
 class ModelConfig:
-    api_key: str
+    api_key: str = field(repr=False)
     base_url: str
     model: str
     provider: str = ""

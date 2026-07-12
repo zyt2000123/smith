@@ -9,6 +9,7 @@ contracts as it does from the OpenAI-compatible adapter.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -24,6 +25,10 @@ from ..contracts import (
 )
 from ..events import ProviderEvent, ProviderEventType, normalize_finish_reason
 from ._retry import MAX_RETRIES, is_retryable_status, retry_after_seconds, wait_for_retry
+
+logger = logging.getLogger(__name__)
+
+_MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 
 
 _ANTHROPIC_VERSION = "2023-06-01"
@@ -85,7 +90,7 @@ class AnthropicAdapter:
                 async for event_name, payload_text in self._iter_sse(response):
                     try:
                         event = json.loads(payload_text)
-                    except json.JSONDecodeError as exc:
+                    except (json.JSONDecodeError, RecursionError) as exc:
                         raise LLMResponseError("Anthropic stream contains invalid JSON.") from exc
                     if not isinstance(event, dict):
                         raise LLMResponseError("Anthropic stream event must be a JSON object.")
@@ -105,25 +110,31 @@ class AnthropicAdapter:
                         if not isinstance(block, dict) or block.get("type") != "tool_use":
                             continue
                         index = event.get("index")
-                        event_data: dict[str, Any] = {
-                            "index": index if isinstance(index, int) else 0,
-                        }
-                        if isinstance(block.get("id"), str):
-                            event_data["id"] = block["id"]
-                        if isinstance(block.get("name"), str):
-                            event_data["name"] = block["name"]
-                        if len(event_data) > 1:
-                            saw_content_event = True
-                            yield ProviderEvent(
-                                ProviderEventType.FUNCTION_CALL_ARGUMENTS_DELTA,
-                                event_data,
+                        tool_id = block.get("id")
+                        tool_name = block.get("name")
+                        if not isinstance(tool_id, str) or not isinstance(tool_name, str):
+                            raise LLMResponseError(
+                                "Anthropic stream tool_use block is missing id or name."
                             )
+                        saw_content_event = True
+                        yield ProviderEvent(
+                            ProviderEventType.FUNCTION_CALL_ARGUMENTS_DELTA,
+                            {
+                                "index": index if isinstance(index, int) else 0,
+                                "id": tool_id,
+                                "name": tool_name,
+                            },
+                        )
                         continue
 
                     if event_type == "content_block_delta":
                         delta = event.get("delta")
-                        if not isinstance(delta, dict):
+                        if delta is None:
                             continue
+                        if not isinstance(delta, dict):
+                            raise LLMResponseError(
+                                "Anthropic stream content_block_delta must be an object."
+                            )
                         index = event.get("index")
                         if not isinstance(index, int):
                             index = 0
@@ -195,11 +206,24 @@ class AnthropicAdapter:
                     or not is_retryable_status(exc.response.status_code)
                     or attempt >= MAX_RETRIES - 1
                 ):
-                    raise
+                    raise LLMResponseError(
+                        f"Anthropic stream failed (HTTP {exc.response.status_code}) "
+                        f"after {attempt + 1} attempt(s)"
+                    ) from exc
+                logger.warning(
+                    "Anthropic stream attempt %d failed (HTTP %d), retrying",
+                    attempt + 1, exc.response.status_code,
+                )
                 retry_after = retry_after_seconds(exc.response)
-            except httpx.TransportError:
+            except httpx.RequestError as exc:
                 if saw_content_event or attempt >= MAX_RETRIES - 1:
-                    raise
+                    raise LLMResponseError(
+                        f"Anthropic stream failed after {attempt + 1} attempt(s): {exc}"
+                    ) from exc
+                logger.warning(
+                    "Anthropic stream attempt %d failed (%s), retrying",
+                    attempt + 1, type(exc).__name__,
+                )
             finally:
                 if response is not None:
                     await response.aclose()
@@ -440,31 +464,41 @@ class AnthropicAdapter:
 
     async def _request(self, body: dict[str, Any], attempt: int = 0) -> dict[str, Any]:
         try:
-            response = await self._http.post(
-                "/v1/messages",
-                json=body,
-                timeout=self.timeouts.request_timeout(),
+            raw = await self._read_bounded(
+                "POST", "/v1/messages", body, self.timeouts.request_timeout(),
             )
-            response.raise_for_status()
-            payload = response.json()
+            try:
+                payload = json.loads(raw)
+            except (json.JSONDecodeError, RecursionError) as exc:
+                raise LLMResponseError("Anthropic response contains invalid JSON.") from exc
             if not isinstance(payload, dict):
                 raise LLMResponseError("Anthropic response must be a JSON object.")
             return payload
         except httpx.HTTPStatusError as exc:
             if is_retryable_status(exc.response.status_code) and attempt < MAX_RETRIES - 1:
+                logger.warning(
+                    "Anthropic request attempt %d failed (HTTP %d), retrying",
+                    attempt + 1, exc.response.status_code,
+                )
                 return await self._retry_with_backoff(
                     body,
                     attempt,
                     retry_after=retry_after_seconds(exc.response),
                 )
-            raise RuntimeError(
-                f"LLM request failed after {attempt + 1} attempts: {exc}"
+            body_preview = await self._read_error_body(exc.response)
+            raise LLMResponseError(
+                f"Anthropic request failed (HTTP {exc.response.status_code}) "
+                f"after {attempt + 1} attempt(s): {body_preview or exc}"
             ) from exc
-        except httpx.TransportError as exc:
+        except httpx.RequestError as exc:
             if attempt < MAX_RETRIES - 1:
+                logger.warning(
+                    "Anthropic request attempt %d failed (%s), retrying",
+                    attempt + 1, type(exc).__name__,
+                )
                 return await self._retry_with_backoff(body, attempt)
-            raise RuntimeError(
-                f"LLM request failed after {MAX_RETRIES} attempts: {exc}"
+            raise LLMResponseError(
+                f"Anthropic request failed after {MAX_RETRIES} attempts: {exc}"
             ) from exc
 
     async def _wait_for_retry(self, attempt: int, retry_after: float | None = None) -> None:
@@ -508,6 +542,45 @@ class AnthropicAdapter:
                 data_lines.append(value)
         if data_lines:
             yield event_name, "\n".join(data_lines)
+
+    async def _read_bounded(
+        self,
+        method: str,
+        url: str,
+        body: dict[str, Any],
+        timeout: httpx.Timeout,
+    ) -> bytes:
+        """Stream-read with a hard byte cap — aborts before buffering oversized bodies."""
+        req = self._http.build_request(method, url, json=body, timeout=timeout)
+        response = await self._http.send(req, stream=True)
+        try:
+            response.raise_for_status()
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > _MAX_RESPONSE_BYTES:
+                    raise LLMResponseError(
+                        f"Anthropic response exceeds {_MAX_RESPONSE_BYTES} byte limit."
+                    )
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            await response.aclose()
+
+    @staticmethod
+    async def _read_error_body(response: httpx.Response, limit: int = 500) -> str:
+        try:
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                chunks.append(chunk)
+                total += len(chunk)
+                if total >= limit:
+                    break
+            return b"".join(chunks)[:limit].decode("utf-8", errors="replace")
+        except Exception:
+            return ""
 
     async def close(self) -> None:
         await self._http.aclose()

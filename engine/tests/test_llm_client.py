@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json as json_mod
 
 import httpx
 import pytest
@@ -34,12 +35,21 @@ class _InterruptedSseStream(httpx.AsyncByteStream):
 
 
 def _client_with_post(post_fn) -> LLMClient:
+    """Adapt old-style fake_post(url, json) -> Response into send()-based mock."""
     client = LLMClient(api_key="k", base_url="http://llm.test", model="m")
 
-    async def wrapped_post(url, json, **_kwargs):
-        return await post_fn(url, json)
+    async def wrapped_send(request, *, stream: bool = False):
+        url = str(request.url)
+        body = json_mod.loads(request.content) if request.content else {}
+        orig = await post_fn(url, body)
+        return httpx.Response(
+            orig.status_code,
+            headers=dict(orig.headers),
+            request=request,
+            stream=_SseStream([orig.content]),
+        )
 
-    client._http.post = wrapped_post  # type: ignore[assignment]
+    client._http.send = wrapped_send  # type: ignore[assignment]
     return client
 
 
@@ -214,15 +224,12 @@ def test_client_uses_distinct_non_stream_and_stream_timeouts() -> None:
         write=4.0,
         pool=5.0,
     )
-    captured: dict[str, httpx.Timeout] = {}
+    captured: dict[str, object] = {}
 
-    async def fake_post(url, json, *, timeout):
-        captured["timeout"] = timeout
-        return httpx.Response(
-            200,
-            request=httpx.Request("POST", "http://llm.test/chat/completions"),
-            json={"choices": [{"message": {}}]},
-        )
+    async def fake_send(request, *, stream: bool = False):
+        captured["timeout"] = request.extensions.get("timeout")
+        body = json_mod.dumps({"choices": [{"message": {}}]}).encode()
+        return httpx.Response(200, request=request, stream=_SseStream([body]))
 
     client = LLMClient(
         api_key="k",
@@ -230,15 +237,14 @@ def test_client_uses_distinct_non_stream_and_stream_timeouts() -> None:
         model="m",
         timeouts=selected_timeouts,
     )
-    client._http.post = fake_post  # type: ignore[assignment]
+    client._http.send = fake_send  # type: ignore[assignment]
     try:
         asyncio.run(client.chat([{"role": "user", "content": "hello"}]))
     finally:
         asyncio.run(client.close())
 
     non_stream_timeout = captured["timeout"]
-    assert (non_stream_timeout.connect, non_stream_timeout.read) == (1.0, 2.0)
-    assert (non_stream_timeout.write, non_stream_timeout.pool) == (4.0, 5.0)
+    assert non_stream_timeout == {"connect": 1.0, "read": 2.0, "write": 4.0, "pool": 5.0}
     assert client._http.timeout.read == 3.0
 
 
@@ -380,7 +386,7 @@ def test_chat_events_does_not_retry_after_content_delta(monkeypatch, first_chunk
 
     client = _client_with_send(fake_send)
     try:
-        with pytest.raises(httpx.ReadError):
+        with pytest.raises(LLMResponseError):
             asyncio.run(_collect_events(client))
     finally:
         asyncio.run(client.close())
