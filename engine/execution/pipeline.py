@@ -79,6 +79,10 @@ async def run_pipeline(
                 skill = skill_registry.get(node.skill_name)
 
                 if skill is None:
+                    logger.warning(
+                        "skill %r not in registry; node degrades to plain ReAct with a prompt prefix",
+                        node.skill_name,
+                    )
                     messages = base_messages + [{"role": "user", "content": f"[Skill: {node.skill_name}] {user_message}"}]
                     if rubric_attempt == 1 and context.get("_rubric_retry_hint"):
                         messages.append({"role": "user", "content": context["_rubric_retry_hint"]})
@@ -115,6 +119,7 @@ async def run_pipeline(
                     provision_settled = True
                     if result.text:
                         yield ExecutionEvent(EventType.TEXT_DELTA, {"text": result.text})
+                    _clear_checkpoint(context)
                     yield ExecutionEvent(EventType.DONE, {})
                     return
                 output = result.text
@@ -133,6 +138,7 @@ async def run_pipeline(
             context.pop("_rubric_retry_hint", None)
 
             if not rubric_passed:
+                _clear_checkpoint(context)
                 yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": rubric_result.reason})
                 yield ExecutionEvent(EventType.DONE, {})
                 return
@@ -162,20 +168,37 @@ async def run_pipeline(
             })
             provision_settled = True
 
+            if action == "switch" and node.skill_name not in chain.backtrack_map:
+                # 无可切换的回退策略时必须终止，不许退化成同节点无限 retry。
+                action = "blocked"
+
             if action == "blocked":
+                _clear_checkpoint(context)
                 yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": gate_result.reason})
                 yield ExecutionEvent(EventType.DONE, {})
                 return
 
-            if action == "switch" and node.skill_name in chain.backtrack_map:
+            if action == "switch":
                 backtrack_count += 1
                 if backtrack_count > max_backtracks:
+                    _clear_checkpoint(context)
                     yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": "max backtracks"})
                     yield ExecutionEvent(EventType.DONE, {})
                     return
                 target = chain.backtrack_map[node.skill_name]
+                target_idx = next((i for i, n in enumerate(chain.nodes) if n.skill_name == target), None)
+                if target_idx is None:
+                    # backtrack 映射指向不存在的节点是配置错误；静默跳回节点 0
+                    # 会重跑已通过的步骤且与 BACKTRACK 事件宣称的目标不符。
+                    logger.warning("backtrack target %r for node %r not in chain", target, node.skill_name)
+                    _clear_checkpoint(context)
+                    yield ExecutionEvent(EventType.BLOCKED, {
+                        "skill": node.skill_name, "reason": f"backtrack target {target!r} not found",
+                    })
+                    yield ExecutionEvent(EventType.DONE, {})
+                    return
                 yield ExecutionEvent(EventType.BACKTRACK, {"from": node.skill_name, "to": target})
-                node_idx = next((i for i, n in enumerate(chain.nodes) if n.skill_name == target), 0)
+                node_idx = target_idx
                 continue
 
             yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "retry"})

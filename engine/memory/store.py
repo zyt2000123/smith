@@ -12,7 +12,10 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ._files import atomic_write_text, contains_secret
+from ._files import (
+    atomic_write_text,
+    sanitize_memory_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +44,7 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) 
         idx = SearchIndex(episodes_dir)
         await idx.open()
         try:
-            episodes = list(episodes_dir.glob("*.md"))
-            if not episodes:
-                return ""
-
-            await _sync_episode_index(idx, episodes)
+            await _sync_episode_index(idx, episodes_dir)
 
             hits = await idx.search(query, top_k)
             if not hits:
@@ -58,7 +57,10 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) 
                 ep_path = (episodes_dir / f"{hit['id']}.md").resolve()
                 if not ep_path.is_relative_to(episodes_root) or not ep_path.is_file():
                     continue
-                content = ep_path.read_text(encoding="utf-8").strip()
+                content, _, _ = sanitize_memory_text(ep_path.read_text(encoding="utf-8"))
+                content = content.strip()
+                if not content:
+                    continue
                 if total_chars + len(content) > _MAX_EPISODE_CONTEXT_CHARS:
                     continue
                 lines.append(content)
@@ -72,31 +74,51 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) 
         return ""
 
 
-async def _sync_episode_index(idx, episodes: list[Path]) -> None:
-    """Incrementally sync episode files into the FTS index.
+_EPISODE_INDEX_STATE = ".index_state.json"
 
-    Only re-indexes files whose mtime is newer than the last sync marker.
+
+def _load_episode_index_state(path: Path) -> dict[str, str]:
+    """Read the disposable per-file index state, rebuilding on malformed data."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(raw, dict) or not all(
+        isinstance(entry_id, str) and isinstance(signature, str)
+        for entry_id, signature in raw.items()
+    ):
+        return {}
+    return raw
+
+
+async def _sync_episode_index(idx, episodes_dir: Path) -> None:
+    """Synchronize the FTS index from current episode files.
+
+    State is keyed per episode rather than by a global timestamp, so copied or
+    restored files with an older mtime still enter the index. The state is
+    disposable and is only committed after index writes and stale-row removal
+    have succeeded.
     """
-    marker = episodes[0].parent / ".index_mtime"
-    last_sync = 0.0
-    if marker.is_file():
-        try:
-            last_sync = float(marker.read_text().strip())
-        except (ValueError, OSError):
-            pass
+    state_path = episodes_dir / _EPISODE_INDEX_STATE
+    previous_state = _load_episode_index_state(state_path)
+    current_state: dict[str, str] = {}
 
-    indexed_any = False
-    max_mtime = last_sync
-    for ep in episodes:
-        mtime = ep.stat().st_mtime
-        if mtime >= last_sync:
+    for ep in sorted(episodes_dir.glob("*.md")):
+        stat = ep.stat()
+        signature = f"{stat.st_mtime_ns}:{stat.st_size}"
+        current_state[ep.stem] = signature
+        if previous_state.get(ep.stem) != signature:
             content = ep.read_text(encoding="utf-8")
             await idx.index_entry(ep.stem, content, "episode")
-            indexed_any = True
-        max_mtime = max(max_mtime, mtime)
 
-    if indexed_any:
-        atomic_write_text(marker, str(max_mtime))
+    await idx.remove_missing_entries(set(current_state), "episode")
+
+    if current_state != previous_state:
+        atomic_write_text(
+            state_path,
+            json.dumps(current_state, ensure_ascii=False, sort_keys=True),
+        )
+    (episodes_dir / ".index_mtime").unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -175,8 +197,9 @@ async def _run_periodic_dream(agent_dir: Path, memory_dir: Path) -> bool:
             report = await run_dream(memory_dir, llm)
         finally:
             await llm.close()
-        if report.errors:
-            logger.warning("conversation-memory Dream failed: %s", "; ".join(report.errors))
+        if report.errors or report.skipped:
+            reason = "; ".join(report.errors) if report.errors else report.skipped
+            logger.warning("conversation-memory Dream did not complete: %s", reason)
             return False
         return True
     except Exception:
@@ -196,12 +219,8 @@ async def save_conversation_memory(
 
     recent_file = memory_dir / "recent.jsonl"
     now = datetime.now(timezone.utc).isoformat()
-    bounded_task = _bounded_event_value(user_msg)
-    bounded_summary = _bounded_event_value(reply)
-    if contains_secret(bounded_task):
-        bounded_task = "[REDACTED — contained sensitive information]"
-    if contains_secret(bounded_summary):
-        bounded_summary = "[REDACTED — contained sensitive information]"
+    bounded_task = _sanitize_event_value(user_msg)
+    bounded_summary = _sanitize_event_value(reply)
 
     entry = {
         "task": bounded_task,
@@ -226,3 +245,16 @@ async def save_conversation_memory(
 
     if d_count >= DREAM_INTERVAL and await _run_periodic_dream(agent_dir, memory_dir):
         atomic_write_text(dream_counter, "0")
+
+
+def _sanitize_event_value(value: str) -> str:
+    """Bound an event and redact values unsafe for future prompt use."""
+    bounded = _bounded_event_value(value)
+    cleaned, secrets_removed, injections_removed = sanitize_memory_text(bounded)
+    if cleaned.strip():
+        return cleaned
+    if secrets_removed:
+        return "[REDACTED — contained sensitive information]"
+    if injections_removed:
+        return "[REDACTED — contained instruction-injection patterns]"
+    return bounded

@@ -61,14 +61,27 @@ def _memory_dir() -> Path:
 
 def _check_sensitive(text: str) -> str | None:
     try:
-        from engine.memory._files import contains_secret
+        from engine.memory._files import contains_injection, contains_secret
     except ModuleNotFoundError:
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from engine.memory._files import contains_secret
+        from engine.memory._files import contains_injection, contains_secret
     if contains_secret(text):
         return "Memory rejected: contains sensitive information"
+    if contains_injection(text):
+        return "Memory rejected: contains instruction-injection patterns"
     return None
+
+
+def _sanitize_for_tool_output(text: str) -> str:
+    """Keep legacy memory content safe before it re-enters model context."""
+    try:
+        from engine.memory._files import sanitize_memory_text
+    except ModuleNotFoundError:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from engine.memory._files import sanitize_memory_text
+    return sanitize_memory_text(text)[0]
 
 
 async def execute(
@@ -102,6 +115,9 @@ async def execute(
     elif action == "episode":
         if not topic:
             return "Error: 'topic' is required for episode action"
+        rejection = _check_sensitive(topic)
+        if rejection:
+            return rejection
         return await _create_episode(mem_dir, topic)
 
     elif action == "update":
@@ -137,7 +153,8 @@ def _append_event(mem_dir: Path, content: str, evidence: str) -> str:
 
 
 async def _search(mem_dir: Path, query: str) -> str:
-    keywords = query.lower().split()
+    safe_query = _sanitize_for_tool_output(query)
+    keywords = safe_query.lower().split()
     if not keywords:
         return "No keywords provided"
 
@@ -146,14 +163,14 @@ async def _search(mem_dir: Path, query: str) -> str:
     for name in ("durable.md", "recent.md"):
         path = mem_dir / name
         if path.is_file():
-            content = path.read_text(encoding="utf-8")
+            content = _sanitize_for_tool_output(path.read_text(encoding="utf-8"))
             if any(kw in content.lower() for kw in keywords):
                 matches.append(f"- [{name}] {content[:200]}")
 
     episodes_dir = mem_dir / "episodes"
     if episodes_dir.is_dir():
         for ep in sorted(episodes_dir.glob("*.md")):
-            content = ep.read_text(encoding="utf-8")
+            content = _sanitize_for_tool_output(ep.read_text(encoding="utf-8"))
             if any(kw in content.lower() for kw in keywords):
                 matches.append(f"- [episode:{ep.stem}] {content[:120]}")
 
@@ -164,8 +181,13 @@ async def _search(mem_dir: Path, query: str) -> str:
                 if any(kw in line.lower() for kw in keywords):
                     try:
                         entry = json.loads(line)
+                        task = _sanitize_for_tool_output(str(entry.get("task", "?")))
+                        summary = _sanitize_for_tool_output(str(entry.get("summary", "?")))
+                        content = f"{task} {summary}"
+                        if not any(kw in content.lower() for kw in keywords):
+                            continue
                         matches.append(
-                            f"- [recent] {entry.get('task', '?')} -> {entry.get('summary', '?')[:80]}"
+                            f"- [recent] {task} -> {summary[:80]}"
                         )
                     except json.JSONDecodeError:
                         continue
@@ -173,7 +195,7 @@ async def _search(mem_dir: Path, query: str) -> str:
             pass
 
     if not matches:
-        return f"No matches for '{query}'"
+        return f"No matches for '{safe_query}'"
     return f"Found {len(matches)} match(es):\n" + "\n".join(matches)
 
 

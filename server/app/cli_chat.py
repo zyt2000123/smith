@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from .cli_smith import resolve_session
+
+_ANSI_ESCAPE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\x1b\[[\d;]*[A-Za-z]|\x1b][^\x07]*\x07|\x1b[^[\]()]")
+
+
+def _sanitize_output(text: str) -> str:
+    return _ANSI_ESCAPE.sub("", text)
 
 
 def _context_from_args(args: Any) -> str | None:
@@ -39,7 +46,7 @@ def _decode_event(raw_event: dict[str, str]) -> tuple[str, dict[str, Any]]:
 
 def _emit_event(event_type: str, payload: dict[str, Any], *, verbose: bool) -> None:
     if event_type == "message":
-        text = payload.get("text", "")
+        text = _sanitize_output(payload.get("text", ""))
         print(text, end="", flush=True)
         return
     if not verbose:

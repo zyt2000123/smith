@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 PRUNE_PROTECT_TURNS = 2
 PRUNE_PROTECT_THRESHOLD_CHARS = 8000
 PRUNE_MIN_CHARS = 2000
 CONTEXT_TRIGGER_RATIO = 0.7
-PROTECTED_TOOLS = frozenset({"read_file", "skill_load"})
 
 COMPACT_SYSTEM_PROMPT = """\
 You are summarizing a conversation for an AI assistant that will lose all prior context.
@@ -148,7 +151,16 @@ async def compact_history(conversation: list[dict], llm: "LLMPort") -> list[dict
             summary_messages.append({"role": role, "content": content[:2000]})
 
     response = await llm.chat(summary_messages + [{"role": "user", "content": COMPACT_USER_PROMPT}])
-    summary = response.text
+    summary = (response.text or "").strip()
+    finish_reason = getattr(response, "finish_reason", None)
+    if not summary or finish_reason not in (None, "stop"):
+        # 摘要为空/被截断/被拒答时整体替换历史等于静默失忆——
+        # 放弃本轮 compact，保留 prune 后的原始对话。
+        logger.warning(
+            "compact_history discarded (finish_reason=%r, summary_chars=%d); keeping original conversation",
+            finish_reason, len(summary),
+        )
+        return conversation
 
     result = []
     if system_msg:

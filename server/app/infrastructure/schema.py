@@ -100,6 +100,10 @@ async def _reset_stuck_auto_tasks(db: aiosqlite.Connection) -> None:
     await db.execute(
         "UPDATE auto_tasks SET status='idle' WHERE status='running'"
     )
+    await db.execute(
+        "UPDATE auto_task_runs SET status='failed', error='interrupted by restart', "
+        "finished_at=datetime('now') WHERE status='running'"
+    )
 
 
 async def ensure_schema(db: aiosqlite.Connection) -> None:

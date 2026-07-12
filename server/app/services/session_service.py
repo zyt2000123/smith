@@ -117,13 +117,16 @@ class SessionService:
 
     async def _recent_history(self, session_id: str) -> list[dict]:
         """Last N messages as {"role","content"} dicts for engine short-term context."""
-        rows = await self.session_repo.get_messages(session_id)
+        rows = await self.session_repo.get_recent_messages(session_id, _HISTORY_LIMIT)
         return [
             {"role": r["role"], "content": r["content"]}
-            for r in rows[-_HISTORY_LIMIT:]
+            for r in rows
         ]
 
     async def list_messages(self, session_id: str, limit: int = 0, offset: int = 0) -> list[MessageOut]:
+        exists = await self.session_repo.exists_by_id(session_id)
+        if not exists:
+            raise HTTPException(404, "Session not found")
         rows = await self.session_repo.get_messages(session_id, limit=limit, offset=offset)
         return [MessageOut(**r) for r in rows]
 

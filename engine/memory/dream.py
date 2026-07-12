@@ -1,7 +1,7 @@
 """Dream — low-frequency global memory review and log cleanup.
 
 Runs every ~50 conversations. Responsibilities:
-  1. Sanitize: regex-scan all memory layers for leaked secrets
+  1. Sanitize: regex-scan all memory layers for leaked secrets and injection markers
   2. Cross-layer review: check consistency across recent/durable/episodes
   3. Consolidate: LLM pass to compress redundancy in durable.md
   4. Log cleanup: truncate recent.jsonl entries before the compile offset
@@ -10,13 +10,17 @@ Runs every ~50 conversations. Responsibilities:
 
 from __future__ import annotations
 
-import re
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ._files import atomic_write_text, contains_secret
+from ._files import (
+    atomic_write_text,
+    contains_injection,
+    contains_secret,
+    sanitize_memory_text,
+)
 
 if TYPE_CHECKING:
     from engine.llm.port import LLMPort
@@ -25,17 +29,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _sanitize_lines(content: str) -> tuple[str, int]:
-    """Remove lines containing secrets. Returns (cleaned, count_removed)."""
-    lines = content.splitlines()
-    clean = []
-    removed = 0
-    for line in lines:
-        if contains_secret(line):
-            removed += 1
-        else:
-            clean.append(line)
-    return "\n".join(clean), removed
+def _sanitize_lines(content: str) -> tuple[str, int, int]:
+    """Remove secret and instruction-like lines with separate audit counts."""
+    return sanitize_memory_text(content)
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +41,7 @@ def _sanitize_lines(content: str) -> tuple[str, int]:
 @dataclass
 class DreamReport:
     secrets_removed: int = 0
+    injection_lines_removed: int = 0
     consolidated: bool = False
     log_lines_cleaned: int = 0
     skipped: str = ""
@@ -95,15 +92,18 @@ async def run_dream(memory_dir: Path, llm: "LLMPort") -> DreamReport:
 
 
 def _sanitize_all_layers(memory_dir: Path, report: DreamReport) -> None:
-    """Scan all memory files for secrets."""
-    total_removed = 0
+    """Scan all memory files for secrets and instruction-like content."""
+    secrets_removed = 0
+    injections_removed = 0
     for md_file in _all_memory_files(memory_dir):
         content = md_file.read_text(encoding="utf-8")
-        cleaned, removed = _sanitize_lines(content)
-        if removed:
+        cleaned, file_secrets, file_injections = _sanitize_lines(content)
+        if file_secrets or file_injections:
             atomic_write_text(md_file, cleaned)
-            total_removed += removed
-    report.secrets_removed = total_removed
+            secrets_removed += file_secrets
+            injections_removed += file_injections
+    report.secrets_removed = secrets_removed
+    report.injection_lines_removed = injections_removed
 
 
 def _all_memory_files(memory_dir: Path) -> list[Path]:
@@ -136,8 +136,9 @@ async def _consolidate_durable(
         report.skipped = "durable.md too short to consolidate"
         return
 
-    content, secrets_removed = _sanitize_lines(content)
+    content, secrets_removed, injections_removed = _sanitize_lines(content)
     report.secrets_removed += secrets_removed
+    report.injection_lines_removed += injections_removed
 
     try:
         resp = await llm.chat([
@@ -147,9 +148,9 @@ async def _consolidate_durable(
         consolidated = resp.text.strip()
 
         if consolidated and len(consolidated) > 50:
-            if contains_secret(consolidated):
-                logger.warning("dream consolidation output still contains secrets — keeping original")
-                report.errors.append("consolidation output contained secrets")
+            if contains_secret(consolidated) or contains_injection(consolidated):
+                logger.warning("dream consolidation output contains unsafe content — keeping original")
+                report.errors.append("consolidation output contained unsafe content")
             else:
                 atomic_write_text(durable_path.with_name("durable.md.bak"), original_content)
                 atomic_write_text(durable_path, consolidated + "\n")
@@ -209,3 +210,17 @@ def _cleanup_log(memory_dir: Path, report: DreamReport) -> None:
     if report.log_lines_cleaned > 0:
         new_offset = max(0, offset - safe_offset)
         atomic_write_text(offset_file, str(new_offset))
+
+        durable_offset_file = memory_dir / ".durable_offset"
+        if durable_offset_file.is_file():
+            try:
+                durable_offset = max(
+                    0,
+                    int(durable_offset_file.read_text(encoding="utf-8").strip()),
+                )
+            except (ValueError, OSError):
+                durable_offset = 0
+            atomic_write_text(
+                durable_offset_file,
+                str(max(0, durable_offset - safe_offset)),
+            )

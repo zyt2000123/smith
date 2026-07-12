@@ -9,7 +9,9 @@ from .gate import (
     ContractAlignmentGate,
     DesignGate,
     Gate,
+    GitWorktreeGate,
     PlanningGate,
+    PRGate,
     ReviewGate,
     RootCauseGate,
     SkillRubricGate,
@@ -33,6 +35,8 @@ GATE_REGISTRY: dict[str, Callable[[], Gate]] = {
     "review": ReviewGate,
     "root_cause": RootCauseGate,
     "rubric": SkillRubricGate,
+    "pr": PRGate,
+    "git_worktree": GitWorktreeGate,
 }
 
 
@@ -42,6 +46,15 @@ def _needs_architecture(ctx: dict) -> bool:
     import re
     file_refs = re.findall(r'[\w/]+\.\w{1,5}', plan_output)
     return len(set(file_refs)) >= 3
+
+
+# Step conditions are a plugin point symmetric with GATE_REGISTRY: a pipeline
+# YAML references a condition by key, and adding one means registering it here
+# rather than editing from_yaml. Keeping both as registries lets from_yaml stay
+# a pure lookup that fails loudly on an unknown key instead of silently degrading.
+CONDITION_REGISTRY: dict[str, Callable[[dict], bool]] = {
+    "needs_architecture": _needs_architecture,
+}
 
 
 @dataclass
@@ -90,13 +103,23 @@ class SkillChain:
             if not isinstance(skill_name, str) or not skill_name:
                 continue
             gate_key = step.get("gate", "rubric")
-            gate_factory = GATE_REGISTRY.get(gate_key, SkillRubricGate)
+            if gate_key not in GATE_REGISTRY:
+                raise ValueError(
+                    f"{path.name}: unknown gate {gate_key!r} in step {skill_name!r}; "
+                    f"valid gates: {', '.join(sorted(GATE_REGISTRY))}"
+                )
+            gate_factory = GATE_REGISTRY[gate_key]
             gate = gate_factory() if callable(gate_factory) else gate_factory
 
             condition = None
             cond_key = step.get("condition")
-            if cond_key == "needs_architecture":
-                condition = _needs_architecture
+            if cond_key is not None:
+                if cond_key not in CONDITION_REGISTRY:
+                    raise ValueError(
+                        f"{path.name}: unknown condition {cond_key!r} in step {skill_name!r}; "
+                        f"valid conditions: {', '.join(sorted(CONDITION_REGISTRY))}"
+                    )
+                condition = CONDITION_REGISTRY[cond_key]
 
             nodes.append(SkillNode(skill_name=skill_name, gate=gate, condition=condition))
 

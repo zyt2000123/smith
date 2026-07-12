@@ -30,7 +30,6 @@ from .backtrack import FailureLoopGuard
 from .events import EventType, ExecutionEvent
 from .pipeline import run_pipeline
 from .react_loop import (
-    FailedAgentRunError,
     IncompleteAgentRunError,
     react_event_loop as _react_event_loop,
     react_loop as _react_loop,
@@ -222,13 +221,20 @@ def _enabled_tools_from_config(
     available = tool_registry.list_tool_names(include_disabled=True)
     tools_cfg = profile_config.get("tools") if isinstance(profile_config, dict) else {}
     enabled = tools_cfg.get("enabled") if isinstance(tools_cfg, dict) else None
-    if not isinstance(enabled, list):
+    if enabled is None:
+        # No whitelist configured → default to all non-hidden tools.
         configured = [name for name in available if name not in _HIDDEN_DEFAULT_TOOLS]
-    else:
+    elif isinstance(enabled, list):
         configured = [
-        name for name in enabled
-        if isinstance(name, str) and name and name not in _HIDDEN_DEFAULT_TOOLS
+            name for name in enabled
+            if isinstance(name, str) and name and name not in _HIDDEN_DEFAULT_TOOLS
         ]
+    else:
+        # A malformed whitelist (e.g. `enabled: "shell"`) must fail closed, not
+        # silently open every tool — a config typo must never grant shell/file access.
+        raise ValueError(
+            f"tools.enabled must be a list of tool names, got {type(enabled).__name__}"
+        )
     if identity.enabled_tools is None:
         return configured
     allowed = set(identity.enabled_tools)
@@ -276,14 +282,10 @@ def _identity_state_dir(runtime: RuntimeContext, identity: IdentitySpec) -> Path
 
 
 async def _load_profile_config(runtime: RuntimeContext) -> dict:
-    try:
-        from common.yaml_utils import load_yaml
-        loaded_config = load_yaml(runtime.profile_dir / "config.yaml")
-        if isinstance(loaded_config, dict):
-            return loaded_config
-    except Exception:
-        logger.exception("failed to load agent config (agent=%s)", runtime.agent_id)
-    return {}
+    from common.yaml_utils import load_yaml
+    # 文件缺失时 load_yaml 返回 {}（正常默认）；配置损坏必须显式失败——
+    # 静默回退空配置会把 tools.enabled 白名单反向放开成全量工具（fail-open）。
+    return load_yaml(runtime.profile_dir / "config.yaml")
 
 
 async def _register_mcp_tools(
@@ -291,21 +293,29 @@ async def _register_mcp_tools(
     runtime: RuntimeContext,
     services: RuntimeServices,
 ) -> None:
+    mcp_servers = profile_config.get("mcp_servers", [])
+    if not isinstance(mcp_servers, list) or not mcp_servers:
+        return
     try:
-        mcp_servers = profile_config.get("mcp_servers", [])
-        if not mcp_servers:
-            return
         from engine.tool.mcp_client import MCPClient, register_mcp_tools
-        for srv in mcp_servers:
-            cmd = srv.get("command", [])
+    except Exception:
+        logger.exception("failed to import MCP client (agent=%s)", runtime.agent_id)
+        return
+    # 逐 server 隔离失败：一个 server 连不上不许拖垮其余 server 的注册。
+    for srv in mcp_servers:
+        try:
+            cmd = srv.get("command", []) if isinstance(srv, dict) else []
             if not cmd:
                 continue
             client = MCPClient(cmd, env=srv.get("env"))
             await client.connect()
             services.mcp_clients.append(client)
             await register_mcp_tools(services.tool_registry, client)
-    except Exception:
-        logger.exception("failed to register MCP tools (agent=%s)", runtime.agent_id)
+        except Exception:
+            logger.exception(
+                "failed to register MCP server (agent=%s, command=%r)",
+                runtime.agent_id, srv.get("command") if isinstance(srv, dict) else srv,
+            )
 
 
 async def prepare_runtime(
@@ -393,18 +403,23 @@ def _resolve_pipeline(
 
 async def _persist_runtime_learning(
     state_dir: Path, user_message: str, reply_text: str, had_tools: bool,
-) -> None:
+) -> bool:
+    """Persist memory and preferences. Returns False if any write failed."""
+    ok = True
     try:
         from engine.memory.store import save_conversation_memory
         await save_conversation_memory(state_dir, user_message, reply_text, had_tools)
     except Exception:
+        ok = False
         logger.warning("failed to persist conversation memory", exc_info=True)
     try:
         from engine.memory.user_learner import UserPreferenceLearner
         learner = UserPreferenceLearner(state_dir)
         await learner.observe(user_message, reply_text)
     except Exception:
+        ok = False
         logger.warning("failed to learn user preferences", exc_info=True)
+    return ok
 
 
 def _has_memory_worthy_activity(event: ExecutionEvent) -> bool:
@@ -444,6 +459,7 @@ async def _run_events_with_runtime(
     terminal_reason: str | None = None
     drained = False
     state_dir: Path | None = None
+    memory_persist_failed = False
 
     yield ExecutionEvent(EventType.RUN_STARTED, {"run_id": run_id})
     try:
@@ -490,10 +506,11 @@ async def _run_events_with_runtime(
     finally:
         if drained and terminal_status == "completed" and state_dir is not None:
             try:
-                await _persist_runtime_learning(
+                memory_persist_failed = not await _persist_runtime_learning(
                     state_dir, request.message, "".join(full_text), had_tools,
                 )
             except Exception:
+                memory_persist_failed = True
                 logger.warning("failed to finalize conversation memory", exc_info=True)
         try:
             await services.close()
@@ -501,9 +518,13 @@ async def _run_events_with_runtime(
             logger.warning("failed to close engine runtime services", exc_info=True)
 
     if drained:
-        terminal_data: dict[str, str] = {"run_id": run_id, "status": terminal_status}
+        terminal_data: dict[str, object] = {"run_id": run_id, "status": terminal_status}
         if terminal_reason:
             terminal_data["reason"] = terminal_reason
+        if memory_persist_failed:
+            # 记忆写入失败对用户默认不可见；在终态事件上打标，
+            # 让前端有机会提示"本轮未写入长期记忆"。
+            terminal_data["memory_persist_failed"] = True
         yield ExecutionEvent(EventType.RUN_FINISHED, terminal_data)
 
 

@@ -49,3 +49,30 @@ def test_compact_history_keeps_tool_evidence_in_summary_input() -> None:
     blob = " ".join(m["content"] for m in captured["messages"])
     assert "DATABASE_URL" in blob   # 工具结果必须进摘要输入
     assert "read_file" in blob      # 工具调用意图也要保留
+
+
+def test_compact_history_discards_empty_summary() -> None:
+    # 摘要为空时整体替换历史 = 静默失忆；必须原样保留对话。
+    class EmptyLLM:
+        async def chat(self, messages, tools=None):
+            return SimpleNamespace(text="   ")
+
+    conversation = [
+        {"role": "system", "content": "sp"},
+        {"role": "user", "content": "hello"},
+    ]
+    result = asyncio.run(compact_history(conversation, EmptyLLM()))
+
+    assert result is conversation
+
+
+def test_compact_history_discards_truncated_summary() -> None:
+    # finish_reason=length 说明摘要被截断，不能拿半句话当全部记忆。
+    class TruncatedLLM:
+        async def chat(self, messages, tools=None):
+            return SimpleNamespace(text="partial summary", finish_reason="length")
+
+    conversation = [{"role": "user", "content": "hi"}]
+    result = asyncio.run(compact_history(conversation, TruncatedLLM()))
+
+    assert result is conversation

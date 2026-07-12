@@ -44,6 +44,26 @@ def contains_injection(text: str) -> bool:
     return any(p.search(text) for p in _INJECTION_PATTERNS)
 
 
+def sanitize_memory_text(text: str) -> tuple[str, int, int]:
+    """Remove unsafe lines before memory is persisted or injected into a prompt.
+
+    Returns the cleaned text plus counts of removed secret and instruction-like
+    lines.  Line-level removal preserves unrelated user-authored context while
+    ensuring a known unsafe fragment cannot survive into the prompt layer.
+    """
+    clean: list[str] = []
+    secrets_removed = 0
+    injections_removed = 0
+    for line in text.splitlines():
+        if contains_secret(line):
+            secrets_removed += 1
+        elif contains_injection(line):
+            injections_removed += 1
+        else:
+            clean.append(line)
+    return "\n".join(clean), secrets_removed, injections_removed
+
+
 def atomic_write_text(path: Path, content: str) -> None:
     """Replace *path* atomically, keeping an existing file intact on failure."""
     path.parent.mkdir(parents=True, exist_ok=True)

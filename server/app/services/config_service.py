@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import HTTPException
 
@@ -39,7 +39,7 @@ class ConfigService:
     _config_path = DATA_DIR / "config.yaml"
 
     @staticmethod
-    def _invalid(detail: str) -> None:
+    def _invalid(detail: str) -> NoReturn:
         raise HTTPException(status_code=422, detail=detail)
 
     def _mapping(self, value: object, label: str) -> dict[str, Any]:
