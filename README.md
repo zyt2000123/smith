@@ -1,224 +1,241 @@
 # Agent-Smith
 
-本地优先、终端原生的个人助手 Agent 工作台。
+本地优先、终端原生的个人 Agent 工作台。
 
-Smith 是你的唯一常驻 Agent，运行在本机，围绕文件、任务、记忆和工具持续工作。不是聊天机器人，而是一个 shell-native、可执行、可积累、可扩展的终端工作台。
+Agent-Smith 只有一个常驻 Agent：Smith。它运行在本机，保留会话和项目上下文，按任务选择工作流，通过受控工具读写文件、执行命令、操作 Git、联网检索，并把结果交付回终端。它不是一个只负责聊天的页面，也不是多 Agent 编排平台，而是一个可以长期使用的本地执行环境。
+
+> 当前仓库为 Private，项目仍处于持续开发阶段。
+
+## 能做什么
+
+- 在终端中进行交互式对话，也支持单次 CLI 调用。
+- 根据任务类型选择调试、规划、重构、测试、评审等工作流。
+- 通过技能和知识文档注入领域上下文，而不需要创建新的 Agent。
+- 使用文件、Shell、Git、Web、待办和 MCP 工具完成实际工作。
+- 在写文件前创建快照，并对危险操作执行权限和安全规则检查。
+- 持久化会话、记忆和运行状态；对过长上下文执行裁剪和压缩。
+- 使用 OpenAI 兼容、Anthropic 或 Gemini 模型，并按 interactive、gate、background 三类用途配置路由和超时。
 
 ## 快速开始
 
+### 环境要求
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
+- Node.js 和 npm
+
+### 安装
+
+在仓库根目录执行：
+
 ```bash
-# 安装
-cd server && uv sync
-cd ../shell && npm install && npm run build
-
-# 启动终端壳
-smith
-
-# 或 CLI 模式
 cd server
-uv run python -m app.cli agent ensure
-uv run python -m app.cli chat -m "帮我分析这段代码"
-uv run python -m app.cli chat              # 交互式 REPL
-uv run python -m app.cli sessions list     # 查看历史会话
+uv sync
+
+cd ../shell
+npm ci
+npm run build
 ```
 
-带 LLM 配置：
+只使用 CLI 时不需要构建终端壳；只需完成 `server` 的 `uv sync`。
+
+### 配置模型
+
+最简单的方式是使用环境变量：
 
 ```bash
-AGENTSMITH_LLM_API_KEY="sk-xxx" \
-AGENTSMITH_LLM_BASE_URL="https://your-api.com/v1" \
-AGENTSMITH_LLM_MODEL="glm-4.7" \
-cd server && uv run uvicorn app.main:app --port 8140
+export AGENTSMITH_LLM_PROVIDER=openai
+export AGENTSMITH_LLM_API_KEY="sk-..."
+export AGENTSMITH_LLM_BASE_URL="https://api.openai.com/v1"
+export AGENTSMITH_LLM_MODEL="your-model"
 ```
 
-多模型路由与超时档位可通过终端的 `/config` 配置，也可写入 `~/.agent-smith/config.yaml`：
+也可以写入 `~/.agent-smith/config.yaml`：
 
 ```yaml
 llm:
-  provider: openai                 # openai/openai_compatible 或 anthropic
-  api_key: sk-xxx
-  base_url: https://your-api.com/v1
-  model: main-model                 # 默认用于交互对话
-  max_output_tokens: 2048           # 可选；省略时采用厂商默认值
-  routes:
-    gate:
-      provider: anthropic           # 路由可以切换到另一家厂商
-      api_key: sk-ant-xxx           # 跨厂商路由需提供该厂商的密钥
-      base_url: https://api.anthropic.com
-      model: small-fast-model        # 未写的字段继承默认模型配置
-      max_output_tokens: 512
-      timeout_profile: gate
-    background:
-      model: economical-long-model
-      timeout_profile: background
+  provider: openai              # openai / openai_compatible / anthropic / gemini
+  api_key: sk-...
+  base_url: https://api.openai.com/v1
+  model: your-model
+  max_output_tokens: 2048
   timeout_profiles:
+    interactive:
+      stream_read: 120
     gate:
-      read: 45
-      stream_read: 60
+      read: 90
+      stream_read: 90
     background:
       read: 240
       stream_read: 300
 ```
 
-可用路由和 profile 名为 `interactive`、`gate`、`background`。每个 profile 可覆盖
-`connect`、`read`、`stream_read`、`write`、`pool`（秒）；省略时使用内置默认值。
-`GET /api/config/llm` 与终端 UI 只显示密钥是否已配置，绝不返回密钥本身。
-`openai`/`openai_compatible` 使用 Chat Completions 兼容协议；`anthropic` 走原生 Messages 协议。
+配置文件中的密钥不会通过配置查询接口返回；不要把本地配置文件或密钥提交到 Git。
 
-## 它能做什么
+支持的 provider：
 
-- 读写文件、执行命令、Git 操作、联网搜索和抓取
-- shell 是一等执行能力，结构化工具是对 shell/file/git/web 操作的安全封装
-- 按任务类型自动切换工作流（debug → planning → testing → review）
-- 跨会话记忆积累，越用越懂你的项目和偏好
-- 17 个内置技能覆盖前端、后端、产品、测试、DevOps、数据分析等领域
-- 24 条安全规则拦截危险操作
-- 上下文自动压缩（两阶段：pruning + LLM 摘要），长对话不爆 token
-- 文件修改前自动快照，支持 rewind
+| provider | 协议 | 适用场景 |
+|---|---|---|
+| `openai` / `openai_compatible` | Chat Completions | OpenAI 及兼容接口 |
+| `anthropic` | Messages | Anthropic 原生接口 |
+| `gemini` | Gemini 的 OpenAI 兼容接口 | Gemini 模型 |
+
+### 启动
+
+在终端中运行以下命令，`smith` 会使用已构建的 Ink 壳，并在需要时自动启动本地后端：
+
+```bash
+cd server
+uv run smith
+```
+
+也可以直接使用 CLI：
+
+```bash
+cd server
+
+# 初始化或检查 Smith
+uv run smith agent ensure
+uv run smith agent show
+
+# 交互式对话
+uv run smith chat
+
+# 单次消息
+uv run smith chat -m "帮我分析这个项目的启动流程"
+
+# 指定工作目录并输出技能、工具和思考轨迹
+uv run smith chat --workdir /path/to/project --verbose
+
+# 查看会话
+uv run smith sessions list
+uv run smith sessions show SESSION_ID
+```
+
+如果需要单独启动 API 服务：
+
+```bash
+cd server
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8140
+```
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8140/api/health
+```
+
+默认情况下，只有健康检查公开；其他 `/api/*` 请求需要本机 Bearer Token。服务首次启动时会把 Token 保存到 `~/.agent-smith/auth_token`，终端壳会自动读取并使用它。也可以通过 `SMITH_SERVER_URL` 让终端壳连接到指定的本地服务。
+
+## 工作方式
+
+```text
+用户
+  │
+  ▼
+Smith（单一常驻 Agent）
+  │
+  ├── 任务路由：判断直接回答、调试、规划、重构或评审
+  ├── 技能链：按 YAML pipeline 组织步骤和门禁
+  ├── ReAct：模型在受控循环中思考、调用工具、读取结果
+  ├── 安全层：权限等级、危险命令规则和事实门禁
+  └── 持久化：会话、记忆、快照、工具输出和运行状态
+```
+
+宏观流程由代码和配置确定，模型只在 ReAct 环节获得执行自由度。这样既能保留 Agent 的灵活性，也能让文件修改、命令执行和长任务恢复有明确边界。
 
 ## 架构
 
-```
-server/ ──→ engine/ ──→ common/
-  │                  ↑
-  └──── 读取 ──→ agents/
+```text
+shell（Ink / React）
+        │ HTTP
+        ▼
+server（FastAPI + CLI）
+        │
+        ▼
+engine（执行引擎） ◄──── agents（身份、技能、工具和安全规则）
+        │
+        ▼
+common（配置、SQLite、文件系统和日志）
 ```
 
 | 目录 | 职责 |
 |---|---|
-| `common/` | 基础设施 — 配置加载、SQLite WAL、文件系统、日志 |
-| `engine/` | Agent 框架 — 执行引擎、LLM 调用、记忆、技能、工具、Hook 系统、安全护栏 |
-| `agents/` | 内容层 — Smith 模板、18 个技能、14 个工具、安全规则 |
-| `server/` | 平台层 — FastAPI 后端 + CLI 入口 |
-| `shell/` | 终端壳 — Ink/React TUI，自动拉起后端 |
+| `common/` | 基础设施：路径和配置、YAML/JSON、SQLite WAL、文件系统和日志。 |
+| `engine/` | 执行框架：任务路由、技能链、ReAct 循环、LLM、记忆、工具、MCP、安全、Hook 和快照。 |
+| `agents/` | 内容层：Smith 身份种子、YAML 身份、pipeline、内置技能、工具 provider 和安全规则。 |
+| `server/` | 平台层：FastAPI、服务编排、Agent/会话生命周期和 CLI 入口。 |
+| `shell/` | 终端前端：Ink/React UI，通过 HTTP 调用后端，并负责自动拉起兼容的本地服务。 |
+| `docs/` | 产品、架构、模块设计、开发规范和研究记录。 |
 
-四层单向依赖，不可逆。engine 不知道 FastAPI，common 不依赖任何上层。
+依赖方向保持单向：`server → engine → common`，`agents` 作为内容被 `engine` 加载，`shell` 只通过服务接口与后端通信。执行引擎不依赖 FastAPI，也不负责平台层的 Agent 实例管理。
 
-## 核心设计
+## 关键能力
 
-### 执行引擎
+### 技能和工作流
 
-宏观确定性控制，微观 LLM 自由度：
+技能以 `SKILL.md` 形式存在，使用 YAML frontmatter 描述元数据，正文提供流程、知识和判断标准。任务 pipeline 位于 `agents/pipelines/`，当前包含 Bug Fix、Feature/Refactor 等执行路径。新增工作流通常只需要新增或调整内容文件，不需要修改核心执行引擎。
 
-```
-用户消息
-  → 任务路由（规则引擎，不用 LLM）
-  → 技能链 DAG（代码控制步骤顺序 + 门禁）
-  → ReAct 循环（LLM 在这里获得自由度：思考 → 调工具 → 观察）
-  → 安全护栏（24 条正则规则拦截危险命令）
-```
+### 工具和安全
 
-三条路由：Bug Fix（debug → planning → testing → validation → review）、Feature（full-stack-product → planning → architecture → testing → validation → review）、Direct（跳过技能链，直接 ReAct）。
+工具 provider 位于 `agents/tools/`，由引擎动态发现并注册。工具定义包含参数、路径参数、写入标记和权限等级；安全层会在执行前检查危险命令、文件范围和破坏性操作。MCP 客户端支持 stdio 和 Streamable HTTP 两种传输方式。
 
-### 技能系统
+### 记忆、快照和长上下文
 
-两类技能，互补不冲突：
-
-| 类型 | 数量 | 作用 | 示例 |
-|---|---|---|---|
-| 流程型 | 9 个 | 控制"怎么做" | planning、sde-debug、code-review、testing-strategy |
-| 领域/通才型 | 9 个 | 提供"知道什么"和跨领域判断 | full-stack-product、frontend、backend、product、devops、testing、data-analysis |
-
-每个技能是一个 `SKILL.md`（YAML frontmatter + Markdown），支持版本管理和 rollback。新增技能只需在 `agents/skills/` 下加目录，不改任何代码。
-
-### Hook 系统
-
-5 种执行模式的插件链，覆盖工具注入、prompt 修改、工具拦截等扩展点：
-
-| 模式 | 行为 | 用途 |
-|---|---|---|
-| First | 第一个非空结果胜出 | 竞争式处理 |
-| Series | 串行执行，无返回 | 副作用（日志、telemetry） |
-| SeriesMerge | 串行合并（list concat / dict update） | 工具注入、配置合并 |
-| SeriesLast | 管道：每个插件接收上一个的输出 | prompt 修改、输出后处理 |
-| Parallel | 并行执行 | 清理、通知 |
-
-内置 3 个插件：SnapshotPlugin（写文件前备份）、TruncationPlugin（大输出存文件返预览）、CompressionPlugin（裁剪旧 tool output）。
-
-### 上下文压缩
-
-两阶段，自动触发：
-
-1. **Pruning**（确定性） — 反向遍历对话，保护最近 2 轮，超阈值的旧 tool output 替换为 `[pruned]`
-2. **Compaction**（LLM 生成） — pruning 后仍超限，调 LLM 生成 XML 结构化摘要替换全部历史
-
-### 记忆系统
-
-- agent / project 双作用域（project 优先）
-- Dream 整理：每 5 次对话触发，秘密过滤 → 30 天剪枝 → 70% 去重 → 模式提取
-- 偏好自动学习：4 维启发式（语言/简洁度/技术水平/代码风格），同一特征观察 3 次才写入
-
-### 文件快照
-
-write_file 工具覆写文件前自动备份到 `~/.agent-smith/snapshots/`，支持 `rewind()` 恢复。
-
-## 项目结构
-
-```
-Agent-Smith/
-├── common/                  # 基础设施
-│   ├── config.py            #   路径常量
-│   ├── config_loader.py     #   四层 LLM 配置合并
-│   ├── database.py          #   SQLite 连接
-│   └── yaml_utils.py        #   YAML / JSON 读写
-│
-├── engine/                  # Agent 执行框架
-│   ├── execution/           #   任务路由 + 技能链 + ReAct + 门禁 + 回退 + 压缩
-│   ├── llm/                 #   LLM 调用（OpenAI 兼容，流式 + tool_call）
-│   ├── prompt/              #   9 层 System Prompt 组装
-│   ├── tool/                #   工具协议 + 注册 + 输出截断
-│   ├── skill/               #   技能加载 + 版本管理
-│   ├── memory/              #   记忆存储 + Dream + 偏好学习
-│   ├── hook.py              #   Hook 系统（5 种执行模式）
-│   ├── snapshot.py          #   文件快照 + rewind
-│   ├── plugin/              #   外部插件（Webhook + Polling）
-│   └── safety/              #   安全护栏（24 条规则，7 类）
-│
-├── agents/                  # 内容定义
-│   ├── smith/               #   Smith 内置身份种子（role/config/style/workflow）
-│   ├── identities/          #   YAML 领域身份与意图→pipeline 路由
-│   ├── skills/              #   18 个内置技能（流程型 + 领域/通才型）
-│   ├── tools/               #   14 个工具 provider
-│   └── safety/              #   安全规则
-│
-├── server/                  # 平台后端
-│   └── app/
-│       ├── main.py          #   FastAPI 入口
-│       ├── cli.py           #   CLI 兼容入口 / re-export 门面
-│       ├── cli_*.py         #   CLI 内部模块（身份、shell、命令、chat）
-│       ├── schemas/         #   Pydantic 请求/响应模型
-│       ├── routers/         #   12 个路由（薄壳）
-│       ├── services/        #   服务编排层（单 Smith facade）
-│       └── infrastructure/  #   Repository 持久化
-│
-├── shell/                   # Ink 终端壳
-└── docs/                    # 设计文档
-```
+- 会话消息和运行状态保存在本地 SQLite。
+- Agent 和项目上下文可以通过记忆层持续积累。
+- 旧的工具输出可以裁剪，完整内容保存在工具输出目录。
+- 上下文过长时先做确定性裁剪，再按需生成摘要。
+- `write_file` 等写操作可以在修改前创建快照，便于恢复。
 
 ## 运行时数据
 
-```
+默认数据目录为 `~/.agent-smith/`：
+
+```text
 ~/.agent-smith/
-├── config.yaml              # 平台级配置（LLM key/url/model）
-├── agent/                   # Smith 的唯一运行时档案
-│   ├── role.md / ...        # 从模板复制，可编辑
-│   ├── skills/              # 自装技能
-│   └── identity-state/      # 按 YAML 身份隔离的记忆和执行检查点
+├── config.yaml              # 平台级 LLM 配置
+├── auth_token               # 本地 API Bearer Token，权限为 0600
+├── agent/                   # Smith 的运行时档案、技能、记忆和配置
 ├── snapshots/               # 文件修改快照
-├── tool-output/             # 截断的工具输出完整文件
+├── tool-output/             # 被截断工具输出的完整文件
 └── sqlite/agent-smith.sqlite
 ```
 
-## 技术栈
+Smith 的内置身份和默认内容来自仓库中的 `agents/smith/`；运行时档案和用户修改保存在 `~/.agent-smith/agent/`，两者相互分离。
 
-| 层 | 技术 |
-|---|---|
-| 后端 | Python 3.11+ / FastAPI / uvicorn |
-| Agent 引擎 | 自研（DAG + ReAct，非 LangChain） |
-| 存储 | SQLite WAL + 文件系统 |
-| LLM | OpenAI 兼容 API（httpx，流式 + tool_call） |
-| 终端 UI | Ink (React) / TypeScript |
-| 包管理 | uv (Python) / npm (shell) |
+## 开发与验证
+
+```bash
+# Engine
+cd engine
+uv run --extra test pytest tests
+
+# Server
+cd ../server
+uv run --extra dev pytest tests
+
+# Shell
+cd ../shell
+npm test
+npm run check
+```
+
+构建终端壳：
+
+```bash
+cd shell
+npm run build
+```
+
+更多设计背景和模块说明见 [`docs/`](docs/) 以及：
+
+- [`docs/01-产品设计与定位.md`](docs/01-产品设计与定位.md)
+- [`docs/02-系统架构.md`](docs/02-系统架构.md)
+- [`docs/04-Engine-设计与实现.md`](docs/04-Engine-设计与实现.md)
+- [`docs/06-Agents-内容层.md`](docs/06-Agents-内容层.md)
+- [`docs/07-Server-平台后端.md`](docs/07-Server-平台后端.md)
+- [`docs/08-Shell-终端前端.md`](docs/08-Shell-终端前端.md)
 
 ## 许可证
 
