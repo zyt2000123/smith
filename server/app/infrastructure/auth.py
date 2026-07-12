@@ -8,10 +8,12 @@ The shell (or any local client) reads that file to authenticate.
 """
 from __future__ import annotations
 
+import hmac
+import os
 import secrets
 from pathlib import Path
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from common.config import DATA_DIR
@@ -35,9 +37,12 @@ def _read_or_create_token() -> str:
             return token
 
     token = secrets.token_urlsafe(32)
-    _TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _TOKEN_PATH.write_text(token)
-    _TOKEN_PATH.chmod(PRIVATE_FILE_MODE)
+    _TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(str(_TOKEN_PATH), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, PRIVATE_FILE_MODE)
+    try:
+        os.write(fd, token.encode())
+    finally:
+        os.close(fd)
     _cached_token = token
     return token
 
@@ -47,8 +52,9 @@ def get_local_token() -> str:
 
 
 async def require_auth(
-    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> None:
-    if credentials is None or credentials.credentials != get_local_token():
+    if credentials is None or not hmac.compare_digest(
+        credentials.credentials, get_local_token()
+    ):
         raise HTTPException(401, "Invalid or missing auth token")

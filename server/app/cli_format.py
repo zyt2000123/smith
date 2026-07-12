@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Sequence
+
+_ANSI_ESCAPE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\x1b\[[\d;]*[A-Za-z]|\x1b][^\x07]*\x07|\x1b[^[\]()]")
 
 
 def _format_agent_line(agent: Any) -> str:
@@ -49,5 +52,5 @@ def _print_messages(messages: Sequence[Any]) -> None:
         return
     for message in messages:
         print(f"[{message.role}] {message.created_at}")
-        print(message.content)
+        print(_ANSI_ESCAPE.sub("", message.content))
         print()

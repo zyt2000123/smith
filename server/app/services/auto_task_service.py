@@ -152,7 +152,7 @@ class AutoTaskService:
                 run["id"], "failed", "", error=str(exc)
             )
             if finished is None:
-                raise HTTPException(500, "Failed to record auto task run")
+                raise HTTPException(500, "Failed to record auto task run") from exc
             return AutoTaskRunOut(**finished)
 
     async def list_runs(self, task_id: str) -> list[AutoTaskRunOut]:
@@ -186,6 +186,6 @@ class AutoTaskService:
             if trigger_type == "interval":
                 seconds = int(trigger_config)
                 return next_interval_time(seconds, after=now).isoformat()
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             return None
         return None

@@ -1,7 +1,7 @@
 """Memory compilation — recent events + durable facts + episode summaries.
 
 Three compilation targets:
-  compile_recent()   → recent.md     (last 7-14 days, budget-capped)
+  compile_recent()   → recent.md     (last 3-7 days, budget-capped)
   compile_durable()  → durable.md    (incremental merge of stable facts)
   compact_episode()  → episodes/*.md (on an explicit user summary request)
   assemble_memory()  → combined str  (for prompt injection)
@@ -19,7 +19,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ._files import atomic_write_text
+from ._files import (
+    atomic_write_text,
+    contains_injection,
+    contains_secret,
+    sanitize_memory_text,
+)
 
 if TYPE_CHECKING:
     from engine.llm.port import LLMPort
@@ -33,6 +38,10 @@ MIN_WINDOW_DAYS = 3
 MAX_WINDOW_DAYS = 7
 
 logger = logging.getLogger(__name__)
+
+
+class MemoryCompilationError(RuntimeError):
+    """A compilation result was unsafe or unusable and must be retried."""
 
 
 def _fingerprint(keys: list[str]) -> str:
@@ -50,7 +59,12 @@ def _write_fp(path: Path, fp: str) -> None:
     atomic_write_text(path, fp)
 
 
-def _load_recent(memory_dir: Path, *, from_offset: bool = False) -> list[dict]:
+def _load_recent(
+    memory_dir: Path,
+    *,
+    from_offset: bool = False,
+    offset: int | None = None,
+) -> list[dict]:
     """Load events from recent.jsonl.
 
     When *from_offset* is True, only return entries after the last
@@ -60,9 +74,8 @@ def _load_recent(memory_dir: Path, *, from_offset: bool = False) -> list[dict]:
     if not recent.is_file():
         return []
     lines = recent.read_text(encoding="utf-8").strip().splitlines()
-    offset = 0
-    if from_offset:
-        offset = _read_offset(memory_dir)
+    if offset is None:
+        offset = _read_offset(memory_dir) if from_offset else 0
     entries = []
     for line in lines[offset:]:
         try:
@@ -84,6 +97,21 @@ def _read_offset(memory_dir: Path) -> int:
 
 def _write_offset(memory_dir: Path, offset: int) -> None:
     atomic_write_text(memory_dir / ".compile_offset", str(offset))
+
+
+def _read_durable_offset(memory_dir: Path) -> int:
+    """Read the durable-specific checkpoint, falling back during migration."""
+    offset_file = memory_dir / ".durable_offset"
+    if offset_file.is_file():
+        try:
+            return max(0, int(offset_file.read_text(encoding="utf-8").strip()))
+        except (ValueError, OSError):
+            pass
+    return _read_offset(memory_dir)
+
+
+def _write_durable_offset(memory_dir: Path, offset: int) -> None:
+    atomic_write_text(memory_dir / ".durable_offset", str(offset))
 
 
 def _total_lines(memory_dir: Path) -> int:
@@ -134,8 +162,8 @@ def _entries_to_source(
     """
     lines = []
     for entry in entries:
-        task = str(entry.get("task", "?"))
-        summary = str(entry.get("summary", "?"))
+        task, _, _ = sanitize_memory_text(str(entry.get("task", "?")))
+        summary, _, _ = sanitize_memory_text(str(entry.get("summary", "?")))
         if summary_limit is not None:
             summary = _truncate_source(summary, summary_limit)
         lines.append(f"- [{str(entry.get('timestamp', '?'))[:16]}] {task}: {summary}")
@@ -217,12 +245,10 @@ async def _generate_and_review(
 ) -> str:
     """Run the generator-evaluator loop: generate → review → retry up to 3 rounds.
 
-    Invariant: every returned draft has been reviewed. The loop generates a
-    draft, reviews it, and only regenerates if review fails AND retries remain.
-    Final draft always gets a deterministic contains_secret scan.
+    Invariant: every returned draft passed review. The loop generates a draft,
+    reviews it, and retries rejected drafts up to the configured limit. A final
+    rejection is a failed compilation, never a silently accepted memory write.
     """
-    from ._files import contains_secret
-
     draft = await _llm_summarize(generator, prompt)
     gen_prompt = prompt
 
@@ -231,26 +257,30 @@ async def _generate_and_review(
 
         hard_fails = review.get("hard_fail", [])
         soft_fails = review.get("soft_fail", [])
-        needs_retry = bool(hard_fails) or len(soft_fails) > _MAX_SOFT_FAILS
+        passed_review = review.get("pass") is True
+        needs_retry = (
+            not passed_review
+            or bool(hard_fails)
+            or len(soft_fails) > _MAX_SOFT_FAILS
+        )
 
         if not needs_retry:
             break
 
         if attempt >= _MAX_REVIEW_ROUNDS - 1:
-            break
+            raise MemoryCompilationError("compiled draft did not pass review")
 
         feedback = review.get("feedback", "Quality issues found.")
         gen_prompt = f"{prompt}\n\nPREVIOUS DRAFT REJECTED. Issues: {feedback}\nFix these and regenerate."
         draft = await _llm_summarize(generator, gen_prompt)
 
     if contains_secret(draft):
-        logger.warning("compiled draft still contains secrets after review — redacting")
-        draft = "[Content redacted — contained sensitive information after review]"
+        logger.warning("compiled draft still contains secrets after review — rejecting")
+        raise MemoryCompilationError("compiled draft contains sensitive information")
 
-    from ._files import contains_injection
     if contains_injection(draft):
-        logger.warning("compiled draft contains prompt-injection markers — redacting")
-        draft = "[Content redacted — contained instruction-injection patterns]"
+        logger.warning("compiled draft contains prompt-injection markers — rejecting")
+        raise MemoryCompilationError("compiled draft contains instruction-injection patterns")
 
     return draft
 
@@ -297,13 +327,12 @@ async def compile_recent(
         summary = source
 
     if len(summary) > MAX_RECENT_CHARS:
-        logger.warning("recent compilation exceeded budget (%d > %d), truncating", len(summary), MAX_RECENT_CHARS)
-        summary = summary[:MAX_RECENT_CHARS].rstrip() + "\n\n[…truncated]"
+        logger.warning("recent compilation exceeded budget (%d > %d), rejecting", len(summary), MAX_RECENT_CHARS)
+        raise MemoryCompilationError("recent compilation output exceeded character budget")
 
-    from ._files import contains_secret
-    if contains_secret(summary):
-        logger.warning("recent compilation output contains secrets — skipping write")
-        return False
+    if contains_secret(summary) or contains_injection(summary):
+        logger.warning("recent compilation output contains unsafe content — retrying later")
+        raise MemoryCompilationError("recent compilation output contains unsafe content")
 
     atomic_write_text(out, f"## Recent Activity\n\n{summary}\n")
     _write_fp(fp_file, fp)
@@ -342,16 +371,22 @@ async def compile_durable(
     reviewer: "LLMPort | None" = None,
 ) -> bool:
     """Incrementally merge new events into durable.md."""
-    all_entries = _load_recent(memory_dir, from_offset=True)
+    durable_offset = _read_durable_offset(memory_dir)
+    all_entries = _load_recent(memory_dir, offset=durable_offset)
+    total = _total_lines(memory_dir)
 
     out = memory_dir / "durable.md"
     fp_file = memory_dir / ".fp_durable"
 
     fp = _fingerprint([f"{e.get('timestamp', '')}:{e.get('task', '')[:50]}" for e in all_entries])
     if _read_fp(fp_file) == fp and out.is_file():
+        if not (memory_dir / ".durable_offset").is_file():
+            _write_durable_offset(memory_dir, total)
         return False
 
-    existing = out.read_text(encoding="utf-8").strip() if out.is_file() else ""
+    original = out.read_text(encoding="utf-8") if out.is_file() else ""
+    existing, _, _ = sanitize_memory_text(original)
+    existing = existing.strip()
     new_source = _entries_to_source(
         all_entries,
         summary_limit=1000,
@@ -371,19 +406,23 @@ async def compile_durable(
     else:
         summary = await _llm_summarize(llm, merge_prompt)
 
-    from ._files import contains_secret
-    if contains_secret(summary):
-        logger.warning("durable compilation output contains secrets — skipping write")
-        return False
+    summary = summary.strip()
+    if not summary:
+        logger.warning("durable compilation output was empty — keeping existing memory")
+        raise MemoryCompilationError("durable compilation output was empty")
+    if contains_secret(summary) or contains_injection(summary):
+        logger.warning("durable compilation output contains unsafe content — keeping existing memory")
+        raise MemoryCompilationError("durable compilation output contains unsafe content")
 
     durable = f"## Durable Memory\n\n{summary}\n"
     if len(durable) > MAX_DURABLE_CHARS:
-        logger.warning("durable memory exceeded %s characters; truncating", MAX_DURABLE_CHARS)
-        durable = durable[:MAX_DURABLE_CHARS].rstrip()
-        if len(durable) < MAX_DURABLE_CHARS:
-            durable += "\n"
+        logger.warning("durable memory exceeded %s characters; rejecting", MAX_DURABLE_CHARS)
+        raise MemoryCompilationError("durable compilation output exceeded character budget")
+    if original and original != durable:
+        atomic_write_text(out.with_name("durable.md.bak"), original)
     atomic_write_text(out, durable)
     _write_fp(fp_file, fp)
+    _write_durable_offset(memory_dir, total)
     return True
 
 
@@ -400,6 +439,9 @@ async def compact_episode(
 ) -> Path | None:
     """Generate an episode summary for a completed topic. Returns the file path."""
     if not related_entries:
+        return None
+    if contains_secret(topic) or contains_injection(topic):
+        logger.warning("episode topic contains unsafe content — skipping write")
         return None
 
     episodes_dir = memory_dir / "episodes"
@@ -431,9 +473,9 @@ async def compact_episode(
 
     _MAX_EPISODE_CHARS = 800
     if len(summary) > _MAX_EPISODE_CHARS:
-        summary = summary[:_MAX_EPISODE_CHARS - 20] + "\n\n[…truncated]"
+        logger.warning("episode summary exceeded %s characters — skipping write", _MAX_EPISODE_CHARS)
+        raise MemoryCompilationError("episode summary exceeded character budget")
 
-    from ._files import contains_secret, contains_injection
     if contains_secret(summary):
         logger.warning("episode output contains secrets — skipping write")
         return None
@@ -460,7 +502,8 @@ def assemble_memory(memory_dir: Path) -> str:
     for name in ("durable.md", "recent.md"):
         path = memory_dir / name
         if path.is_file():
-            content = path.read_text(encoding="utf-8").strip()
+            content, _, _ = sanitize_memory_text(path.read_text(encoding="utf-8"))
+            content = content.strip()
             if content:
                 sections.append(content)
 

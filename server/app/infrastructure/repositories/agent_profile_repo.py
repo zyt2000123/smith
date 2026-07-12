@@ -58,10 +58,17 @@ class AgentProfileRepo:
         await db.commit()
 
         if cursor.rowcount == 0:
-            row = await self.find_by_name_role(data["name"], data["role"])  # type: ignore[return-value]
+            row = await self.find_by_name_role(data["name"], data["role"])
+            if row is None:
+                raise RuntimeError(
+                    f"INSERT OR IGNORE hit UNIQUE conflict but row not found: "
+                    f"name={data['name']!r}, role={data['role']!r}"
+                )
             row["_existed"] = True
             return row
-        row = await self.get(eid)  # type: ignore[return-value]
+        row = await self.get(eid)
+        if row is None:
+            raise RuntimeError(f"Inserted profile {eid!r} but could not re-fetch it")
         row["_existed"] = False
         return row
 

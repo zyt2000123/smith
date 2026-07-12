@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -65,8 +65,8 @@ async def list_identities(svc: AgentService = Depends(get_agent_service)):
 @router.get("/sessions/{session_id}/messages", response_model=list[MessageOut])
 async def list_messages(
     session_id: str,
-    limit: int = 0,
-    offset: int = 0,
+    limit: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0),
     svc: AgentService = Depends(get_agent_service),
 ):
     return await svc.list_messages(session_id, limit=limit, offset=offset)

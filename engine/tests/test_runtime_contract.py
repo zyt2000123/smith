@@ -37,7 +37,6 @@ class FakeLLM:
     async def chat_stream(
         self,
         messages: list[dict],
-        tools: list[dict] | None = None,
     ):
         self.messages = messages
         yield "streamed reply"

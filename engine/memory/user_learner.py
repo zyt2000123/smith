@@ -105,6 +105,7 @@ def _detect_code_style(text: str) -> str | None:
 _FIELD_MAP = {
     "language": "Preferred Language",
     "verbosity": "Communication Style",
+    "tech_level": "Technical Level",
     "code_style": "Code Style",
 }
 
@@ -123,7 +124,7 @@ class UserPreferenceLearner:
 
     # --- public API ---
 
-    async def observe(self, user_message: str, agent_reply: str) -> list[str]:
+    async def observe(self, user_message: str, _agent_reply: str) -> list[str]:
         """Analyze a conversation turn and extract learnable preferences.
 
         Returns list of observations made (for logging).

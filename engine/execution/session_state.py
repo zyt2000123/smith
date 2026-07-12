@@ -1,7 +1,8 @@
 """Session state checkpoint for crash recovery.
 
 Saves execution state to a JSON file after each significant step.
-On restart, ``restore()`` returns the last checkpoint so execution can resume.
+``restore()`` returns the last checkpoint. NOTE: only ``save``/``clear``
+are wired into the pipeline today — restart-resume is not implemented yet.
 """
 
 import json
@@ -53,7 +54,12 @@ class SessionStateManager:
         )
 
     def restore(self, session_id: str) -> SessionCheckpoint | None:
-        path = self._path(session_id)
+        try:
+            path = self._path(session_id)
+        except ValueError:
+            # 非法 id（如 list_active 撞到带点号的杂散文件名）读不出
+            # checkpoint 是正常结果，不应让整个恢复流程崩溃。
+            return None
         if not path.is_file():
             return None
         try:

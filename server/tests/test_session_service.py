@@ -41,6 +41,9 @@ class FakeSessionRepo:
     async def get_messages(self, session_id: str, limit: int = 0, offset: int = 0) -> list[dict]:
         return []
 
+    async def get_recent_messages(self, session_id: str, limit: int) -> list[dict]:
+        return []
+
     async def add_message(self, session_id: str, role: str, content: str) -> dict:
         self.saved_messages.append((session_id, role, content))
         return {

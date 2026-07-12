@@ -69,7 +69,7 @@ class LLMProviderConfig:
     """Resolved connection configuration passed to an adapter factory."""
 
     provider: str
-    api_key: str
+    api_key: str = field(repr=False)
     base_url: str
     model: str
     stream: bool = True

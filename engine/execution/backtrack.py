@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 
@@ -11,27 +11,25 @@ class FailureSignature:
 
 
 class FailureLoopGuard:
-    """Detect repeated failures and decide whether to retry, switch strategy, or block."""
+    """Per-node failure escalation: bounded retries, then one switch, then block.
 
-    def __init__(self, max_same: int = 2, max_strategies: int = 2) -> None:
+    State is keyed by ``error_type`` (the failing node) alone. A global
+    strategy set would let unrelated nodes' earlier failures block the
+    current node prematurely, and keying counts by output hash never
+    terminates because LLM output varies between retries.
+    """
+
+    def __init__(self, max_same: int = 2, max_attempts: int = 3) -> None:
         self.max_same = max_same
-        self.max_strategies = max_strategies
-        self._counts: dict[str, int] = {}
-        self._strategies_tried: set[str] = set()
+        self.max_attempts = max_attempts
+        self._attempts: dict[str, int] = {}
 
     def record(self, sig: FailureSignature) -> Literal["retry", "switch", "blocked"]:
-        key = f"{sig.error_type}:{sig.context_hash}"
-        self._counts[key] = self._counts.get(key, 0) + 1
-        self._strategies_tried.add(sig.error_type)
+        attempts = self._attempts.get(sig.error_type, 0) + 1
+        self._attempts[sig.error_type] = attempts
 
-        if self._counts[key] < self.max_same:
+        if attempts < self.max_same:
             return "retry"
-
-        if len(self._strategies_tried) >= self.max_strategies:
-            return "blocked"
-
-        return "switch"
-
-    def reset(self) -> None:
-        self._counts.clear()
-        self._strategies_tried.clear()
+        if attempts < self.max_attempts:
+            return "switch"
+        return "blocked"

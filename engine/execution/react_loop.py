@@ -32,7 +32,7 @@ from engine.safety.tool_policy import ToolPolicy
 from engine.safety.fact_gate import FactGate, current_fact_gate
 from engine.tool.interface import ToolCall
 
-from .compression import compress
+from .compression import compress, needs_compaction
 from .events import EventType, ExecutionEvent
 
 if TYPE_CHECKING:
@@ -346,13 +346,33 @@ async def react_event_loop(
     active_provision_ids: list[str] = []
     last_error_key: str | None = None
     identical_error_count = 0
+    compact_llm: "LLMPort | None" = llm
+    ineffective_compacts = 0
 
     while productive_iters < max_iters:
-        conversation = await compress(conversation, llm)
+        conversation = await compress(conversation, compact_llm)
+        if compact_llm is not None:
+            if needs_compaction(conversation):
+                # compact 失败或摘要仍超限：连续两次无效后熔断 LLM 压缩，
+                # 避免每轮迭代重放一次注定失败的摘要调用；prune 和硬截断继续生效。
+                ineffective_compacts += 1
+                if ineffective_compacts >= 2:
+                    compact_llm = None
+            else:
+                ineffective_compacts = 0
         if len(conversation) > CONVERSATION_HARD_LIMIT:
             # ponytail: keep head (system + initial user) and recent tail
             head = conversation[:CONVERSATION_KEEP_HEAD]
-            tail = conversation[-CONVERSATION_KEEP_RECENT:]
+            # 切点落在 tool 结果串中会拆散 assistant(tool_calls)/tool 配对
+            # （provider 400）。向前回退到 assistant/user 边界：同一轮的 tool
+            # 结果之间可能夹着 system 提示（TOOL_FAILURE_HINT 在 tool_calls
+            # 循环内 append），只认 role=="tool" 会在提示处停下留下孤儿。
+            cut = len(conversation) - CONVERSATION_KEEP_RECENT
+            while cut > CONVERSATION_KEEP_HEAD and conversation[cut].get("role") in ("tool", "system"):
+                cut -= 1
+            tail = conversation[cut:]
+            while head and head[-1].get("role") == "assistant" and head[-1].get("tool_calls"):
+                head.pop()
             conversation = head + tail
 
         yield ExecutionEvent(EventType.THINKING, {})

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Literal, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -422,7 +425,12 @@ class LLMGate:
                 reason = text[5:].strip(": ")
                 return GateResult("fail", f"LLM verification: {reason}", retry_hint=reason)
         except Exception:
-            pass  # LLM verification is best-effort
+            # fail-open 是刻意选择（gate LLM 挂了不阻塞主流程），
+            # 但退化必须留痕，否则语义校验静默失效永远无人发现。
+            logger.warning(
+                "gate LLM verification failed; falling back to regex verdict",
+                exc_info=True,
+            )
 
         return result
 

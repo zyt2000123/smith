@@ -32,7 +32,6 @@ class LLMPort(Protocol):
     def chat_stream(
         self,
         messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[str]: ...
 
     async def close(self) -> None: ...

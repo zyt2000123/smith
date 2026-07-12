@@ -76,6 +76,23 @@ class SessionRepo:
         await db.commit()
         return cursor.rowcount == 1
 
+    async def exists_by_id(self, session_id: str) -> bool:
+        db = await get_app_db()
+        rows = await db.execute_fetchall(
+            "SELECT 1 FROM sessions WHERE id=? LIMIT 1", (session_id,)
+        )
+        return bool(rows)
+
+    async def get_recent_messages(self, session_id: str, limit: int) -> list[dict]:
+        """Fetch the last N messages in chronological order (DB-side LIMIT)."""
+        db = await get_app_db()
+        rows = await db.execute_fetchall(
+            "SELECT * FROM (SELECT * FROM messages WHERE session_id=? "
+            "ORDER BY created_at DESC LIMIT ?) sub ORDER BY created_at ASC",
+            (session_id, limit),
+        )
+        return [dict(r) for r in rows]
+
     async def get_messages(self, session_id: str, limit: int = 0, offset: int = 0) -> list[dict]:
         db = await get_app_db()
         if limit > 0 or offset > 0:

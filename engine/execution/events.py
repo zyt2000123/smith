@@ -1,15 +1,13 @@
 """Structured execution events for streaming progress to frontends.
 
-Defines the event protocol used between the execution engine and the
-server's SSE endpoint. Each event carries a type and a data payload
-that the frontend can render incrementally.
-
-Integration into agent_loop.py will come in a follow-up change.
+Defines the event protocol between the execution engine and its
+consumers. Each event carries a type and a data payload that consumers
+render incrementally. Transport formatting (e.g. SSE) is the server's
+concern, not the engine's.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -51,10 +49,6 @@ class ExecutionEvent:
 
     type: EventType
     data: dict[str, Any] = field(default_factory=dict)
-
-    def to_sse(self) -> str:
-        """Format as a Server-Sent Events message."""
-        return f"event: {self.type.value}\ndata: {json.dumps(self.data, ensure_ascii=False)}\n\n"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for JSON transport."""

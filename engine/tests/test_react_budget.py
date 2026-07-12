@@ -47,7 +47,6 @@ class FakeLLM:
     async def chat_stream(
         self,
         messages: list[dict],
-        tools: list[dict] | None = None,
     ):
         self.stream_calls.append(messages)
         for chunk in self.stream_chunks:

@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 TriggerType = Literal["manual", "cron", "interval"]
 
@@ -12,6 +12,22 @@ class AutoTaskCreate(BaseModel):
     trigger_config: str = ""
     instruction: str
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def _validate_trigger_config(self) -> "AutoTaskCreate":
+        if self.trigger_type == "cron" and not self.trigger_config.strip():
+            raise ValueError("trigger_config is required for cron trigger_type")
+        if self.trigger_type == "interval":
+            cfg = self.trigger_config.strip()
+            if not cfg:
+                raise ValueError("trigger_config is required for interval trigger_type")
+            try:
+                val = int(cfg)
+            except ValueError:
+                raise ValueError("trigger_config must be an integer (seconds) for interval trigger_type")
+            if val <= 0:
+                raise ValueError("interval trigger_config must be a positive integer")
+        return self
 
 
 class AutoTaskUpdate(BaseModel):

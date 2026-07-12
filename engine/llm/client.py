@@ -62,10 +62,9 @@ class ProviderClient:
     async def chat_stream(
         self,
         messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[str]:
-        """Legacy text-only adapter over the canonical provider event stream."""
-        async for event in self.chat_events(messages, tools):
+        """Legacy text-only stream — yields only text deltas, no tool calls."""
+        async for event in self.chat_events(messages):
             if event.type != ProviderEventType.OUTPUT_TEXT_DELTA:
                 continue
             text = event.data.get("delta")
