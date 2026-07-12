@@ -8,11 +8,24 @@ from engine.execution.agent_loop import run_agent_stream
 from engine.execution.backtrack import FailureLoopGuard
 from engine.execution.events import EventType, ExecutionEvent
 from engine.execution.gate import GateResult, LLMGate
-from engine.execution.skill_chain import SkillChain, SkillNode
+from engine.execution.skill_chain import (
+    GATE_REGISTRY,
+    SkillChain,
+    SkillNode,
+    load_gate_content,
+)
 from engine.identity_catalog import IdentitySpec, RouteDecision
 from engine.llm.client import ChatResponse
 from engine.llm.events import ProviderEvent, ProviderEventType
 from engine.skill.loader import SkillBody, SkillMeta
+
+
+load_gate_content(Path(__file__).resolve().parents[2] / "agents")
+
+
+def _rubric_gate():
+    factory = GATE_REGISTRY["rubric"]
+    return factory() if callable(factory) else factory
 
 
 _SMITH_IDENTITY = IdentitySpec(
@@ -300,7 +313,8 @@ def test_pipeline_retracts_each_rejected_rubric_attempt_before_committing() -> N
             FakeToolRegistry(),
             FakeSkillRegistry(),
             FEATURE_ROUTE,
-            SkillChain([SkillNode("planning", PassingGate())]),
+            # 兜底层由 YAML/调用方声明；这里显式挂 rubric 复现原有重试行为
+            SkillChain([SkillNode("planning", PassingGate())], base_gates=[_rubric_gate()]),
             FailureLoopGuard(),
         ):
             events.append(event)
@@ -326,3 +340,63 @@ def test_pipeline_retracts_each_rejected_rubric_attempt_before_committing() -> N
     assert len(provision_ids) == 3
     assert retracted_ids == provision_ids[:2]
     assert committed_ids == provision_ids[2:]
+
+
+def test_base_gate_runs_before_node_gate() -> None:
+    """两层门禁顺序：兜底层(base_gates) → 领域层(节点 gate)。"""
+    calls: list[str] = []
+
+    class RecordingBaseGate:
+        async def check(self, output: str, context: dict) -> GateResult:
+            calls.append("base")
+            return GateResult("pass", "ok")
+
+    class RecordingNodeGate:
+        async def check(self, output: str, context: dict) -> GateResult:
+            calls.append("node")
+            return GateResult("pass", "ok")
+
+    async def run():
+        async for _ in run_agent_stream(
+            FakeLLM(),
+            "system prompt",
+            "build a feature",
+            FakeToolRegistry(),
+            FakeSkillRegistry(),
+            FEATURE_ROUTE,
+            SkillChain(
+                [SkillNode("planning", RecordingNodeGate())],
+                base_gates=[RecordingBaseGate()],
+            ),
+            FailureLoopGuard(),
+        ):
+            pass
+
+    asyncio.run(run())
+    assert calls == ["base", "node"]
+
+
+def test_empty_base_gates_skip_straight_to_node_gate() -> None:
+    """未声明兜底层时不做任何兜底检查，单次执行直接进领域门禁。"""
+    calls: list[str] = []
+
+    class RecordingNodeGate:
+        async def check(self, output: str, context: dict) -> GateResult:
+            calls.append("node")
+            return GateResult("pass", "ok")
+
+    async def run():
+        async for _ in run_agent_stream(
+            FakeLLM(),
+            "system prompt",
+            "build a feature",
+            FakeToolRegistry(),
+            FakeSkillRegistry(),
+            FEATURE_ROUTE,
+            SkillChain([SkillNode("planning", RecordingNodeGate())]),
+            FailureLoopGuard(),
+        ):
+            pass
+
+    asyncio.run(run())
+    assert calls == ["node"]

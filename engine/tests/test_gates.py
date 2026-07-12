@@ -2,11 +2,16 @@
 import asyncio
 from pathlib import Path
 
-from engine.execution.gate import ContractAlignmentGate, UnderstandingGate
-from engine.execution.skill_chain import SkillChain
+from engine.execution.skill_chain import GATE_REGISTRY, SkillChain, load_gate_content
 
 
 ROOT = Path(__file__).resolve().parents[2]
+load_gate_content(ROOT / "agents")
+
+
+def _gate(key: str):
+    factory = GATE_REGISTRY[key]
+    return factory() if callable(factory) else factory
 
 
 def _check(gate, output, context=None):
@@ -18,18 +23,18 @@ def test_understanding_passes_with_restatement_and_boundaries():
         "需求复述：用户希望在聊天输入框支持选择工作目录并拖拽文件。"
         "边界条件：仅本机路径在范围内，远程文件不包括；约束：后端接口保持向后兼容。"
     )
-    assert _check(UnderstandingGate(), output).verdict == "pass"
+    assert _check(_gate("understanding"), output).verdict == "pass"
 
 
 def test_understanding_fails_when_no_boundaries():
     output = "需求是给输入框加一个按钮，用户想要更方便的操作，这个功能目标很明确。"
-    result = _check(UnderstandingGate(), output)
+    result = _check(_gate("understanding"), output)
     assert result.verdict == "fail"
     assert "boundary" in result.reason
 
 
 def test_understanding_fails_on_short_output():
-    assert _check(UnderstandingGate(), "明白了，就是加个按钮。").verdict == "fail"
+    assert _check(_gate("understanding"), "明白了，就是加个按钮。").verdict == "fail"
 
 
 def test_contract_alignment_passes_with_verdict_and_refs():
@@ -38,12 +43,12 @@ def test_contract_alignment_passes_with_verdict_and_refs():
         "第 2 步 新增 gate.py 类 — 一致。总体结论：与计划一致，可以继续。"
     )
     ctx = {"planning_output": "1. 修改 task_router.py 2. 新增 gate.py 类"}
-    assert _check(ContractAlignmentGate(), output, ctx).verdict == "pass"
+    assert _check(_gate("contract_alignment"), output, ctx).verdict == "pass"
 
 
 def test_contract_alignment_fails_without_verdict():
     output = "我看了一下实现方案，感觉整体还行，没有什么大问题。"
-    result = _check(ContractAlignmentGate(), output, {"planning_output": "1. xxx"})
+    result = _check(_gate("contract_alignment"), output, {"planning_output": "1. xxx"})
     assert result.verdict == "fail"
 
 

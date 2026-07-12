@@ -29,6 +29,16 @@ from engine.tool.registry import ToolRegistry
 from .backtrack import FailureLoopGuard
 from .events import EventType, ExecutionEvent
 from .pipeline import run_pipeline
+from .pipeline_context import (
+    CTX_AGENT_ID,
+    CTX_FORCED_SKILL,
+    CTX_IDENTITY_ID,
+    CTX_ROUTE_ID,
+    CTX_SESSION_ID,
+    CTX_STATE_DIR,
+    CTX_TASK_TYPE,
+    CTX_USER_MESSAGE,
+)
 from .react_loop import (
     IncompleteAgentRunError,
     react_event_loop as _react_event_loop,
@@ -37,7 +47,7 @@ from .react_loop import (
 )
 from .run_stream import AgentRunStream
 from .runtime import EngineRequest, EngineResult, RuntimeContext, RuntimeServices
-from .skill_chain import SkillChain
+from .skill_chain import SkillChain, load_gate_content
 from .task_router import (
     EVAL_SENSITIVE_GUIDANCE,
     detect_eval_sensitive,
@@ -102,9 +112,9 @@ async def run_agent_stream(
         return
 
     context: dict = {
-        "user_message": user_message,
-        "identity_id": route.identity_id,
-        "route_id": route.route_id,
+        CTX_USER_MESSAGE: user_message,
+        CTX_IDENTITY_ID: route.identity_id,
+        CTX_ROUTE_ID: route.route_id,
     }
     if execution_context:
         context.update({k: v for k, v in execution_context.items() if v is not None})
@@ -150,7 +160,7 @@ async def _run_forced_skill_stream(
         *(history or []),
         {"role": "user", "content": user_message},
     ]
-    context: dict = {"user_message": user_message, "task_type": "skill", "forced_skill": forced_skill}
+    context: dict = {CTX_USER_MESSAGE: user_message, CTX_TASK_TYPE: "skill", CTX_FORCED_SKILL: forced_skill}
     if execution_context:
         context.update({k: v for k, v in execution_context.items() if v is not None})
     output_parts: list[str] = []
@@ -262,10 +272,10 @@ def _runtime_execution_context(
     state_dir: Path,
 ) -> dict[str, str | None]:
     context: dict[str, str | None] = {
-        "agent_id": runtime.agent_id,
-        "session_id": runtime.session_id,
-        "identity_id": identity.id,
-        "_state_dir": str(state_dir),
+        CTX_AGENT_ID: runtime.agent_id,
+        CTX_SESSION_ID: runtime.session_id,
+        CTX_IDENTITY_ID: identity.id,
+        CTX_STATE_DIR: str(state_dir),
     }
     context.update({key: value for key, value in runtime.metadata.items()})
     return context
@@ -376,6 +386,10 @@ def _resolve_pipeline(
     """Resolve a YAML pipeline selected by a declarative route decision."""
     if route.pipeline_id is None:
         return None
+
+    # 门禁/条件实现是内容层资产：解析 pipeline YAML 前必须先注册，
+    # 否则 from_yaml 的 gate key 查找会对合法内容报 unknown gate。
+    load_gate_content(runtime.agents_dir)
 
     # 1. User-defined pipeline in profile
     profile_pipelines = runtime.profile_dir / "pipelines"

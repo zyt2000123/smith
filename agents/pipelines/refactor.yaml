@@ -2,6 +2,9 @@ name: refactor
 description: Code refactoring pipeline
 route: refactor
 
+# 兜底层：每个节点产出先过 rubric（长度/证据/无错误标记），再过节点自己的 gate
+base_gate: rubric
+
 steps:
   - skill: planning
     gate: planning_llm

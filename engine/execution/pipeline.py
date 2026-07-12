@@ -15,7 +15,17 @@ from uuid import uuid4
 
 from .backtrack import FailureLoopGuard, FailureSignature
 from .events import EventType, ExecutionEvent
-from .gate import LLMGate, SkillRubricGate
+from .gate import Gate, GateResult, LLMGate
+from .pipeline_context import (
+    CTX_AGENT_ID,
+    CTX_IDENTITY_ID,
+    CTX_RETRY_HINT,
+    CTX_ROUTE_ID,
+    CTX_RUBRIC_FEEDBACK,
+    CTX_SESSION_ID,
+    CTX_STATE_DIR,
+    output_key,
+)
 from .react_loop import react_event_loop
 
 if TYPE_CHECKING:
@@ -27,8 +37,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_rubric_gate = SkillRubricGate()
-_RUBRIC_MAX_RETRIES = 3
+# 兜底层重试上限：base gate 不过时同节点最多重跑的次数（含首次）。
+_BASE_GATE_MAX_RETRIES = 3
 
 
 # ---------------------------------------------------------------------------
@@ -66,15 +76,20 @@ async def run_pipeline(
 
         yield ExecutionEvent(EventType.SKILL_START, {"skill": node.skill_name, "index": node_idx})
 
-        rubric_attempt = 0
+        # 两层门禁：先过 chain.base_gates（YAML 声明的兜底层，可为空），
+        # 通过后再过节点自己的 gate（领域层）。引擎不预置任何具体门禁。
+        base_gates = chain.base_gates
+        max_attempts = _BASE_GATE_MAX_RETRIES if base_gates else 1
+        attempt = 0
         output = ""
-        rubric_passed = False
+        base_passed = False
+        base_result: GateResult | None = None
         provision_id = ""
         provision_settled = True
 
         try:
-            while rubric_attempt < _RUBRIC_MAX_RETRIES:
-                provision_id = f"{node.skill_name}:{node_idx}:{rubric_attempt}:{uuid4().hex}"
+            while attempt < max_attempts:
+                provision_id = f"{node.skill_name}:{node_idx}:{attempt}:{uuid4().hex}"
                 provision_settled = False
                 skill = skill_registry.get(node.skill_name)
 
@@ -84,9 +99,9 @@ async def run_pipeline(
                         node.skill_name,
                     )
                     messages = base_messages + [{"role": "user", "content": f"[Skill: {node.skill_name}] {user_message}"}]
-                    if rubric_attempt == 1 and context.get("_rubric_retry_hint"):
-                        messages.append({"role": "user", "content": context["_rubric_retry_hint"]})
-                    elif rubric_attempt == 2:
+                    if attempt == 1 and context.get(CTX_RETRY_HINT):
+                        messages.append({"role": "user", "content": context[CTX_RETRY_HINT]})
+                    elif attempt == 2:
                         messages.append({"role": "user", "content": "Switch strategy: try a completely different approach."})
                     event_stream = react_event_loop(
                         llm, messages, tool_registry, tool_guard, max_react_iters,
@@ -94,10 +109,10 @@ async def run_pipeline(
                     )
                 else:
                     skill_context = dict(context)
-                    if rubric_attempt == 1 and skill_context.get("_rubric_retry_hint"):
-                        skill_context["rubric_feedback"] = skill_context["_rubric_retry_hint"]
-                    elif rubric_attempt == 2:
-                        skill_context["rubric_feedback"] = "Switch strategy: try a completely different approach."
+                    if attempt == 1 and skill_context.get(CTX_RETRY_HINT):
+                        skill_context[CTX_RUBRIC_FEEDBACK] = skill_context[CTX_RETRY_HINT]
+                    elif attempt == 2:
+                        skill_context[CTX_RUBRIC_FEEDBACK] = "Switch strategy: try a completely different approach."
                     messages = [{"role": "user", "content": user_message}]
                     event_stream = execute_skill_events(
                         skill, llm, tool_registry, messages, skill_context,
@@ -124,22 +139,29 @@ async def run_pipeline(
                     return
                 output = result.text
 
-                rubric_result = await _rubric_gate.check(output, context)
-                if rubric_result.verdict == "pass":
-                    rubric_passed = True
+                # 第一层：兜底门禁。为空则本次产出直接进入领域门禁。
+                if not base_gates:
+                    base_passed = True
                     break
-                context["_rubric_retry_hint"] = rubric_result.retry_hint or ""
+                base_result = await _check_base_gates(base_gates, output, context, gate_llm or llm)
+                if base_result.verdict == "pass":
+                    base_passed = True
+                    break
+                context[CTX_RETRY_HINT] = base_result.retry_hint or ""
                 yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
                     "provision_id": provision_id, "reason": "rubric_retry",
                 })
                 provision_settled = True
-                rubric_attempt += 1
+                attempt += 1
 
-            context.pop("_rubric_retry_hint", None)
+            context.pop(CTX_RETRY_HINT, None)
 
-            if not rubric_passed:
+            if not base_passed:
                 _clear_checkpoint(context)
-                yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": rubric_result.reason})
+                yield ExecutionEvent(EventType.BLOCKED, {
+                    "skill": node.skill_name,
+                    "reason": base_result.reason if base_result else "base gate failed",
+                })
                 yield ExecutionEvent(EventType.DONE, {})
                 return
 
@@ -153,7 +175,7 @@ async def run_pipeline(
             if gate_result.verdict == "pass":
                 yield ExecutionEvent(EventType.PROVISIONAL_COMMIT, {"provision_id": provision_id})
                 provision_settled = True
-                context[f"{node.skill_name}_output"] = output
+                context[output_key(node.skill_name)] = output
                 committed_provisional_output[node.skill_name] = result.was_provisional
                 _save_checkpoint(context, node_idx)
                 yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "passed"})
@@ -213,7 +235,7 @@ async def run_pipeline(
     # still emitted for persistence, but consumers that rendered the accepted
     # provisional text must not append it again.
     for node in reversed(chain.nodes):
-        key = f"{node.skill_name}_output"
+        key = output_key(node.skill_name)
         if key in context:
             data: dict[str, object] = {"text": context[key]}
             if committed_provisional_output.get(node.skill_name):
@@ -223,6 +245,27 @@ async def run_pipeline(
 
     _clear_checkpoint(context)
     yield ExecutionEvent(EventType.DONE, {})
+
+
+# ---------------------------------------------------------------------------
+# Internal: base-gate layer
+# ---------------------------------------------------------------------------
+
+
+async def _check_base_gates(
+    gates: list["Gate"],
+    output: str,
+    context: dict,
+    llm: "LLMPort",
+) -> GateResult:
+    """Run the YAML-declared base gates in order; first non-pass wins."""
+    for gate in gates:
+        if isinstance(gate, LLMGate):
+            gate.set_llm(llm)
+        result = await gate.check(output, context)
+        if result.verdict != "pass":
+            return result
+    return GateResult("pass", "base gates passed")
 
 
 # ---------------------------------------------------------------------------
@@ -288,17 +331,17 @@ async def _collect_node_events(
 
 
 def _save_checkpoint(context: dict, node_idx: int) -> None:
-    session_id = str(context.get("session_id") or "")
-    state_dir = str(context.get("_state_dir") or "")
+    session_id = str(context.get(CTX_SESSION_ID) or "")
+    state_dir = str(context.get(CTX_STATE_DIR) or "")
     if not session_id or not state_dir:
         return
     try:
         from .session_state import SessionStateManager, SessionCheckpoint
         SessionStateManager(Path(state_dir)).save(SessionCheckpoint(
-            agent_id=str(context.get("agent_id") or ""),
+            agent_id=str(context.get(CTX_AGENT_ID) or ""),
             session_id=session_id,
-            identity_id=str(context.get("identity_id") or ""),
-            route_id=str(context.get("route_id") or ""),
+            identity_id=str(context.get(CTX_IDENTITY_ID) or ""),
+            route_id=str(context.get(CTX_ROUTE_ID) or ""),
             skill_chain_index=node_idx,
             context={k: v for k, v in context.items() if not k.startswith("_")},
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -308,8 +351,8 @@ def _save_checkpoint(context: dict, node_idx: int) -> None:
 
 
 def _clear_checkpoint(context: dict) -> None:
-    session_id = str(context.get("session_id") or "")
-    state_dir = str(context.get("_state_dir") or "")
+    session_id = str(context.get(CTX_SESSION_ID) or "")
+    state_dir = str(context.get(CTX_STATE_DIR) or "")
     if not session_id or not state_dir:
         return
     try:
