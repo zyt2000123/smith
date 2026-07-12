@@ -307,25 +307,80 @@ async def _register_mcp_tools(
     if not isinstance(mcp_servers, list) or not mcp_servers:
         return
     try:
-        from engine.tool.mcp_client import MCPClient, register_mcp_tools
+        from engine.tool.mcp_client import (
+            MCPClient,
+            register_mcp_tools_with_prefix,
+        )
     except Exception:
         logger.exception("failed to import MCP client (agent=%s)", runtime.agent_id)
         return
     # 逐 server 隔离失败：一个 server 连不上不许拖垮其余 server 的注册。
     for srv in mcp_servers:
         try:
-            cmd = srv.get("command", []) if isinstance(srv, dict) else []
-            if not cmd:
+            if not isinstance(srv, dict):
                 continue
-            client = MCPClient(cmd, env=srv.get("env"))
+            transport = _mcp_transport_from_config(srv)
+            if transport is None:
+                continue
+            prefix = _mcp_tool_prefix_from_config(srv)
+            client = MCPClient(transport=transport)
             await client.connect()
             services.mcp_clients.append(client)
-            await register_mcp_tools(services.tool_registry, client)
+            await register_mcp_tools_with_prefix(services.tool_registry, client, prefix=prefix)
         except Exception:
             logger.exception(
-                "failed to register MCP server (agent=%s, command=%r)",
-                runtime.agent_id, srv.get("command") if isinstance(srv, dict) else srv,
+                "failed to register MCP server (agent=%s, server=%r)",
+                runtime.agent_id, _mcp_server_log_summary(srv),
             )
+
+
+def _mcp_transport_from_config(config: dict):
+    from engine.tool.mcp_client import StdioMCPTransport, StreamableHTTPMCPTransport
+
+    transport_type = str(config.get("type") or "").strip().lower().replace("-", "_")
+    if not transport_type:
+        transport_type = "streamable_http" if config.get("url") else "stdio"
+
+    if transport_type == "stdio":
+        command = config.get("command", [])
+        if not isinstance(command, list) or not command:
+            return None
+        env = config.get("env")
+        return StdioMCPTransport(command, env=env if isinstance(env, dict) else None)
+
+    if transport_type in {"http", "streamable_http"}:
+        url = config.get("url")
+        if not isinstance(url, str) or not url:
+            return None
+        headers = config.get("headers")
+        timeout = config.get("timeout", 30.0)
+        return StreamableHTTPMCPTransport(
+            url,
+            headers=headers if isinstance(headers, dict) else None,
+            timeout=float(timeout) if isinstance(timeout, (int, float)) else 30.0,
+        )
+
+    raise ValueError(f"unsupported MCP transport type: {transport_type}")
+
+
+def _mcp_tool_prefix_from_config(config: dict) -> str:
+    name = config.get("name") or config.get("alias")
+    if isinstance(name, str) and name:
+        return f"mcp_{name}"
+    return "mcp"
+
+
+def _mcp_server_log_summary(config: dict) -> dict[str, object]:
+    summary: dict[str, object] = {}
+    for key in ("type", "name", "alias", "url", "command", "timeout"):
+        value = config.get(key)
+        if value is not None:
+            summary[key] = value
+    if isinstance(config.get("headers"), dict):
+        summary["headers"] = sorted(config["headers"].keys())
+    if isinstance(config.get("env"), dict):
+        summary["env"] = sorted(config["env"].keys())
+    return summary
 
 
 async def prepare_runtime(

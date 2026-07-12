@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import re
-import traceback
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,6 +14,7 @@ _TOOL_ALIASES = {
     "websearch": "web_search",
     "webfetch": "web_fetch",
 }
+log = logging.getLogger(__name__)
 
 
 def _canonical_tool_name(name: str) -> str:
@@ -72,7 +73,7 @@ class ToolRegistry:
                         func=execute_fn,
                     )
             except Exception:
-                traceback.print_exc()
+                log.exception("Failed to load tool provider: %s", py_file)
 
     def get_schemas(self, enabled: list[str] | None = None) -> list[dict]:
         """Return OpenAI-compatible tool schemas."""

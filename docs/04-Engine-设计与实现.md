@@ -175,7 +175,7 @@ memory / safety / plugin ──▶ 互不依赖
 3. engine.reply_stream(agent_id, name, message):
    a. resolve_llm_config() 五级合并配置 → build_llm_client()
    b. ToolRegistry.load_providers(agents/tools/)     ← 扫描注册内置工具
-   c. 读 Agent config.yaml 的 mcp_servers → MCPClient 连接 → 注册 mcp_* 工具
+   c. 读 Agent config.yaml 的 mcp_servers → MCPClient 连接 STDIO / Streamable HTTP → 注册 mcp_* 工具
    d. SkillRegistry.load_builtin() + load_agent_skills()  # 语义是加载 Smith 自装技能
    e. PromptAssembler.assemble()                     ← 9 段 system prompt
    f. route_task(message) → DIRECT / FEATURE / BUGFIX
@@ -544,9 +544,30 @@ async def execute(**kwargs) -> str: ...   # 同步函数也支持
 
 ### 8.4 MCP 外接（tool/mcp_client.py）
 
-- 自实现的**最小 MCP STDIO 客户端**（JSON-RPC 2.0，协议版 2024-11-05）：initialize 握手 → tools/list 发现 → tools/call 调用
-- 发现的工具统一加 `mcp_` 前缀注册进同一个 ToolRegistry——对 ReAct 循环而言 MCP 工具与本地工具**无差别**
-- 来源：Agent `config.yaml` 的 `mcp_servers: [{command, env}]`；连接失败静默跳过（best-effort），单次响应读超时 30s，关闭超时 5s 后 kill
+- 自实现的 MCP 客户端（JSON-RPC 2.0，默认协议版 2025-11-25）：initialize 握手 → initialized notification → tools/list 分页发现 → tools/call 调用
+- 支持两种 transport：
+  - `stdio`：本地启动 MCP server 子进程，通过 stdin/stdout 通信；`env` 会继承当前环境后叠加配置
+  - `streamable_http` / `http`：连接远程 MCP endpoint，支持 JSON 或 `text/event-stream` 响应、`MCP-Session-Id`、`MCP-Protocol-Version`
+- 发现的工具注册进同一个 ToolRegistry；默认名为 `mcp_<tool>`，配置 `name` / `alias` 后注册为 `mcp_<name>_<tool>`，以避免多个 MCP server 的工具名冲突
+- MCP 工具名会规范化为 provider 友好的 ASCII 标识符，并对超长名称做稳定 hash 截断；MCP `isError=true` 会映射为 `ToolResult(is_error=True)`
+- 配置示例：
+
+```yaml
+mcp_servers:
+  - type: stdio
+    name: github
+    command: ["npx", "-y", "@example/github-mcp"]
+    env:
+      GITHUB_TOKEN: "..."
+
+  - type: streamable_http
+    name: docs
+    url: "https://example.com/mcp"
+    headers:
+      Authorization: "Bearer ..."
+```
+
+- 连接失败按 server 隔离并跳过（best-effort）；失败日志只记录配置摘要和 `headers` / `env` 的 key，不输出 secret 值
 
 ---
 
@@ -730,7 +751,7 @@ async def reply_stream(agent_id, name, user_message) -> AsyncGenerator[str]
 | 记忆 | `engine/memory/user_learner.py` | 226 | 偏好检测 + 置信度写入 context.md |
 | LLM | `engine/llm/client.py` | 124 | OpenAI-compatible 客户端（重试/流式/prefix cache） |
 | 工具 | `engine/tool/registry.py` | 97 | provider 加载、schema、执行与截断 |
-| 工具 | `engine/tool/mcp_client.py` | 151 | MCP STDIO 客户端与注册 |
+| 工具 | `engine/tool/mcp_client.py` | 151 | MCP 客户端与注册（STDIO + Streamable HTTP） |
 | 技能 | `engine/skill/{loader,registry,executor,store}.py` | 326 | SKILL.md 解析/双源注册/注入执行/版本化 |
 | 插件 | `engine/plugin/{registry,trigger,loader}.py` | 286 | manifest 发现/三种触发器/handler 加载 |
 | 安全 | `engine/safety/tool_guard.py` | 296 | ToolGuard + FileGuard |

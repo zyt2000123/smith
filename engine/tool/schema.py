@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import inspect
+import types
 import typing
-from typing import Any, Callable, get_type_hints
+from typing import Any, Callable, get_args, get_origin, get_type_hints
 
 _TYPE_MAP: dict[type, str] = {
     str: "string",
@@ -14,18 +15,36 @@ _TYPE_MAP: dict[type, str] = {
 
 def _python_type_to_json(tp: Any) -> dict:
     """Convert a Python type annotation to a JSON Schema fragment."""
-    origin = getattr(tp, "__origin__", None)
+    if tp is Any:
+        return {}
+
+    origin = get_origin(tp)
+    args = get_args(tp)
 
     # Optional[X] -> nullable X
-    if origin is typing.Union:
-        args = [a for a in tp.__args__ if a is not type(None)]
-        if len(args) == 1:
-            return _python_type_to_json(args[0])
+    if origin in (typing.Union, types.UnionType):
+        non_none_args = [arg for arg in args if arg is not type(None)]
+        if len(non_none_args) == 1:
+            return _python_type_to_json(non_none_args[0])
+        return {"anyOf": [_python_type_to_json(arg) for arg in non_none_args]}
 
     # list[X]
     if origin is list:
-        item_type = tp.__args__[0] if tp.__args__ else str
+        item_type = args[0] if args else str
         return {"type": "array", "items": _python_type_to_json(item_type)}
+
+    if origin is dict:
+        value_type = args[1] if len(args) == 2 else Any
+        return {"type": "object", "additionalProperties": _python_type_to_json(value_type)}
+
+    if origin is typing.Literal:
+        values = list(args)
+        schema: dict[str, Any] = {"enum": values}
+        if values:
+            value_types = {type(value) for value in values}
+            if len(value_types) == 1 and next(iter(value_types)) in _TYPE_MAP:
+                schema["type"] = _TYPE_MAP[next(iter(value_types))]
+        return schema
 
     if tp in _TYPE_MAP:
         return {"type": _TYPE_MAP[tp]}
@@ -52,9 +71,7 @@ def function_to_schema(func: Callable) -> dict:
         properties[name] = schema
 
         # Not required if has a default or is Optional
-        origin = getattr(tp, "__origin__", None)
-        is_optional = origin is typing.Union and type(None) in tp.__args__
-        if param.default is inspect.Parameter.empty and not is_optional:
+        if param.default is inspect.Parameter.empty and not _is_optional_type(tp):
             required.append(name)
 
     description = inspect.getdoc(func) or ""
@@ -71,3 +88,8 @@ def function_to_schema(func: Callable) -> dict:
             },
         },
     }
+
+
+def _is_optional_type(tp: Any) -> bool:
+    origin = get_origin(tp)
+    return origin in (typing.Union, types.UnionType) and type(None) in get_args(tp)
