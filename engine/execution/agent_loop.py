@@ -340,6 +340,7 @@ async def prepare_runtime(
     state_dir = _identity_state_dir(runtime, identity)
 
     services.tool_registry.load_providers(runtime.agents_dir / "tools")
+    _bind_memory_ops_tool(services, state_dir)
     profile_config = await _load_profile_config(runtime)
     await _register_mcp_tools(profile_config, runtime, services)
 
@@ -379,6 +380,29 @@ async def prepare_runtime(
     return _AgentSetup(system_prompt, identity, route, chain, state_dir)
 
 
+def _bind_memory_ops_tool(services: RuntimeServices, state_dir: Path) -> None:
+    memory_dir = state_dir / "memory"
+
+    async def episode_runner(memory_dir: Path, topic: str, related: list[dict]):
+        from engine.memory.compile import compact_episode
+        return await compact_episode(
+            memory_dir,
+            services.llm,
+            topic,
+            related,
+            reviewer=services.gate_llm,
+        )
+
+    def wrapper(func):
+        async def execute_with_memory_context(**kwargs):
+            kwargs["memory_dir"] = memory_dir
+            kwargs["episode_runner"] = episode_runner
+            return await func(**kwargs)
+        return execute_with_memory_context
+
+    services.tool_registry.wrap_tool("memory_ops", wrapper)
+
+
 def _resolve_pipeline(
     route: RouteDecision,
     runtime: RuntimeContext,
@@ -415,14 +439,80 @@ def _resolve_pipeline(
 # ---------------------------------------------------------------------------
 
 
+def _ensure_memory_lifecycle_hooks(services: RuntimeServices) -> None:
+    if getattr(services, "_memory_lifecycle_hooks_registered", False):
+        return
+    from engine.execution.memory_maintenance import (
+        MemoryLifecycleHooks,
+        MemoryMaintenanceService,
+    )
+    from engine.hook import HookManager
+
+    if services.hooks is None:
+        services.hooks = HookManager()
+    services.hooks.register(MemoryLifecycleHooks(
+        MemoryMaintenanceService(services.llm, reviewer=services.gate_llm)
+    ))
+    setattr(services, "_memory_lifecycle_hooks_registered", True)
+
+
+async def run_memory_idle_tick(memory_dir: Path, services: RuntimeServices) -> bool:
+    """Dispatch idle memory maintenance through lifecycle hooks."""
+    return await _dispatch_memory_maintenance_tick(
+        "memory_idle_tick",
+        memory_dir,
+        services,
+    )
+
+
+async def run_memory_daily_tick(memory_dir: Path, services: RuntimeServices) -> bool:
+    """Dispatch daily memory maintenance through lifecycle hooks."""
+    return await _dispatch_memory_maintenance_tick(
+        "memory_daily_tick",
+        memory_dir,
+        services,
+    )
+
+
+async def _dispatch_memory_maintenance_tick(
+    hook_name: str,
+    memory_dir: Path,
+    services: RuntimeServices,
+) -> bool:
+    _ensure_memory_lifecycle_hooks(services)
+    try:
+        from engine.hook import HookType
+
+        results = await services.hooks.apply(
+            hook_name,
+            HookType.PARALLEL,
+            args=(memory_dir,),
+        )
+        return all(result is not False for result in results)
+    except Exception:
+        logger.warning("failed to dispatch %s", hook_name, exc_info=True)
+        return False
+
+
 async def _persist_runtime_learning(
-    state_dir: Path, user_message: str, reply_text: str, had_tools: bool,
+    state_dir: Path,
+    user_message: str,
+    reply_text: str,
+    had_tools: bool,
+    services: RuntimeServices,
 ) -> bool:
     """Persist memory and preferences. Returns False if any write failed."""
     ok = True
+    _ensure_memory_lifecycle_hooks(services)
     try:
-        from engine.memory.store import save_conversation_memory
-        await save_conversation_memory(state_dir, user_message, reply_text, had_tools)
+        from engine.hook import HookType
+
+        results = await services.hooks.apply(
+            "memory_after_turn_completed",
+            HookType.PARALLEL,
+            args=(state_dir, user_message, reply_text, had_tools),
+        )
+        ok = all(result is not False for result in results)
     except Exception:
         ok = False
         logger.warning("failed to persist conversation memory", exc_info=True)
@@ -521,7 +611,7 @@ async def _run_events_with_runtime(
         if drained and terminal_status == "completed" and state_dir is not None:
             try:
                 memory_persist_failed = not await _persist_runtime_learning(
-                    state_dir, request.message, "".join(full_text), had_tools,
+                    state_dir, request.message, "".join(full_text), had_tools, services,
                 )
             except Exception:
                 memory_persist_failed = True

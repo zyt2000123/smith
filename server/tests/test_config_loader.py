@@ -173,6 +173,94 @@ def test_build_engine_runtime_selects_interactive_and_gate_clients(monkeypatch) 
     assert selected_usages == [model_config.LLMUsage.INTERACTIVE, model_config.LLMUsage.GATE]
     assert services.llm is clients[0]
     assert services.gate_llm is clients[1]
+    assert services.owns_llm_clients is False
+
+
+def test_llm_client_manager_reuses_clients_for_identical_config(monkeypatch) -> None:
+    clients: list[object] = []
+
+    def fake_build(config: dict) -> object:
+        client = object()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(engine_runtime, "build_llm_client", fake_build)
+    manager = engine_runtime.LLMClientManager()
+    config = {
+        "provider": "openai",
+        "api_key": "key",
+        "base_url": "https://provider.example/v1",
+        "model": "model",
+        "stream": True,
+        "timeout": {"read": 90.0},
+    }
+
+    first = manager.get_for_config(dict(config))
+    second = manager.get_for_config(dict(config))
+
+    assert first is second
+    assert clients == [first]
+
+
+def test_llm_client_manager_normalizes_gemini_default_endpoint(monkeypatch) -> None:
+    clients: list[object] = []
+
+    def fake_build(config: dict) -> object:
+        client = object()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(engine_runtime, "build_llm_client", fake_build)
+    manager = engine_runtime.LLMClientManager()
+    base = {
+        "provider": "gemini",
+        "api_key": "key",
+        "model": "gemini-3.5-flash",
+    }
+
+    first = manager.get_for_config(dict(base, base_url=""))
+    second = manager.get_for_config(dict(
+        base,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    ))
+
+    assert first is second
+    assert clients == [first]
+
+
+def test_llm_client_manager_closes_unique_cached_clients_once(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        async def close(self) -> None:
+            self.closed += 1
+
+    clients: list[FakeClient] = []
+
+    def fake_build(config: dict) -> FakeClient:
+        client = FakeClient()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(engine_runtime, "build_llm_client", fake_build)
+    manager = engine_runtime.LLMClientManager()
+    shared = {
+        "provider": "openai",
+        "api_key": "key",
+        "base_url": "https://provider.example/v1",
+        "model": "model",
+    }
+    other = dict(shared, model="other-model")
+
+    manager.get_for_config(dict(shared))
+    manager.get_for_config(dict(shared))
+    manager.get_for_config(other)
+
+    import asyncio
+    asyncio.run(manager.close())
+
+    assert [client.closed for client in clients] == [1, 1]
 
 
 def test_route_can_select_native_anthropic_adapter_and_generation_limit(tmp_path, monkeypatch) -> None:
@@ -206,6 +294,34 @@ llm:
         assert gate["max_output_tokens"] == 768
         assert client.provider == "anthropic"
         assert type(client.adapter).__name__ == "AnthropicAdapter"
+    finally:
+        import asyncio
+        asyncio.run(client.close())
+
+
+def test_route_can_select_gemini_adapter_with_default_endpoint(tmp_path, monkeypatch) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "config.yaml").write_text(
+        """
+llm:
+  provider: gemini
+  api_key: gemini-key
+  model: gemini-3.5-flash
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_config, "DATA_DIR", data_dir)
+    monkeypatch.setattr(model_config, "SMITH_PROFILE_DIR", tmp_path / "missing-smith")
+    monkeypatch.setattr(model_config, "AGENT_DIR", tmp_path / "missing-agent")
+
+    cfg = model_config.resolve_llm_config()
+    client = model_config.build_llm_client(cfg)
+    try:
+        assert cfg["provider"] == "gemini"
+        assert client.provider == "gemini"
+        assert type(client.adapter).__name__ == "GeminiAdapter"
+        assert client.adapter.base_url == "https://generativelanguage.googleapis.com/v1beta/openai"
     finally:
         import asyncio
         asyncio.run(client.close())

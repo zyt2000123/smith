@@ -117,6 +117,16 @@ class ToolRegistry:
             return names
         return [name for name in names if name in self._enabled]
 
+    def wrap_tool(self, name: str, wrapper: Callable[[Callable], Callable]) -> bool:
+        """Replace a tool handler while preserving its public definition."""
+        tool_name = _canonical_tool_name(name)
+        entry = self._tools.get(tool_name)
+        if entry is None:
+            return False
+        defn, func = entry
+        self._tools[tool_name] = (defn, wrapper(func))
+        return True
+
     async def execute(self, call: ToolCall) -> ToolResult:
         tool_name = _canonical_tool_name(call.name)
 

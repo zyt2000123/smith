@@ -19,6 +19,8 @@ from ._files import (
     atomic_write_text,
     contains_injection,
     contains_secret,
+    safe_file_in_dir,
+    safe_markdown_files,
     sanitize_memory_text,
 )
 
@@ -111,11 +113,11 @@ def _all_memory_files(memory_dir: Path) -> list[Path]:
     files = []
     for name in ("durable.md", "recent.md"):
         path = memory_dir / name
-        if path.is_file():
-            files.append(path)
+        safe_path = safe_file_in_dir(memory_dir, path)
+        if safe_path is not None:
+            files.append(safe_path)
     episodes_dir = memory_dir / "episodes"
-    if episodes_dir.is_dir():
-        files.extend(sorted(episodes_dir.glob("*.md")))
+    files.extend(safe_markdown_files(episodes_dir))
     return files
 
 
@@ -124,9 +126,9 @@ async def _consolidate_durable(
     llm: "LLMPort",
     report: DreamReport,
 ) -> None:
-    durable_path = memory_dir / "durable.md"
+    durable_path = safe_file_in_dir(memory_dir, memory_dir / "durable.md")
 
-    if not durable_path.is_file():
+    if durable_path is None:
         report.skipped = "no durable.md"
         return
 
@@ -175,7 +177,7 @@ def _cleanup_log(memory_dir: Path, report: DreamReport) -> None:
     if not recent.is_file() or not offset_file.is_file():
         return
 
-    if not (memory_dir / "recent.md").is_file() or not (memory_dir / "durable.md").is_file():
+    if safe_file_in_dir(memory_dir, memory_dir / "durable.md") is None:
         return
 
     try:

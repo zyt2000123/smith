@@ -18,7 +18,7 @@ from .services.scheduler import run_scheduler
 from .services.plugin_service import PluginService
 
 from common.config import BUILTIN_PLUGINS_DIR
-from .services.engine_runtime import load_runtime_identity_catalog
+from .services.engine_runtime import close_shared_llm_clients, load_runtime_identity_catalog
 _plugin_service = PluginService(BUILTIN_PLUGINS_DIR)
 plugins.set_service(_plugin_service)
 
@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
         await scheduler_task
     except asyncio.CancelledError:
         pass
+    await close_shared_llm_clients()
     await close_db()
 
 

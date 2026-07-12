@@ -2,7 +2,7 @@
 
 New engine code should depend on :class:`engine.llm.port.LLMPort`.  The
 ``LLMClient`` class remains as a compatibility constructor for callers that
-previously instantiated the OpenAI-compatible implementation directly.
+previously instantiated the OpenAI implementation directly.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from .adapters.base import ProviderAdapter
-from .adapters.openai_compatible import OpenAICompatibleAdapter
+from .adapters.openai import OpenAIAdapter
 from .contracts import (
     ChatResponse,
     LLMProviderConfig,
@@ -76,11 +76,11 @@ class ProviderClient:
 
 
 class LLMClient(ProviderClient):
-    """Backward-compatible OpenAI-compatible constructor.
+    """Backward-compatible OpenAI constructor.
 
-    This class deliberately contains no provider protocol logic.  It delegates
-    all implementation to :class:`OpenAICompatibleAdapter`, preserving old
-    call sites while the rest of the engine migrates to ``LLMPort``.
+    This class deliberately contains no provider protocol logic. It delegates
+    all implementation to :class:`OpenAIAdapter`, preserving old call sites
+    while the rest of the engine migrates to ``LLMPort``.
     """
 
     def __init__(
@@ -91,9 +91,9 @@ class LLMClient(ProviderClient):
         stream: bool = True,
         timeouts: LLMTimeouts | None = None,
     ) -> None:
-        self._openai_adapter = OpenAICompatibleAdapter(
+        self._openai_adapter = OpenAIAdapter(
             LLMProviderConfig(
-                provider="openai_compatible",
+                provider="openai",
                 api_key=api_key,
                 base_url=base_url,
                 model=model,
@@ -126,8 +126,8 @@ class LLMClient(ProviderClient):
     async def _request(self, body: dict[str, Any], _attempt: int = 0) -> dict[str, Any]:
         return await self._openai_adapter._request(body, _attempt)
 
-    _first_message_choice = staticmethod(OpenAICompatibleAdapter._first_message_choice)
-    _parse_tool_call = staticmethod(OpenAICompatibleAdapter._parse_tool_call)
+    _first_message_choice = staticmethod(OpenAIAdapter._first_message_choice)
+    _parse_tool_call = staticmethod(OpenAIAdapter._parse_tool_call)
 
     async def _wait_for_retry(self, attempt: int, retry_after: float | None = None) -> None:
         await self._openai_adapter._wait_for_retry(attempt, retry_after)

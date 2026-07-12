@@ -1,4 +1,4 @@
-"""Adapter for the OpenAI Chat Completions-compatible protocol."""
+"""Adapter for the OpenAI Chat Completions protocol."""
 
 from __future__ import annotations
 
@@ -25,10 +25,10 @@ logger = logging.getLogger(__name__)
 _MAX_RESPONSE_BYTES = 20 * 1024 * 1024  # 20 MiB cap on non-streaming responses
 
 
-class OpenAICompatibleAdapter:
-    """Translate OpenAI-compatible HTTP/SSE payloads into internal contracts."""
+class OpenAIAdapter:
+    """Translate OpenAI Chat Completions HTTP/SSE payloads into internal contracts."""
 
-    provider = "openai_compatible"
+    provider = "openai"
     capabilities = ProviderCapabilities(
         streaming=True,
         tool_calls=True,

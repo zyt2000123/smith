@@ -11,13 +11,18 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from ._files import (
     atomic_write_text,
+    safe_file_in_dir,
+    safe_markdown_files,
     sanitize_memory_text,
 )
 
 logger = logging.getLogger(__name__)
+
+MemoryMaintenance = Callable[[Path], Awaitable[bool]]
 
 
 # ---------------------------------------------------------------------------
@@ -52,10 +57,9 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) 
 
             lines = ["## Relevant Episodes"]
             total_chars = 0
-            episodes_root = episodes_dir.resolve()
             for hit in hits:
-                ep_path = (episodes_dir / f"{hit['id']}.md").resolve()
-                if not ep_path.is_relative_to(episodes_root) or not ep_path.is_file():
+                ep_path = safe_file_in_dir(episodes_dir, episodes_dir / f"{hit['id']}.md")
+                if ep_path is None:
                     continue
                 content, _, _ = sanitize_memory_text(ep_path.read_text(encoding="utf-8"))
                 content = content.strip()
@@ -103,13 +107,14 @@ async def _sync_episode_index(idx, episodes_dir: Path) -> None:
     previous_state = _load_episode_index_state(state_path)
     current_state: dict[str, str] = {}
 
-    for ep in sorted(episodes_dir.glob("*.md")):
-        stat = ep.stat()
+    for resolved in safe_markdown_files(episodes_dir):
+        stat = resolved.stat()
+        entry_id = resolved.stem
         signature = f"{stat.st_mtime_ns}:{stat.st_size}"
-        current_state[ep.stem] = signature
-        if previous_state.get(ep.stem) != signature:
-            content = ep.read_text(encoding="utf-8")
-            await idx.index_entry(ep.stem, content, "episode")
+        current_state[entry_id] = signature
+        if previous_state.get(entry_id) != signature:
+            content, _, _ = sanitize_memory_text(resolved.read_text(encoding="utf-8"))
+            await idx.index_entry(entry_id, content, "episode")
 
     await idx.remove_missing_entries(set(current_state), "episode")
 
@@ -155,60 +160,26 @@ def _increment_counter(counter_file: Path, retry_threshold: int) -> int:
     return count
 
 
-async def _run_periodic_compilation(agent_dir: Path, memory_dir: Path) -> bool:
-    try:
-        from .compile import run_compilation
-        from engine.llm.model_config import LLMUsage, build_llm_client, resolve_llm_config
-
-        gen_cfg = resolve_llm_config(usage=LLMUsage.BACKGROUND)
-        if not gen_cfg.get("api_key"):
-            logger.warning("conversation-memory compilation skipped: no LLM API key configured")
-            return False
-
-        generator = build_llm_client(gen_cfg)
-        reviewer = None
-        try:
-            rev_cfg = resolve_llm_config(usage=LLMUsage.GATE)
-            if rev_cfg.get("api_key"):
-                reviewer = build_llm_client(rev_cfg)
-            await run_compilation(memory_dir, generator, reviewer=reviewer, raise_on_error=True)
-        finally:
-            await generator.close()
-            if reviewer:
-                await reviewer.close()
-        return True
-    except Exception:
-        logger.warning("conversation-memory compilation failed", exc_info=True)
+def _dream_report_completed(report) -> bool:
+    """Return whether Dream maintenance should reset its retry counter."""
+    if report.errors:
         return False
-
-
-async def _run_periodic_dream(agent_dir: Path, memory_dir: Path) -> bool:
-    try:
-        from .dream import run_dream
-        from engine.llm.model_config import LLMUsage, build_llm_client, resolve_llm_config
-
-        llm_cfg = resolve_llm_config(usage=LLMUsage.BACKGROUND)
-        if not llm_cfg.get("api_key"):
-            logger.warning("conversation-memory Dream skipped: no LLM API key configured")
-            return False
-
-        llm = build_llm_client(llm_cfg)
-        try:
-            report = await run_dream(memory_dir, llm)
-        finally:
-            await llm.close()
-        if report.errors or report.skipped:
-            reason = "; ".join(report.errors) if report.errors else report.skipped
-            logger.warning("conversation-memory Dream did not complete: %s", reason)
-            return False
-        return True
-    except Exception:
-        logger.warning("conversation-memory Dream consolidation failed", exc_info=True)
-        return False
+    benign_skips = {
+        "",
+        "no durable.md",
+        "durable.md too short to consolidate",
+    }
+    return report.skipped in benign_skips
 
 
 async def save_conversation_memory(
-    agent_dir: Path, user_msg: str, reply: str, had_tools: bool
+    agent_dir: Path,
+    user_msg: str,
+    reply: str,
+    had_tools: bool,
+    *,
+    compile_maintenance: MemoryMaintenance | None = None,
+    dream_maintenance: MemoryMaintenance | None = None,
 ) -> None:
     """Append tool-assisted turns and periodically compile their memory views."""
     if not had_tools:
@@ -235,16 +206,18 @@ async def save_conversation_memory(
     counter_file = memory_dir / ".compile_counter"
     count = _increment_counter(counter_file, _COMPILE_INTERVAL)
 
-    if count >= _COMPILE_INTERVAL and await _run_periodic_compilation(agent_dir, memory_dir):
-        atomic_write_text(counter_file, "0")
+    if count >= _COMPILE_INTERVAL and compile_maintenance is not None:
+        if await compile_maintenance(memory_dir):
+            atomic_write_text(counter_file, "0")
 
     # Low-frequency Dream consolidation (separate counter)
     from .dream import DREAM_INTERVAL
     dream_counter = memory_dir / ".dream_counter"
     d_count = _increment_counter(dream_counter, DREAM_INTERVAL)
 
-    if d_count >= DREAM_INTERVAL and await _run_periodic_dream(agent_dir, memory_dir):
-        atomic_write_text(dream_counter, "0")
+    if d_count >= DREAM_INTERVAL and dream_maintenance is not None:
+        if await dream_maintenance(memory_dir):
+            atomic_write_text(dream_counter, "0")
 
 
 def _sanitize_event_value(value: str) -> str:

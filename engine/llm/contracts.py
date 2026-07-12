@@ -11,6 +11,8 @@ from typing import Any
 
 import httpx
 
+GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
 
 class LLMError(RuntimeError):
     """Base error raised by the normalized LLM module."""

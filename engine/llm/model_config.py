@@ -9,7 +9,12 @@ from typing import Any
 from common.config import AGENT_DIR, DATA_DIR, SMITH_PROFILE_DIR
 from common.yaml_utils import YamlConfigError, load_yaml, merge_configs
 
-from .contracts import LLMProviderConfig, LLMTimeouts, UnsupportedProviderError
+from .contracts import (
+    GEMINI_OPENAI_BASE_URL,
+    LLMProviderConfig,
+    LLMTimeouts,
+    UnsupportedProviderError,
+)
 from .factory import create_llm_client, normalize_provider_name
 from .port import LLMPort
 
@@ -80,20 +85,29 @@ def build_llm_client(config: dict) -> LLMPort:
     if not isinstance(config, dict):
         raise YamlConfigError("LLM configuration must be a mapping")
 
-    missing = [
-        field
-        for field in ("api_key", "base_url", "model")
-        if not isinstance(config.get(field), str) or not config[field].strip()
-    ]
-    if missing:
-        fields = ", ".join(missing)
-        raise YamlConfigError(f"LLM configuration is missing required fields: {fields}")
-
     provider_value = config.get("provider", "")
     try:
         provider = normalize_provider_name(provider_value)
     except UnsupportedProviderError as exc:
         raise YamlConfigError(str(exc)) from exc
+
+    base_url = config.get("base_url")
+    if provider == "gemini" and (base_url is None or str(base_url).strip() == ""):
+        base_url = GEMINI_OPENAI_BASE_URL
+
+    required_values = {
+        "api_key": config.get("api_key"),
+        "base_url": base_url,
+        "model": config.get("model"),
+    }
+    missing = [
+        field
+        for field, value in required_values.items()
+        if not isinstance(value, str) or not value.strip()
+    ]
+    if missing:
+        fields = ", ".join(missing)
+        raise YamlConfigError(f"LLM configuration is missing required fields: {fields}")
 
     stream = config.get("stream", True)
     if not isinstance(stream, bool):
@@ -138,7 +152,7 @@ def build_llm_client(config: dict) -> LLMPort:
     return create_llm_client(LLMProviderConfig(
         provider=provider,
         api_key=config["api_key"].strip(),
-        base_url=config["base_url"].strip(),
+        base_url=base_url.strip(),
         model=config["model"].strip(),
         stream=stream,
         timeouts=resolved_timeouts,
