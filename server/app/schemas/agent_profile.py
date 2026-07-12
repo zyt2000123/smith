@@ -12,8 +12,6 @@ class AgentProfileCreate(BaseModel):
 
 
 class AgentProfileUpdate(BaseModel):
-    name: str | None = None
-    role: str | None = None
     description: str | None = None
     device: str | None = None
     knowledge: list[str] | None = None

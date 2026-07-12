@@ -84,10 +84,21 @@ async def _ensure_session_identity_column(db: aiosqlite.Connection) -> None:
 
 
 async def _ensure_unique_profile_index(db: aiosqlite.Connection) -> None:
-    """Add UNIQUE(name, role) to existing databases that lack it."""
+    """Add UNIQUE(name, role) to existing databases, deduplicating first."""
+    await db.execute(
+        "DELETE FROM agent_profiles WHERE rowid NOT IN "
+        "(SELECT MIN(rowid) FROM agent_profiles GROUP BY name, role)"
+    )
     await db.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_profiles_name_role "
         "ON agent_profiles(name, role)"
+    )
+
+
+async def _reset_stuck_auto_tasks(db: aiosqlite.Connection) -> None:
+    """Reset tasks stuck at 'running' from a prior crash."""
+    await db.execute(
+        "UPDATE auto_tasks SET status='idle' WHERE status='running'"
     )
 
 
@@ -95,4 +106,5 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
     await db.executescript(APP_SCHEMA)
     await _ensure_session_identity_column(db)
     await _ensure_unique_profile_index(db)
+    await _reset_stuck_auto_tasks(db)
     await db.commit()
