@@ -88,11 +88,10 @@ class MemoryMaintenanceService:
 
     async def _run_dream_unlocked(self, memory_dir: Path) -> bool:
         try:
-            from engine.memory.dream import run_dream
-            from engine.memory.store import _dream_report_completed
+            from engine.memory.dream import dream_report_completed, run_dream
 
-            report = await run_dream(memory_dir, self.llm)
-            if not _dream_report_completed(report):
+            report = await run_dream(memory_dir, self.llm, reviewer=self.reviewer)
+            if not dream_report_completed(report):
                 reason = "; ".join(report.errors) if report.errors else report.skipped
                 logger.warning("conversation-memory Dream did not complete: %s", reason)
                 return False

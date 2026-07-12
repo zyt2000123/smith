@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import math
-from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -61,16 +60,6 @@ _ROUTE_FIELDS = (
     "stream",
     "max_output_tokens",
 )
-
-
-@dataclass
-class ModelConfig:
-    api_key: str = field(repr=False)
-    base_url: str
-    model: str
-    provider: str = ""
-    stream: bool = True
-    max_output_tokens: int | None = None
 
 
 def build_llm_client(config: dict) -> LLMPort:

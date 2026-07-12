@@ -48,16 +48,23 @@ from .react_loop import (
 from .run_stream import AgentRunStream
 from .runtime import EngineRequest, EngineResult, RuntimeContext, RuntimeServices
 from .skill_chain import SkillChain, load_gate_content
-from .task_router import (
-    EVAL_SENSITIVE_GUIDANCE,
-    detect_eval_sensitive,
-    route_task,
-)
+from engine.safety.eval_guard import EVAL_SENSITIVE_GUIDANCE, detect_eval_sensitive
+from .task_router import route_task
 
 __all__ = ("_react_event_loop", "_react_loop", "_react_stream_loop")
 
 logger = logging.getLogger(__name__)
 
+# Design intent: some tools (memory_ops, search_knowledge, skill_load,
+# skill_manage) are "infrastructure" tools that should be available to the
+# agent but hidden from the user-facing enabled-tools whitelist by default.
+# Ideally each tool would declare ``"hidden": True`` in its TOOL_META so
+# this list is data-driven rather than hardcoded here.
+#
+# TODO: Once engine/tool/interface.py supports a ``hidden`` field on
+# ToolDefinition (and load_providers propagates TOOL_META["hidden"] into it),
+# replace _is_hidden_tool() with a registry query. Until then the names are
+# kept here as a transitional measure.
 _HIDDEN_DEFAULT_TOOLS = frozenset({
     "memory_ops",
     "search_knowledge",
@@ -169,6 +176,7 @@ async def _run_forced_skill_stream(
     async for event in execute_skill_events(
         skill, llm, tool_registry, messages, context,
         max_react_iters, tool_guard=tool_guard,
+        react_event_loop_fn=_react_event_loop,
     ):
         if event.type == EventType.TEXT_DELTA:
             output_parts.append(str(event.data.get("text", "")))
@@ -303,84 +311,8 @@ async def _register_mcp_tools(
     runtime: RuntimeContext,
     services: RuntimeServices,
 ) -> None:
-    mcp_servers = profile_config.get("mcp_servers", [])
-    if not isinstance(mcp_servers, list) or not mcp_servers:
-        return
-    try:
-        from engine.tool.mcp_client import (
-            MCPClient,
-            register_mcp_tools_with_prefix,
-        )
-    except Exception:
-        logger.exception("failed to import MCP client (agent=%s)", runtime.agent_id)
-        return
-    # 逐 server 隔离失败：一个 server 连不上不许拖垮其余 server 的注册。
-    for srv in mcp_servers:
-        try:
-            if not isinstance(srv, dict):
-                continue
-            transport = _mcp_transport_from_config(srv)
-            if transport is None:
-                continue
-            prefix = _mcp_tool_prefix_from_config(srv)
-            client = MCPClient(transport=transport)
-            await client.connect()
-            services.mcp_clients.append(client)
-            await register_mcp_tools_with_prefix(services.tool_registry, client, prefix=prefix)
-        except Exception:
-            logger.exception(
-                "failed to register MCP server (agent=%s, server=%r)",
-                runtime.agent_id, _mcp_server_log_summary(srv),
-            )
-
-
-def _mcp_transport_from_config(config: dict):
-    from engine.tool.mcp_client import StdioMCPTransport, StreamableHTTPMCPTransport
-
-    transport_type = str(config.get("type") or "").strip().lower().replace("-", "_")
-    if not transport_type:
-        transport_type = "streamable_http" if config.get("url") else "stdio"
-
-    if transport_type == "stdio":
-        command = config.get("command", [])
-        if not isinstance(command, list) or not command:
-            return None
-        env = config.get("env")
-        return StdioMCPTransport(command, env=env if isinstance(env, dict) else None)
-
-    if transport_type in {"http", "streamable_http"}:
-        url = config.get("url")
-        if not isinstance(url, str) or not url:
-            return None
-        headers = config.get("headers")
-        timeout = config.get("timeout", 30.0)
-        return StreamableHTTPMCPTransport(
-            url,
-            headers=headers if isinstance(headers, dict) else None,
-            timeout=float(timeout) if isinstance(timeout, (int, float)) else 30.0,
-        )
-
-    raise ValueError(f"unsupported MCP transport type: {transport_type}")
-
-
-def _mcp_tool_prefix_from_config(config: dict) -> str:
-    name = config.get("name") or config.get("alias")
-    if isinstance(name, str) and name:
-        return f"mcp_{name}"
-    return "mcp"
-
-
-def _mcp_server_log_summary(config: dict) -> dict[str, object]:
-    summary: dict[str, object] = {}
-    for key in ("type", "name", "alias", "url", "command", "timeout"):
-        value = config.get(key)
-        if value is not None:
-            summary[key] = value
-    if isinstance(config.get("headers"), dict):
-        summary["headers"] = sorted(config["headers"].keys())
-    if isinstance(config.get("env"), dict):
-        summary["env"] = sorted(config["env"].keys())
-    return summary
+    from engine.mcp.config import register_mcp_tools as _mcp_register
+    await _mcp_register(profile_config, runtime, services)
 
 
 async def prepare_runtime(
@@ -407,6 +339,10 @@ async def prepare_runtime(
             "agent %s configured unknown tools ignored: %s",
             runtime.agent_id, ", ".join(sorted(set(unknown_tools))),
         )
+
+    # 工具全部注册后把定义绑给守卫，metadata-first 安全检查才能生效。
+    if services.tool_guard is not None:
+        services.tool_guard.bind_definitions(services.tool_registry.definitions())
 
     services.skill_registry.load_builtin(runtime.agents_dir / "skills")
     profile_skills = runtime.profile_dir / "skills"
@@ -585,11 +521,16 @@ def _has_memory_worthy_activity(event: ExecutionEvent) -> bool:
     return event.type in (EventType.TOOL_CALL_START, EventType.SKILL_START)
 
 
-def _fact_gate_for_request(request: EngineRequest, runtime: RuntimeContext) -> FactGate:
+def _fact_gate_for_request(
+    request: EngineRequest,
+    runtime: RuntimeContext,
+    services: RuntimeServices | None = None,
+) -> FactGate:
+    definitions = services.tool_registry.definitions() if services is not None else None
     return FactGate(FactGateContext(
         session_id=runtime.session_id or "",
         turn_id=uuid4().hex,
-    ))
+    ), tool_registry=definitions)
 
 
 def run_stream_with_runtime(
@@ -625,7 +566,7 @@ async def _run_events_with_runtime(
         s = await prepare_runtime(request, runtime, services)
         state_dir = s.state_dir
         guard = FailureLoopGuard()
-        with use_fact_gate(_fact_gate_for_request(request, runtime)):
+        with use_fact_gate(_fact_gate_for_request(request, runtime, services)):
             async for event in run_agent_stream(
                 services.llm, s.system_prompt,
                 _merge_context(request.message, request.context),

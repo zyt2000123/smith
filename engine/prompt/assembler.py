@@ -62,6 +62,7 @@ class PromptAssembler:
         max_tokens: int = 100_000,
         retrieved_memory: str = "",
         working_dir: Path | None = None,
+        memory_text: str = "",
     ) -> str:
         layers: list[str] = []
 
@@ -107,10 +108,15 @@ class PromptAssembler:
         layers.append(self._read(output_style_path))
 
         # Layer 9: memory (durable + recent compiled, plus query-time retrieval)
-        memory_dir = agent_dir / "memory"
-
-        from engine.memory.compile import assemble_memory
-        mem_text = assemble_memory(memory_dir) if memory_dir.is_dir() else ""
+        # TODO: Callers (e.g. agent_loop.py) should pre-load memory and pass
+        # memory_text to decouple the assembler from engine.memory.compile.
+        if memory_text:
+            mem_text = memory_text
+        else:
+            # Backward-compatible fallback: self-load from agent_dir/memory
+            memory_dir = agent_dir / "memory"
+            from engine.memory.compile import assemble_memory
+            mem_text = assemble_memory(memory_dir) if memory_dir.is_dir() else ""
 
         if retrieved_memory:
             mem_text = (mem_text + "\n\n" if mem_text else "") + retrieved_memory
@@ -147,13 +153,31 @@ class PromptAssembler:
         _prompt_cache[cache_key] = (stable_hash, stable_content)
 
         # Token budget — trim lowest-priority layers if over budget
+        # Layer index constants (0-based):
+        _LAYER_ROLE = 0          # identity — never cut
+        _LAYER_STYLE = 1         # persona
+        _LAYER_WORKFLOW = 2      # bible — never cut
+        _LAYER_TOOLS = 3         # toolbox
+        _LAYER_SKILLS = 4        # skill catalog
+        _LAYER_CONTEXT_MD = 5    # context.md
+        _LAYER_SMITH_MD = 6      # user instructions — never cut
+        _LAYER_OUTPUT_STYLE = 7  # output formatting
+        _LAYER_MEMORY = 8        # compiled memory
+        _LAYER_RUNTIME_CTX = 9   # runtime context — never cut
+
         if max_tokens:
             total = sum(_estimate_tokens(layer) for layer in layers if layer.strip())
             if total > max_tokens:
-                # Indices to cut, lowest priority first:
-                # 7=output_style, 8=memory, 5=context_md, 4=skills, 3=tools, 1=style
-                # (6=SMITH.md is user instructions — never trimmed)
-                cut_order = [7, 8, 5, 4, 3, 1]
+                # Cut lowest-priority layers first; SMITH.md, role, workflow,
+                # and runtime context are never trimmed.
+                cut_order = [
+                    _LAYER_OUTPUT_STYLE,
+                    _LAYER_MEMORY,
+                    _LAYER_CONTEXT_MD,
+                    _LAYER_SKILLS,
+                    _LAYER_TOOLS,
+                    _LAYER_STYLE,
+                ]
                 for idx in cut_order:
                     if idx < len(layers) and layers[idx].strip():
                         total -= _estimate_tokens(layers[idx])

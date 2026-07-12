@@ -11,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from engine.tool.interface import ToolCall
+from engine.tool.interface import ToolCall, ToolDefinition
 
 
 # ── Permission Levels (req #2: default-deny + tiered approval) ──
@@ -49,6 +49,11 @@ class GuardResult:
     reason: str = ""
     level: PermissionLevel = PermissionLevel.READ
     needs_confirmation: bool = False
+    # True when the only problem is that the path sits outside the allowed
+    # directories — the one block a session whitelist may override.  Sensitive
+    # blocks (.ssh, .env writes, .git, …) keep this False and are never
+    # bypassable.
+    boundary_block: bool = False
 
 
 # ── Path guard (req #3: symlink, traversal, sensitive files) ──
@@ -85,7 +90,11 @@ class FileGuard:
         if any(target.is_relative_to(d) for d in self._allowed):
             return GuardResult(allowed=True)
 
-        return GuardResult(allowed=False, reason=f"Path {path_str} outside allowed directories")
+        return GuardResult(
+            allowed=False,
+            reason=f"Path {path_str} outside allowed directories",
+            boundary_block=True,
+        )
 
 
 # ── Audit log (req #6: every tool call logged) ──────────────
@@ -177,9 +186,30 @@ def _extract_shell_paths(command: str) -> tuple[list[str], list[str]]:
     return read_paths, write_paths
 
 
+def _rule_match_targets(arguments: dict) -> list[str]:
+    """Strings that dangerous-command rule patterns are matched against.
+
+    The JSON dump alone breaks ``$``-anchored patterns (every value in the
+    dump is followed by ``"``), so each raw string value is matched as well.
+    """
+    targets: list[str] = [json.dumps(arguments, ensure_ascii=False)]
+    stack: list[object] = list(arguments.values())
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+        elif isinstance(current, str):
+            targets.append(current)
+    return targets
+
+
 # ── Main guard ──────────────────────────────────────────────
 
 class ToolGuard:
+    # Fallback lookup tables — used when a tool has no security metadata on its
+    # ToolDefinition.  New tools should declare metadata instead of adding rows.
     _PATH_ARGS: dict[str, tuple[str, ...]] = {
         "read_file": ("path", "file_path"),
         "write_file": ("path", "file_path"),
@@ -194,24 +224,49 @@ class ToolGuard:
         "git_ops": ("files",),
     }
     _WRITE_TOOLS = frozenset({"write_file", "edit_file"})
-    _FILE_TOOLS = frozenset(_PATH_ARGS) | frozenset(_LIST_PATH_ARGS)
 
-    def __init__(self, rules_path: Path, allowed_dirs: list[Path] | None = None) -> None:
+    def __init__(
+        self,
+        rules_path: Path,
+        allowed_dirs: list[Path] | None = None,
+        *,
+        tool_registry: dict[str, ToolDefinition] | None = None,
+    ) -> None:
         self._rules: list[dict] = []
         if rules_path.is_file():
             self._rules = json.loads(rules_path.read_text(encoding="utf-8"))
         self.file_guard = FileGuard(allowed_dirs)
         self.audit = AuditLog()
         self.whitelist = SessionWhitelist()
+        self._tool_registry: dict[str, ToolDefinition] = tool_registry or {}
+
+    def bind_definitions(self, definitions: dict[str, ToolDefinition]) -> None:
+        """Bind tool definitions after registry load so metadata-first checks apply."""
+        self._tool_registry = definitions
+
+    def _resolve_path_metadata(self, tool_name: str) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+        """Return (path_args, list_path_args, is_write) for *tool_name*.
+
+        Checks tool-declared metadata first, falls back to the hardcoded
+        tables for tools that haven't declared their own metadata yet.
+        """
+        defn = self._tool_registry.get(tool_name)
+        if defn is not None and (defn.path_args or defn.list_path_args):
+            return defn.path_args, defn.list_path_args, defn.is_write_tool
+
+        path_args = self._PATH_ARGS.get(tool_name, ())
+        list_path_args = self._LIST_PATH_ARGS.get(tool_name, ())
+        is_write = tool_name in self._WRITE_TOOLS
+        return path_args, list_path_args, is_write
 
     def _check_file_paths(self, tool_call: ToolCall) -> GuardResult | None:
-        if tool_call.name not in self._FILE_TOOLS:
+        path_args, list_path_args, is_write = self._resolve_path_metadata(tool_call.name)
+        if not path_args and not list_path_args and tool_call.name != "shell":
             return None
 
-        is_write = tool_call.name in self._WRITE_TOOLS
         paths_to_check: list[tuple[str, bool]] = []
 
-        for arg_name in self._PATH_ARGS.get(tool_call.name, ()):
+        for arg_name in path_args:
             path_val = tool_call.arguments.get(arg_name)
             if path_val:
                 paths_to_check.append((str(path_val), is_write))
@@ -219,7 +274,7 @@ class ToolGuard:
         cwd_val = tool_call.arguments.get("cwd")
         cwd = str(cwd_val) if cwd_val else ""
 
-        for arg_name in self._LIST_PATH_ARGS.get(tool_call.name, ()):
+        for arg_name in list_path_args:
             raw_values = tool_call.arguments.get(arg_name) or []
             if not isinstance(raw_values, list):
                 continue
@@ -238,17 +293,31 @@ class ToolGuard:
                 paths_to_check.append((wp, True))
 
         for p, writing in paths_to_check:
-            # Always enforce sensitive-path blocks — whitelist cannot bypass these
             result = self.file_guard.check_path(p, writing=writing)
             if not result.allowed:
-                if self.whitelist.is_path_allowed(p) and result.needs_confirmation:
-                    # Whitelisted path hit a soft block (e.g. .env write) — still block
-                    pass
+                # The session whitelist may extend the directory boundary, but
+                # it never bypasses sensitive-path blocks (.ssh, .env writes,
+                # .git, …) — those return boundary_block=False.
+                if result.boundary_block and self.whitelist.is_path_allowed(p):
+                    continue
                 return result
         return None
 
+    def _resolve_permission_level(self, tool_name: str) -> PermissionLevel:
+        """Return the permission level for *tool_name*.
+
+        Tool-declared metadata wins; falls back to ``TOOL_PERMISSIONS``.
+        """
+        defn = self._tool_registry.get(tool_name)
+        if defn is not None and defn.permission_level:
+            try:
+                return PermissionLevel(defn.permission_level)
+            except ValueError:
+                pass
+        return TOOL_PERMISSIONS.get(tool_name, PermissionLevel.EXECUTE)
+
     def check(self, tool_call: ToolCall) -> GuardResult:
-        level = TOOL_PERMISSIONS.get(tool_call.name, PermissionLevel.EXECUTE)
+        level = self._resolve_permission_level(tool_call.name)
 
         if self.whitelist.is_tool_allowed(tool_call.name):
             result = GuardResult(allowed=True, level=level)
@@ -261,7 +330,7 @@ class ToolGuard:
             self.audit.record(tool_call.name, tool_call.arguments, file_result)
             return file_result
 
-        args_str = json.dumps(tool_call.arguments)
+        match_targets = _rule_match_targets(tool_call.arguments)
         for rule in self._rules:
             scoped_tools = rule.get("tools")
             if scoped_tools and tool_call.name not in scoped_tools:
@@ -277,19 +346,19 @@ class ToolGuard:
             for pattern in patterns:
                 if not pattern:
                     continue
-                if not re.search(pattern, args_str):
-                    continue
-                excluded = any(ep and re.search(ep, args_str) for ep in exclude_patterns)
-                if excluded:
-                    continue
-                reason = rule.get("reason") or rule.get("description") or f"Blocked: {pattern}"
-                result = GuardResult(
-                    allowed=False,
-                    reason=f"[{rule.get('id', '?')}] {reason}",
-                    level=PermissionLevel.DESTRUCTIVE,
-                )
-                self.audit.record(tool_call.name, tool_call.arguments, result, rule_id=rule.get("id"))
-                return result
+                for target in match_targets:
+                    if not re.search(pattern, target):
+                        continue
+                    if any(ep and re.search(ep, target) for ep in exclude_patterns):
+                        continue
+                    reason = rule.get("reason") or rule.get("description") or f"Blocked: {pattern}"
+                    result = GuardResult(
+                        allowed=False,
+                        reason=f"[{rule.get('id', '?')}] {reason}",
+                        level=PermissionLevel.DESTRUCTIVE,
+                    )
+                    self.audit.record(tool_call.name, tool_call.arguments, result, rule_id=rule.get("id"))
+                    return result
 
         result = GuardResult(allowed=True, level=level)
         self.audit.record(tool_call.name, tool_call.arguments, result)

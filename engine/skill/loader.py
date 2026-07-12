@@ -30,13 +30,20 @@ def parse_skill_md(path: Path) -> SkillBody:
     if raw.startswith("---"):
         parts = raw.split("---", 2)
         if len(parts) >= 3:
-            meta_dict = yaml.safe_load(parts[1]) or {}
+            try:
+                loaded = yaml.safe_load(parts[1])
+            except yaml.YAMLError:
+                loaded = None
+            # Tolerate malformed frontmatter (invalid YAML or a non-mapping
+            # root): strip the block but fall back to default metadata.
+            meta_dict = loaded if isinstance(loaded, dict) else {}
             body = parts[2].strip()
 
+    name = meta_dict.get("name")
     meta = SkillMeta(
-        name=meta_dict.get("name", path.parent.name),
-        description=meta_dict.get("description", ""),
-        version=meta_dict.get("version", "0.1.0"),
-        argument_hint=meta_dict.get("argument_hint", ""),
+        name=str(name) if name else path.parent.name,
+        description=str(meta_dict.get("description") or ""),
+        version=str(meta_dict.get("version") or "0.1.0"),
+        argument_hint=str(meta_dict.get("argument_hint") or ""),
     )
     return SkillBody(meta=meta, content=body)

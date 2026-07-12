@@ -8,7 +8,7 @@ from engine.safety.fact_gate import (
 )
 from engine.safety.tool_guard import GuardResult, PermissionLevel
 from engine.safety.tool_policy import ToolPolicy
-from engine.tool.interface import ToolCall
+from engine.tool.interface import ToolCall, ToolDefinition
 
 
 def _call(name: str, **arguments: object) -> ToolCall:
@@ -139,6 +139,54 @@ def test_structured_state_tools_gate_mutations_but_allow_reads() -> None:
         assert gate.evaluate(call).challenged
         gate.begin_round()
         assert not gate.evaluate(call).challenged
+
+
+def test_metadata_read_actions_gate_unlisted_actions() -> None:
+    # notes_ops is absent from the hardcoded structured-tool table — the gate
+    # must act purely on the declared ToolDefinition metadata.
+    registry = {
+        "notes_ops": ToolDefinition(
+            name="notes_ops",
+            description="",
+            read_actions=frozenset({"get", "list"}),
+        )
+    }
+    gate = FactGate(
+        FactGateContext(session_id="session-1", turn_id="turn-meta"),
+        enabled=True,
+        tool_registry=registry,
+    )
+
+    assert not gate.evaluate(_call("notes_ops", action="list")).challenged
+
+    challenge = gate.evaluate(_call("notes_ops", action="delete"))
+    assert challenge.challenged
+    assert "notes_ops.delete" in challenge.reason
+
+
+def test_metadata_write_tool_gets_file_challenge() -> None:
+    registry = {
+        "doc_writer": ToolDefinition(
+            name="doc_writer",
+            description="",
+            path_args=("target",),
+            is_write_tool=True,
+        )
+    }
+    gate = FactGate(
+        FactGateContext(session_id="session-1", turn_id="turn-meta-write"),
+        enabled=True,
+        tool_registry=registry,
+    )
+    call = _call("doc_writer", target="engine/example.py")
+
+    first = gate.evaluate(call)
+    gate.begin_round()
+    retry = gate.evaluate(call)
+
+    assert first.challenged
+    assert "ALL files that import" in first.reason
+    assert not retry.challenged
 
 
 def test_request_context_binding_is_restored() -> None:

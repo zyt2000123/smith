@@ -24,17 +24,16 @@ from ..contracts import (
     ToolCallData,
 )
 from ..events import ProviderEvent, ProviderEventType, normalize_finish_reason
-from ._retry import MAX_RETRIES, is_retryable_status, retry_after_seconds, wait_for_retry
+from ._http import HTTPAdapterMixin
+from ._retry import MAX_RETRIES, is_retryable_status, retry_after_seconds
 
 logger = logging.getLogger(__name__)
-
-_MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 
 
 _ANTHROPIC_VERSION = "2023-06-01"
 
 
-class AnthropicAdapter:
+class AnthropicAdapter(HTTPAdapterMixin):
     """Translate Anthropic Messages payloads and named SSE events."""
 
     provider = "anthropic"
@@ -44,6 +43,8 @@ class AnthropicAdapter:
         reasoning=True,
         prefix_cache_key=False,
     )
+    _completion_path = "/v1/messages"
+    _error_label = "Anthropic"
 
     def __init__(self, config: LLMProviderConfig) -> None:
         self.api_key = config.api_key
@@ -74,7 +75,7 @@ class AnthropicAdapter:
         body = self._request_body(request, stream=True)
 
         for attempt in range(MAX_RETRIES):
-            http_request = self._http.build_request("POST", "/v1/messages", json=body)
+            http_request = self._http.build_request("POST", self._completion_path, json=body)
             response: httpx.Response | None = None
             retry_after: float | None = None
             saw_content_event = False
@@ -462,58 +463,6 @@ class AnthropicAdapter:
             raw_finish_reason=raw_finish_reason if isinstance(raw_finish_reason, str) else None,
         )
 
-    async def _request(self, body: dict[str, Any], attempt: int = 0) -> dict[str, Any]:
-        try:
-            raw = await self._read_bounded(
-                "POST", "/v1/messages", body, self.timeouts.request_timeout(),
-            )
-            try:
-                payload = json.loads(raw)
-            except (json.JSONDecodeError, RecursionError) as exc:
-                raise LLMResponseError("Anthropic response contains invalid JSON.") from exc
-            if not isinstance(payload, dict):
-                raise LLMResponseError("Anthropic response must be a JSON object.")
-            return payload
-        except httpx.HTTPStatusError as exc:
-            if is_retryable_status(exc.response.status_code) and attempt < MAX_RETRIES - 1:
-                logger.warning(
-                    "Anthropic request attempt %d failed (HTTP %d), retrying",
-                    attempt + 1, exc.response.status_code,
-                )
-                return await self._retry_with_backoff(
-                    body,
-                    attempt,
-                    retry_after=retry_after_seconds(exc.response),
-                )
-            body_preview = await self._read_error_body(exc.response)
-            raise LLMResponseError(
-                f"Anthropic request failed (HTTP {exc.response.status_code}) "
-                f"after {attempt + 1} attempt(s): {body_preview or exc}"
-            ) from exc
-        except httpx.RequestError as exc:
-            if attempt < MAX_RETRIES - 1:
-                logger.warning(
-                    "Anthropic request attempt %d failed (%s), retrying",
-                    attempt + 1, type(exc).__name__,
-                )
-                return await self._retry_with_backoff(body, attempt)
-            raise LLMResponseError(
-                f"Anthropic request failed after {MAX_RETRIES} attempts: {exc}"
-            ) from exc
-
-    async def _wait_for_retry(self, attempt: int, retry_after: float | None = None) -> None:
-        await wait_for_retry(attempt, retry_after)
-
-    async def _retry_with_backoff(
-        self,
-        body: dict[str, Any],
-        attempt: int,
-        *,
-        retry_after: float | None = None,
-    ) -> dict[str, Any]:
-        await self._wait_for_retry(attempt, retry_after)
-        return await self._request(body, attempt + 1)
-
     @staticmethod
     def _merge_usage(destination: dict[str, Any], source: object) -> None:
         if isinstance(source, dict):
@@ -542,45 +491,6 @@ class AnthropicAdapter:
                 data_lines.append(value)
         if data_lines:
             yield event_name, "\n".join(data_lines)
-
-    async def _read_bounded(
-        self,
-        method: str,
-        url: str,
-        body: dict[str, Any],
-        timeout: httpx.Timeout,
-    ) -> bytes:
-        """Stream-read with a hard byte cap — aborts before buffering oversized bodies."""
-        req = self._http.build_request(method, url, json=body, timeout=timeout)
-        response = await self._http.send(req, stream=True)
-        try:
-            response.raise_for_status()
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in response.aiter_bytes():
-                total += len(chunk)
-                if total > _MAX_RESPONSE_BYTES:
-                    raise LLMResponseError(
-                        f"Anthropic response exceeds {_MAX_RESPONSE_BYTES} byte limit."
-                    )
-                chunks.append(chunk)
-            return b"".join(chunks)
-        finally:
-            await response.aclose()
-
-    @staticmethod
-    async def _read_error_body(response: httpx.Response, limit: int = 500) -> str:
-        try:
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in response.aiter_bytes():
-                chunks.append(chunk)
-                total += len(chunk)
-                if total >= limit:
-                    break
-            return b"".join(chunks)[:limit].decode("utf-8", errors="replace")
-        except Exception:
-            return ""
 
     async def close(self) -> None:
         await self._http.aclose()

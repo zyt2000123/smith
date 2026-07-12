@@ -1,6 +1,6 @@
 """Provider-neutral LLM module public surface."""
 
-from .client import LLMClient, ProviderClient
+from .client import ProviderClient
 from .contracts import (
     ChatResponse,
     LLMError,
@@ -18,7 +18,6 @@ from .port import LLMPort
 
 __all__ = (
     "ChatResponse",
-    "LLMClient",
     "LLMError",
     "LLMPort",
     "LLMProviderConfig",

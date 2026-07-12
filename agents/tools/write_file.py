@@ -53,7 +53,7 @@ async def execute(
     # ponytail: snapshot before overwrite; skip on append (no data loss)
     if not append:
         try:
-            from snapshot import get_snapshot
+            from engine.snapshot import get_snapshot
             get_snapshot().track(resolved)
         except Exception:
             pass

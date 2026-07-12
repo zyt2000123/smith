@@ -4,17 +4,29 @@ import importlib.util
 import logging
 import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Sequence
 
 from .interface import ToolCall, ToolDefinition, ToolResult
-from .schema import function_to_schema
 from .truncation import truncate_output
 
 _TOOL_ALIASES = {
     "websearch": "web_search",
     "webfetch": "web_fetch",
 }
+# Values mirror engine.safety.tool_guard.PermissionLevel; kept as literals so
+# the tool layer does not import the safety layer (which imports tool).
+_VALID_PERMISSION_LEVELS = frozenset({"read", "write", "execute", "destructive"})
 log = logging.getLogger(__name__)
+
+
+def _meta_str_tuple(meta: dict, key: str, source: Path) -> tuple[str, ...]:
+    """Read an optional list-of-strings field from TOOL_META, validating it."""
+    value = meta.get(key, ())
+    if isinstance(value, (list, tuple)) and all(
+        isinstance(item, str) and item for item in value
+    ):
+        return tuple(value)
+    raise ValueError(f"{source} TOOL_META.{key} must be a list of non-empty strings")
 
 
 def _canonical_tool_name(name: str) -> str:
@@ -32,10 +44,30 @@ class ToolRegistry:
         description: str,
         parameters: dict,
         func: Callable,
+        *,
+        path_args: Sequence[str] = (),
+        list_path_args: Sequence[str] = (),
+        is_write_tool: bool = False,
+        permission_level: str = "",
+        read_actions: Iterable[str] = (),
     ) -> None:
         if name in self._tools:
             raise ValueError(f"Duplicate tool registered: {name}")
-        defn = ToolDefinition(name=name, description=description, parameters=parameters)
+        if permission_level and permission_level not in _VALID_PERMISSION_LEVELS:
+            raise ValueError(
+                f"Tool {name} has invalid permission_level: {permission_level!r} "
+                f"(expected one of {sorted(_VALID_PERMISSION_LEVELS)})"
+            )
+        defn = ToolDefinition(
+            name=name,
+            description=description,
+            parameters=parameters,
+            path_args=tuple(path_args),
+            list_path_args=tuple(list_path_args),
+            is_write_tool=bool(is_write_tool),
+            permission_level=permission_level,
+            read_actions=frozenset(read_actions),
+        )
         self._tools[name] = (defn, func)
 
     def load_providers(self, tools_dir: Path) -> None:
@@ -43,6 +75,10 @@ class ToolRegistry:
 
         Each file should define a TOOL_META dict and an execute function.
         TOOL_META keys: name, description, parameters (JSON Schema dict).
+        Optional security metadata keys: path_args, list_path_args,
+        is_write_tool, permission_level, read_actions — propagated onto the
+        ToolDefinition so safety modules can use them instead of hardcoded
+        lookup tables.
         """
         if not tools_dir.is_dir():
             return
@@ -66,11 +102,19 @@ class ToolRegistry:
                     parameters = meta.get("parameters", {})
                     if parameters and not isinstance(parameters, dict):
                         raise ValueError(f"{py_file} TOOL_META.parameters must be a dict")
+                    permission_level = meta.get("permission_level", "")
+                    if not isinstance(permission_level, str):
+                        raise ValueError(f"{py_file} TOOL_META.permission_level must be a string")
                     self.register(
                         name=name,
                         description=meta.get("description", ""),
                         parameters=parameters,
                         func=execute_fn,
+                        path_args=_meta_str_tuple(meta, "path_args", py_file),
+                        list_path_args=_meta_str_tuple(meta, "list_path_args", py_file),
+                        is_write_tool=bool(meta.get("is_write_tool", False)),
+                        permission_level=permission_level,
+                        read_actions=frozenset(_meta_str_tuple(meta, "read_actions", py_file)),
                     )
             except Exception:
                 log.exception("Failed to load tool provider: %s", py_file)
@@ -164,6 +208,10 @@ class ToolRegistry:
         if self._enabled is None:
             return [defn for defn, _ in self._tools.values()]
         return [defn for name, (defn, _) in self._tools.items() if name in self._enabled]
+
+    def definitions(self) -> dict[str, ToolDefinition]:
+        """All registered definitions (incl. disabled) keyed by name, for safety guards."""
+        return {name: defn for name, (defn, _) in self._tools.items()}
 
 
 _EXIT_CODE_RE = re.compile(r"^\[exit_code=(-?\d+)\]")

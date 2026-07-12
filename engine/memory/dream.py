@@ -10,18 +10,32 @@ Runs every ~50 conversations. Responsibilities:
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .compile import (
+    MAX_DURABLE_CHARS,
+    MAX_WINDOW_DAYS,
+    _read_durable_offset,
+    _read_offset,
+)
 from ._files import (
+    MEMORY_LAYER_FILES,
     atomic_write_text,
     contains_injection,
     contains_secret,
     safe_file_in_dir,
     safe_markdown_files,
     sanitize_memory_text,
+)
+from ._review import (
+    MemoryCompilationError,
+    _generate_and_review,
+    _llm_summarize,
 )
 
 if TYPE_CHECKING:
@@ -48,6 +62,18 @@ class DreamReport:
     log_lines_cleaned: int = 0
     skipped: str = ""
     errors: list[str] = field(default_factory=list)
+
+
+def dream_report_completed(report: DreamReport) -> bool:
+    """Return whether Dream maintenance should reset its retry counter."""
+    if report.errors:
+        return False
+    benign_skips = {
+        "",
+        "no durable.md",
+        "durable.md too short to consolidate",
+    }
+    return report.skipped in benign_skips
 
 
 # ---------------------------------------------------------------------------
@@ -80,13 +106,17 @@ Content to consolidate:
 DREAM_INTERVAL = 50
 
 
-async def run_dream(memory_dir: Path, llm: "LLMPort") -> DreamReport:
+async def run_dream(
+    memory_dir: Path,
+    llm: "LLMPort",
+    reviewer: "LLMPort | None" = None,
+) -> DreamReport:
     """Run Dream global review on all memory layers. Returns a report."""
     report = DreamReport()
 
     _sanitize_all_layers(memory_dir, report)
 
-    await _consolidate_durable(memory_dir, llm, report)
+    await _consolidate_durable(memory_dir, llm, report, reviewer=reviewer)
 
     _cleanup_log(memory_dir, report)
 
@@ -111,7 +141,7 @@ def _sanitize_all_layers(memory_dir: Path, report: DreamReport) -> None:
 def _all_memory_files(memory_dir: Path) -> list[Path]:
     """Collect all .md files across memory layers."""
     files = []
-    for name in ("durable.md", "recent.md"):
+    for name in MEMORY_LAYER_FILES:
         path = memory_dir / name
         safe_path = safe_file_in_dir(memory_dir, path)
         if safe_path is not None:
@@ -125,6 +155,8 @@ async def _consolidate_durable(
     memory_dir: Path,
     llm: "LLMPort",
     report: DreamReport,
+    *,
+    reviewer: "LLMPort | None" = None,
 ) -> None:
     durable_path = safe_file_in_dir(memory_dir, memory_dir / "durable.md")
 
@@ -142,35 +174,49 @@ async def _consolidate_durable(
     report.secrets_removed += secrets_removed
     report.injection_lines_removed += injections_removed
 
+    consolidation_prompt = _CONSOLIDATE_PROMPT.format(content=content)
+    system_prompt = "You are a memory janitor. Be conservative — only clean, never add."
+
     try:
-        resp = await llm.chat([
-            {"role": "system", "content": "You are a memory janitor. Be conservative — only clean, never add."},
-            {"role": "user", "content": _CONSOLIDATE_PROMPT.format(content=content)},
-        ])
-        consolidated = resp.text.strip()
+        if reviewer:
+            consolidated = await _generate_and_review(
+                llm, reviewer, consolidation_prompt, content,
+                system_prompt=system_prompt,
+            )
+        else:
+            consolidated = await _llm_summarize(
+                llm, consolidation_prompt,
+                system_prompt=system_prompt,
+            )
 
         if consolidated and len(consolidated) > 50:
             if contains_secret(consolidated) or contains_injection(consolidated):
                 logger.warning("dream consolidation output contains unsafe content — keeping original")
                 report.errors.append("consolidation output contained unsafe content")
+            elif len(consolidated) > MAX_DURABLE_CHARS:
+                logger.warning(
+                    "dream consolidation output exceeded %s characters — keeping original",
+                    MAX_DURABLE_CHARS,
+                )
+                report.errors.append("consolidation output exceeded character budget")
             else:
                 atomic_write_text(durable_path.with_name("durable.md.bak"), original_content)
                 atomic_write_text(durable_path, consolidated + "\n")
                 report.consolidated = True
         else:
             report.skipped = "LLM returned insufficient output"
+    except MemoryCompilationError as e:
+        report.errors.append(f"consolidation: {e}")
+        logger.warning("dream consolidation quality gate rejected output: %s", e)
     except Exception as e:
         report.errors.append(f"consolidation: {type(e).__name__}: {e}")
         logger.warning("dream consolidation failed", exc_info=True)
 
 
 def _cleanup_log(memory_dir: Path, report: DreamReport) -> None:
-    """Truncate recent.jsonl entries that are both before the compile offset
-    AND older than MAX_WINDOW_DAYS, preserving the recent rolling window.
+    """Truncate recent.jsonl entries that are both before every compile
+    checkpoint AND older than MAX_WINDOW_DAYS, preserving the rolling window.
     """
-    import json as _json
-    from datetime import datetime, timedelta, timezone
-
     recent = memory_dir / "recent.jsonl"
     offset_file = memory_dir / ".compile_offset"
 
@@ -180,10 +226,10 @@ def _cleanup_log(memory_dir: Path, report: DreamReport) -> None:
     if safe_file_in_dir(memory_dir, memory_dir / "durable.md") is None:
         return
 
-    try:
-        offset = max(0, int(offset_file.read_text().strip()))
-    except (ValueError, OSError):
-        return
+    compile_offset = _read_offset(memory_dir)
+    durable_offset = _read_durable_offset(memory_dir)
+    # Never delete lines the durable merge has not consumed yet.
+    offset = min(compile_offset, durable_offset)
 
     if offset <= 0:
         return
@@ -192,14 +238,19 @@ def _cleanup_log(memory_dir: Path, report: DreamReport) -> None:
     if not lines:
         return
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=MAX_WINDOW_DAYS)).isoformat()
     safe_offset = 0
     for i, line in enumerate(lines[:offset]):
         try:
-            ts = _json.loads(line).get("timestamp", "")
-            if ts and ts < cutoff:
-                safe_offset = i + 1
-        except (ValueError, _json.JSONDecodeError):
+            entry = json.loads(line)
+        except (ValueError, json.JSONDecodeError):
+            safe_offset = i + 1
+            continue
+        if not isinstance(entry, dict):
+            safe_offset = i + 1
+            continue
+        ts = entry.get("timestamp", "")
+        if ts and ts < cutoff:
             safe_offset = i + 1
 
     if safe_offset <= 0:
@@ -209,20 +260,11 @@ def _cleanup_log(memory_dir: Path, report: DreamReport) -> None:
     atomic_write_text(recent, "\n".join(remaining) + "\n" if remaining else "")
     report.log_lines_cleaned = safe_offset
 
-    if report.log_lines_cleaned > 0:
-        new_offset = max(0, offset - safe_offset)
-        atomic_write_text(offset_file, str(new_offset))
+    atomic_write_text(offset_file, str(max(0, compile_offset - safe_offset)))
 
-        durable_offset_file = memory_dir / ".durable_offset"
-        if durable_offset_file.is_file():
-            try:
-                durable_offset = max(
-                    0,
-                    int(durable_offset_file.read_text(encoding="utf-8").strip()),
-                )
-            except (ValueError, OSError):
-                durable_offset = 0
-            atomic_write_text(
-                durable_offset_file,
-                str(max(0, durable_offset - safe_offset)),
-            )
+    durable_offset_file = memory_dir / ".durable_offset"
+    if durable_offset_file.is_file():
+        atomic_write_text(
+            durable_offset_file,
+            str(max(0, durable_offset - safe_offset)),
+        )

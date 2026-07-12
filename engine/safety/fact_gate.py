@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from engine.tool.interface import ToolCall
+from engine.tool.interface import ToolCall, ToolDefinition
 
 
 _DISABLE_VALUES = frozenset({"0", "false", "off", "disabled", "disable", "no"})
@@ -94,12 +94,19 @@ class FactGateResult:
 class FactGate:
     """Challenge the first write to each file and first mutating shell per turn."""
 
-    def __init__(self, context: FactGateContext, *, enabled: bool | None = None) -> None:
+    def __init__(
+        self,
+        context: FactGateContext,
+        *,
+        enabled: bool | None = None,
+        tool_registry: dict[str, ToolDefinition] | None = None,
+    ) -> None:
         self.context = context
         self.enabled = _enabled_from_env() if enabled is None else enabled
         self._scope = f"{context.session_id}:{context.turn_id}"
         self._checked: set[str] = set()
         self._pending: set[str] = set()
+        self._tool_registry: dict[str, ToolDefinition] = tool_registry or {}
 
     def begin_round(self) -> None:
         """Make prior-round challenges retryable without opening the current round."""
@@ -107,12 +114,39 @@ class FactGate:
         self._checked.update(self._pending)
         self._pending.clear()
 
+    def _resolve_read_actions(self, tool_name: str) -> frozenset[str] | None:
+        """Return the read-only actions for *tool_name*, or ``None``.
+
+        Tool-declared metadata wins; falls back to ``_STRUCTURED_READ_ACTIONS``.
+        """
+        defn = self._tool_registry.get(tool_name)
+        if defn is not None and defn.read_actions:
+            return defn.read_actions
+        return _STRUCTURED_READ_ACTIONS.get(tool_name)
+
+    def _resolve_write_path_args(self, tool_name: str) -> tuple[str, ...]:
+        """Return the path argument names when *tool_name* writes files.
+
+        Tool-declared metadata wins; falls back to the built-in file tools.
+        Returns ``()`` for tools that do not write files.
+        """
+        defn = self._tool_registry.get(tool_name)
+        if defn is not None and defn.is_write_tool and defn.path_args:
+            return defn.path_args
+        if tool_name in {"edit_file", "write_file"}:
+            return ("path", "file_path")
+        return ()
+
     def evaluate(self, call: ToolCall) -> FactGateResult:
         if not self.enabled:
             return FactGateResult(False)
 
-        if call.name in {"edit_file", "write_file"}:
-            raw_path = call.arguments.get("path") or call.arguments.get("file_path")
+        write_path_args = self._resolve_write_path_args(call.name)
+        if write_path_args:
+            raw_path = next(
+                (call.arguments.get(arg) for arg in write_path_args if call.arguments.get(arg)),
+                None,
+            )
             if not raw_path:
                 return FactGateResult(False)
             path = _normalize_path(str(raw_path))
@@ -132,9 +166,10 @@ class FactGate:
             self._pending.add(key)
             return FactGateResult(True, _shell_challenge(command))
 
-        if call.name in _STRUCTURED_READ_ACTIONS:
+        read_actions = self._resolve_read_actions(call.name)
+        if read_actions is not None:
             action = str(call.arguments.get("action") or "").strip().lower()
-            if action in _STRUCTURED_READ_ACTIONS[call.name]:
+            if action in read_actions:
                 return FactGateResult(False)
             key = f"{self._scope}:structured:{call.name}"
             if key in self._checked:

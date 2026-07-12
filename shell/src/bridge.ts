@@ -8,13 +8,10 @@ import type { StoreApi } from "zustand/vanilla";
 import { createToolActivity } from "./activity.js";
 import {
   createSession,
-  disablePlugin,
-  enablePlugin,
   ensureAgentProfile,
   getLlmConfig,
   type LlmConfigInput,
   listMessages,
-  listPlugins,
   listSessions,
   listSkills,
   type Session,
@@ -189,19 +186,18 @@ export class NodeBridge {
 
     const agent = await ensureAgentProfile(baseUrl);
     const warnings: string[] = [];
-    const [sessions, plugins, skills] = await Promise.all([
+    const [sessions, skills] = await Promise.all([
       listSessions(baseUrl).catch((error: unknown) => {
         warnings.push(`Sessions unavailable: ${errorMessage(error)}`);
         return [];
       }),
-      listPlugins(baseUrl),
       listSkills(baseUrl).catch((error: unknown) => {
         warnings.push(`Skills unavailable: ${errorMessage(error)}`);
         return [];
       }),
     ]);
 
-    this.s.hydrate({ agent, sessions, plugins, skills, config, notices: [...bootNotes, ...warnings] });
+    this.s.hydrate({ agent, sessions, skills, config, notices: [...bootNotes, ...warnings] });
   }
 
   async saveConfig(input: LlmConfigInput): Promise<void> {
@@ -226,22 +222,9 @@ export class NodeBridge {
     }
   }
 
-  async refreshPlugins(): Promise<void> {
-    const { baseUrl } = this.s;
-    if (baseUrl) this.s.set({ plugins: await listPlugins(baseUrl) });
-  }
-
   async refreshSkills(): Promise<void> {
     const { baseUrl, agent } = this.s;
     if (baseUrl && agent) this.s.set({ skills: await listSkills(baseUrl) });
-  }
-
-  async togglePlugin(name: string, enable: boolean): Promise<void> {
-    const { baseUrl } = this.s;
-    if (enable) await enablePlugin(baseUrl, name);
-    else await disablePlugin(baseUrl, name);
-    await this.refreshPlugins();
-    this.s.set({ panel: "plugins", statusLine: `${enable ? "Enabled" : "Disabled"} plugin ${name}.` });
   }
 
   async resumeSession(session: Session): Promise<void> {

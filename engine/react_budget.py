@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import TYPE_CHECKING, AsyncGenerator
 
 if TYPE_CHECKING:
     from engine.llm.port import LLMPort
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_MAX_REACT_ITERS = 60
 MAX_FAILED_TOOL_RECOVERY_ITERS = 20
@@ -40,7 +43,7 @@ TOOL_CALL_BUDGET_MESSAGE = (
     "Tool-call budget reached before a final answer."
 )
 
-_NEXT_ACTION_VERBS = (
+_NEXT_ACTION_VERBS_ZH = (
     "查",
     "搜",
     "抓",
@@ -51,6 +54,8 @@ _NEXT_ACTION_VERBS = (
     "验证",
     "看看",
     "看一下",
+)
+_NEXT_ACTION_VERBS_EN = (
     "search",
     "fetch",
     "check",
@@ -60,8 +65,8 @@ _NEXT_ACTION_VERBS = (
     "verify",
 )
 _INCOMPLETE_FINAL_PATTERNS = (
-    re.compile(r"(让我|我将|我会|我需要|接下来|下一步|继续).{0,24}(" + "|".join(_NEXT_ACTION_VERBS[:8]) + r")"),
-    re.compile(r"(let me|i'll|i will|i need to|next,?|going to).{0,48}(" + "|".join(_NEXT_ACTION_VERBS[8:]) + r")"),
+    re.compile(r"(让我|我将|我会|我需要|接下来|下一步|继续).{0,24}(" + "|".join(_NEXT_ACTION_VERBS_ZH) + r")"),
+    re.compile(r"(let me|i'll|i will|i need to|next,?|going to).{0,48}(" + "|".join(_NEXT_ACTION_VERBS_EN) + r")"),
 )
 
 
@@ -101,6 +106,7 @@ async def final_text_response(
     try:
         response = await llm.chat(final_conversation, tools=None)
     except Exception:
+        _log.debug("finalization chat failed; returning canned budget message", exc_info=True)
         return fallback
     return response.text or fallback
 
@@ -121,6 +127,10 @@ async def stream_final_text(
             streamed_any = True
             yield chunk
     except Exception:
-        pass
+        # If chunks were already streamed the output is silently truncated
+        # for the user, so leave a trace for operators.
+        _log.warning(
+            "finalization stream failed (streamed_any=%s)", streamed_any, exc_info=True
+        )
     if not streamed_any:
         yield fallback

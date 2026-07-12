@@ -41,18 +41,6 @@ export type Session = {
   message_count: number;
 };
 
-export type PluginManifest = {
-  name: string;
-  enabled?: boolean;
-  installed?: boolean;
-  status?: string;
-  version?: string;
-  description?: string;
-  trigger_type?: string;
-  skill_count?: number;
-  skills?: Array<{ path?: string }>;
-};
-
 export type SkillSummary = {
   name: string;
   description: string;
@@ -172,26 +160,6 @@ export type Message = {
 
 export async function listMessages(baseUrl: string, sessionId: string): Promise<Message[]> {
   return request<Message[]>(baseUrl, `/api/agent/sessions/${sessionId}/messages`);
-}
-
-export async function listPlugins(baseUrl: string): Promise<PluginManifest[]> {
-  try {
-    return await request<PluginManifest[]>(baseUrl, "/api/plugins");
-  } catch {
-    return [];
-  }
-}
-
-export async function enablePlugin(baseUrl: string, name: string): Promise<{ status: string; plugin: string }> {
-  return request<{ status: string; plugin: string }>(baseUrl, `/api/plugins/${name}/enable`, {
-    method: "POST",
-  });
-}
-
-export async function disablePlugin(baseUrl: string, name: string): Promise<{ status: string; plugin: string }> {
-  return request<{ status: string; plugin: string }>(baseUrl, `/api/plugins/${name}/disable`, {
-    method: "POST",
-  });
 }
 
 export async function listSkills(baseUrl: string): Promise<SkillSummary[]> {

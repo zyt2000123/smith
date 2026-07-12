@@ -1,8 +1,21 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from .loader import SkillBody, parse_skill_md
+
+logger = logging.getLogger(__name__)
+
+
+def _parse_or_skip(skill_file: Path) -> SkillBody | None:
+    """Parse one SKILL.md, isolating failures so one broken skill cannot
+    prevent the rest from loading."""
+    try:
+        return parse_skill_md(skill_file)
+    except Exception:
+        logger.warning("Skipping unparseable skill: %s", skill_file, exc_info=True)
+        return None
 
 
 class SkillRegistry:
@@ -18,7 +31,9 @@ class SkillRegistry:
         for child in sorted(skills_dir.iterdir()):
             skill_file = child / "SKILL.md"
             if skill_file.is_file():
-                skill = parse_skill_md(skill_file)
+                skill = _parse_or_skip(skill_file)
+                if skill is None:
+                    continue
                 self._skills[skill.meta.name] = skill
                 self._builtin_names.add(skill.meta.name)
 
@@ -30,7 +45,9 @@ class SkillRegistry:
         for child in sorted(agent_skills_dir.iterdir()):
             skill_file = child / "SKILL.md"
             if skill_file.is_file():
-                skill = parse_skill_md(skill_file)
+                skill = _parse_or_skip(skill_file)
+                if skill is None:
+                    continue
                 self._skills[skill.meta.name] = skill
 
     def get(self, name: str) -> SkillBody | None:
@@ -45,6 +62,8 @@ class SkillRegistry:
         if self._agent_skills_dir is None:
             return None
         if name in self._builtin_names:
+            return None
+        if Path(name).name != name:  # reject path traversal (e.g. "../x")
             return None
         skill_dir = self._agent_skills_dir / name
         if skill_dir.is_dir():
