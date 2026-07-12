@@ -58,8 +58,12 @@ class AgentProfileRepo:
         await db.commit()
 
         if cursor.rowcount == 0:
-            return await self.find_by_name_role(data["name"], data["role"])  # type: ignore[return-value]
-        return (await self.get(eid))  # type: ignore[return-value]
+            row = await self.find_by_name_role(data["name"], data["role"])  # type: ignore[return-value]
+            row["_existed"] = True
+            return row
+        row = await self.get(eid)  # type: ignore[return-value]
+        row["_existed"] = False
+        return row
 
     async def find_by_name_role(self, name: str, role: str) -> dict | None:
         db = await get_app_db()
