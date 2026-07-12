@@ -11,6 +11,7 @@ Fingerprint caching: MD5 of input keys. Same input → skip compilation.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -44,6 +45,8 @@ MAX_DURABLE_SOURCE_CHARS = 16_000
 MAX_EPISODE_SOURCE_CHARS = 16_000
 MIN_WINDOW_DAYS = 3
 MAX_WINDOW_DAYS = 7
+_RECENT_REVIEW_TIMEOUT_SECONDS = 15.0
+_DURABLE_REVIEW_TIMEOUT_SECONDS = 15.0
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +212,22 @@ async def compile_recent(
             f"Max {MAX_RECENT_CHARS} chars.\n\n{source}"
         )
         if reviewer:
-            summary = await _generate_and_review(llm, reviewer, prompt, source)
+            try:
+                summary = await asyncio.wait_for(
+                    _generate_and_review(llm, reviewer, prompt, source),
+                    timeout=_RECENT_REVIEW_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                # Recent memory is a derived activity view, not a source of new
+                # facts. Keep it available from sanitized events even when the
+                # optional LLM reviewer is unavailable or repeatedly rejects a
+                # summary; durable memory remains fail-closed below.
+                logger.warning(
+                    "recent reviewer unavailable (%s); using sanitized event projection",
+                    exc,
+                    exc_info=True,
+                )
+                summary = _truncate_source(source, MAX_RECENT_CHARS)
         else:
             summary = await _llm_summarize(llm, prompt)
     else:
@@ -292,9 +310,15 @@ async def compile_durable(
         max_chars=MAX_DURABLE_CHARS,
     )
     if reviewer:
-        summary = await _generate_and_review(llm, reviewer, merge_prompt, new_source)
+        summary = await asyncio.wait_for(
+            _generate_and_review(llm, reviewer, merge_prompt, new_source),
+            timeout=_DURABLE_REVIEW_TIMEOUT_SECONDS,
+        )
     else:
-        summary = await _llm_summarize(llm, merge_prompt)
+        summary = await asyncio.wait_for(
+            _llm_summarize(llm, merge_prompt),
+            timeout=_DURABLE_REVIEW_TIMEOUT_SECONDS,
+        )
 
     summary = summary.strip()
     if not summary:
@@ -410,8 +434,14 @@ async def run_compilation(
     *,
     reviewer: "LLMPort | None" = None,
     raise_on_error: bool = False,
+    allow_partial_progress: bool = False,
 ) -> dict:
-    """Run compilation pipeline. Optionally surface failures for retry control."""
+    """Run compilation, optionally surfacing failures for retry control.
+
+    Lifecycle maintenance may allow one layer to succeed while another layer
+    remains pending review. Direct callers retain strict failure semantics by
+    default.
+    """
     memory_dir.mkdir(parents=True, exist_ok=True)
     total = _total_lines(memory_dir)
     results = {"recent": False, "durable": False}
@@ -428,6 +458,13 @@ async def run_compilation(
         errors.append("durable-memory compilation failed")
     if not errors and (results["recent"] or results["durable"]):
         _write_offset(memory_dir, total)
-    if errors and raise_on_error:
+    # A successful layer is useful progress even when a later layer failed.
+    # Only lifecycle callers opt into resetting their retry counter here; the
+    # direct API keeps its strict raise-on-error behavior by default.
+    if (
+        errors
+        and raise_on_error
+        and not (allow_partial_progress and (results["recent"] or results["durable"]))
+    ):
         raise RuntimeError("; ".join(errors))
     return results

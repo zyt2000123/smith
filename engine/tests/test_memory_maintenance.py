@@ -75,6 +75,47 @@ def test_memory_idle_hook_uses_same_maintenance_service(tmp_path: Path) -> None:
     assert results == [True]
 
 
+def test_memory_compilation_timeout_does_not_block_lifecycle(tmp_path: Path, monkeypatch) -> None:
+    import engine.execution.memory_maintenance as memory_maintenance
+
+    async def slow_compilation(*_args, **_kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(memory_maintenance, "_MEMORY_MAINTENANCE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("engine.memory.compile.run_compilation", slow_compilation)
+
+    result = asyncio.run(
+        MemoryMaintenanceService(StaticLLM()).run_compile(tmp_path / "memory")
+    )
+
+    assert result is False
+
+
+def test_memory_compilation_reports_partial_progress(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "recent.jsonl").write_text(
+        '{"task":"keep recent activity","summary":"recent evidence",'
+        '"timestamp":"2026-07-11T00:00:00+00:00"}\n',
+        encoding="utf-8",
+    )
+
+    async def fail_durable(*_args, **_kwargs):
+        raise RuntimeError("reviewer unavailable")
+
+    monkeypatch.setattr("engine.memory.compile.compile_durable", fail_durable)
+
+    result = asyncio.run(
+        MemoryMaintenanceService(StaticLLM()).run_compile(memory_dir)
+    )
+
+    assert result is True
+    assert (memory_dir / "recent.md").is_file()
+
+
 def test_runtime_idle_tick_dispatches_memory_hook(tmp_path: Path) -> None:
     async def run() -> tuple[bool, RuntimeServices]:
         memory_dir = tmp_path / "memory"
