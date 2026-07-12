@@ -2,6 +2,7 @@
 import sys
 from pathlib import Path
 
+from engine.safety.fact_gate import FactGate, FactGateContext
 from engine.safety.tool_guard import GuardResult, PermissionLevel, ToolGuard
 from engine.safety.tool_policy import ToolPolicy
 from engine.tool.interface import ToolCall, ToolDefinition
@@ -74,6 +75,71 @@ def test_uv_add_in_user_project_allowed():
 
 def test_rm_platform_data_blocked():
     assert not _check("rm -rf ~/.agent-smith/agent").allowed
+
+
+def test_memory_views_may_be_written_by_the_memory_path():
+    memory = Path.home() / ".agent-smith" / "agent" / "memory"
+    assert _check(
+        "printf '%s\\n' event >> ~/.agent-smith/agent/memory/recent.jsonl"
+    ).allowed
+    assert _check(
+        f"printf '%s\\n' event >> {memory / 'recent.jsonl'}"
+    ).allowed
+    assert _check(
+        f"printf '%s\\n' view > {memory / 'recent.md'}"
+    ).allowed
+    assert _check(
+        f"printf '%s\\n' facts > {memory / 'durable.md'}"
+    ).allowed
+
+
+def test_platform_writes_outside_memory_remain_blocked():
+    agent_dir = Path.home() / ".agent-smith" / "agent"
+    memory = agent_dir / "memory"
+    assert not _check(
+        f"printf '%s\\n' token > {agent_dir / 'config.yaml'}"
+    ).allowed
+    assert not _check(
+        f"printf '%s\\n' payload > {memory / 'unknown.txt'}"
+    ).allowed
+    assert not _check(
+        f"pip install --target {memory} requests"
+    ).allowed
+
+
+def test_file_tools_only_write_approved_memory_views_in_platform_data():
+    agent_dir = Path.home() / ".agent-smith" / "agent"
+    memory = agent_dir / "memory"
+    assert _check_tool(
+        "write_file", {"path": str(memory / "recent.jsonl"), "content": "event"}
+    ).allowed
+    assert _check_tool(
+        "edit_file", {"path": str(memory / "durable.md"), "old_string": "a", "new_string": "b"}
+    ).allowed
+    assert not _check_tool(
+        "write_file", {"path": str(agent_dir / "config.yaml"), "content": "nope"}
+    ).allowed
+    assert not _check_tool(
+        "edit_file", {"path": str(memory / "unknown.txt"), "old_string": "a", "new_string": "b"}
+    ).allowed
+
+
+def test_memory_exception_does_not_bypass_fact_gate():
+    memory_file = Path.home() / ".agent-smith" / "agent" / "memory" / "recent.jsonl"
+    call = ToolCall(
+        id="t",
+        name="shell",
+        arguments={"command": f"printf '%s\\n' event >> {memory_file}"},
+    )
+    gate = FactGate(FactGateContext("session", "turn"))
+    policy = ToolPolicy(ToolGuard(_RULES), fact_gate=gate)
+
+    first = policy.evaluate(call)
+    assert not first.allowed
+    assert first.challenged
+
+    policy.begin_round()
+    assert policy.evaluate(call).allowed
 
 
 def test_path_tools_are_guarded():

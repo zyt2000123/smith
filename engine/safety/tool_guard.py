@@ -71,7 +71,11 @@ class FileGuard:
 
     def check_path(self, path_str: str, writing: bool = False) -> GuardResult:
         try:
-            target = Path(path_str).resolve()
+            # Shell expands a leading tilde before execution; mirror that here
+            # so the guard evaluates the same target the command will touch.
+            candidate = Path(path_str).expanduser()
+            lexical = Path(os.path.abspath(str(candidate)))
+            target = candidate.resolve()
         except (ValueError, OSError):
             return GuardResult(allowed=False, reason=f"Invalid path: {path_str}")
 
@@ -86,6 +90,35 @@ class FileGuard:
             for part in target.parts:
                 if part in self._SENSITIVE_DIRS:
                     return GuardResult(allowed=False, reason=f"Write inside {part}/ is blocked", needs_confirmation=True)
+
+            # The runtime owns ~/.agent-smith. Only the three memory views are
+            # writable through model-facing file tools; lifecycle code writes
+            # its internal checkpoints through the trusted memory service.
+            try:
+                lexical_platform = lexical.is_relative_to(_PLATFORM_DATA_ROOT)
+                resolved_platform = target.is_relative_to(_PLATFORM_DATA_ROOT)
+                lexical_memory = (
+                    lexical.is_relative_to(_MEMORY_WRITE_ROOT)
+                    and lexical.name in _MEMORY_WRITE_FILES
+                )
+                resolved_memory = (
+                    target.is_relative_to(_MEMORY_WRITE_ROOT)
+                    and target.name in _MEMORY_WRITE_FILES
+                )
+            except ValueError:
+                lexical_platform = resolved_platform = True
+                lexical_memory = resolved_memory = False
+
+            if (lexical_platform or resolved_platform) and not (
+                lexical_memory and resolved_memory
+            ):
+                return GuardResult(
+                    allowed=False,
+                    reason=(
+                        "[platform-protect-001] Platform runtime writes are restricted; "
+                        "only controlled memory files may be written."
+                    ),
+                )
 
         if any(target.is_relative_to(d) for d in self._allowed):
             return GuardResult(allowed=True)
@@ -177,7 +210,11 @@ class SessionWhitelist:
 # ── Shell path extraction (req #4: redirects + pipes) ───────
 
 _REDIRECT_RE = re.compile(r"(?:>>?|[12]>>?)\s*([^\s;|&]+)")
-_ABS_PATH_RE = re.compile(r"(?<!\w)/(?:[a-zA-Z0-9_.~-]+/)+[a-zA-Z0-9_.~-]+")
+_ABS_PATH_RE = re.compile(r"(?<![\w~])/(?:[a-zA-Z0-9_.~-]+/)+[a-zA-Z0-9_.~-]+")
+
+_PLATFORM_DATA_ROOT = (Path.home() / ".agent-smith").resolve()
+_MEMORY_WRITE_ROOT = _PLATFORM_DATA_ROOT / "agent" / "memory"
+_MEMORY_WRITE_FILES = frozenset({"recent.jsonl", "recent.md", "durable.md"})
 
 
 def _extract_shell_paths(command: str) -> tuple[list[str], list[str]]:

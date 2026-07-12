@@ -284,9 +284,29 @@
     "tools": ["shell"],
     "category": "platform_integrity",
     "severity": "high",
-    "patterns": ["(?=.*(Agent-Smith|\\.agent-smith)).*\\bpip3?\\s+install\\b", "(?=.*(Agent-Smith|\\.agent-smith)).*\\buv\\s+(pip\\s+install|add)\\b", "\\b(rm|mv|chmod|chown|truncate|tee)\\b.*(Agent-Smith|\\.agent-smith)", "(>|>>)\\s*[^\\s\"]*(Agent-Smith|\\.agent-smith)"],
+    "patterns": ["(?=.*(Agent-Smith|\\.agent-smith)).*\\bpip3?\\s+install\\b", "(?=.*(Agent-Smith|\\.agent-smith)).*\\buv\\s+(pip\\s+install|add)\\b"],
     "excludePatterns": [],
-    "description": "Command would install packages into or modify the Agent-Smith platform runtime (source tree, venv, or ~/.agent-smith data). Agents must not mutate the platform that runs them.",
+    "description": "Command would install packages into the Agent-Smith platform runtime (source tree, venv, or ~/.agent-smith data). Agents must not mutate the platform that runs them.",
     "remediation": "Work inside the user-provided working directory. Install packages only into the project's own environment, never into the Agent-Smith platform tree."
+  },
+  {
+    "id": "platform-protect-002",
+    "tools": ["shell"],
+    "category": "platform_integrity",
+    "severity": "high",
+    "patterns": ["\\b(rm|mv|chmod|chown|truncate|tee)\\b.*(Agent-Smith|\\.agent-smith)"],
+    "excludePatterns": [],
+    "description": "Command would mutate or remove Agent-Smith platform files. Memory writes must use the controlled memory path.",
+    "remediation": "Use the memory lifecycle hook for memory updates; do not mutate platform files with destructive shell commands."
+  },
+  {
+    "id": "platform-protect-003",
+    "tools": ["shell"],
+    "category": "platform_integrity",
+    "severity": "high",
+    "patterns": ["(>|>>)\\s*[^\\s\"]*(Agent-Smith|\\.agent-smith)"],
+    "excludePatterns": ["(?i)(?:^|/)\\.agent-smith/agent/memory/(?:recent\\.jsonl|recent\\.md|durable\\.md)(?:$|\\s|['\"])"],
+    "description": "Command would redirect output into the Agent-Smith platform runtime. Only the controlled memory files are writable.",
+    "remediation": "Write memory through the lifecycle hook or one of the approved memory files; never redirect into other platform paths."
   }
 ]
