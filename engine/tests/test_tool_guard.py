@@ -4,7 +4,7 @@ from pathlib import Path
 
 from engine.safety.tool_guard import GuardResult, PermissionLevel, ToolGuard
 from engine.safety.tool_policy import ToolPolicy
-from engine.tool.interface import ToolCall
+from engine.tool.interface import ToolCall, ToolDefinition
 
 _RULES = Path(__file__).resolve().parents[2] / "agents" / "safety" / "dangerous_commands.json"
 
@@ -93,6 +93,72 @@ def test_path_tools_are_guarded():
 def test_web_tool_aliases_keep_read_permission_level():
     assert _check_tool("websearch", {"query": "docs"}).level is PermissionLevel.READ
     assert _check_tool("webfetch", {"url": "https://example.com"}).level is PermissionLevel.READ
+
+
+def test_metadata_declared_path_args_are_guarded_without_hardcoded_entry():
+    # custom_writer is absent from ToolGuard's fallback tables — checks must
+    # come purely from the declared ToolDefinition metadata.
+    defn = ToolDefinition(
+        name="custom_writer",
+        description="",
+        path_args=("target",),
+        is_write_tool=True,
+    )
+    guard = ToolGuard(_RULES, tool_registry={"custom_writer": defn})
+
+    outside = guard.check(
+        ToolCall(id="t", name="custom_writer", arguments={"target": "/etc/hosts"})
+    )
+    assert not outside.allowed
+
+    env_write = guard.check(
+        ToolCall(
+            id="t",
+            name="custom_writer",
+            arguments={"target": str(Path.home() / "proj" / ".env")},
+        )
+    )
+    assert not env_write.allowed
+    assert env_write.needs_confirmation
+
+
+def test_metadata_permission_level_overrides_fallback():
+    defn = ToolDefinition(name="notes_read", description="", permission_level="read")
+    guard = ToolGuard(_RULES, tool_registry={"notes_read": defn})
+
+    assert guard.check(ToolCall(id="t", name="notes_read", arguments={})).level is PermissionLevel.READ
+    # Without metadata an unknown tool stays at the EXECUTE default.
+    assert ToolGuard(_RULES).check(ToolCall(id="t", name="notes_read", arguments={})).level is PermissionLevel.EXECUTE
+
+
+def test_session_whitelist_extends_boundary_but_not_sensitive_blocks():
+    guard = ToolGuard(_RULES)
+    call = ToolCall(id="t", name="list_dir", arguments={"path": "/opt/data/project"})
+
+    assert not guard.check(call).allowed
+
+    guard.whitelist.allow_path("/opt/data")
+    assert guard.check(call).allowed
+
+    # Sensitive paths stay blocked even when whitelisted.
+    ssh_path = str(Path.home() / ".ssh")
+    guard.whitelist.allow_path(ssh_path)
+    assert not guard.check(ToolCall(id="t", name="list_dir", arguments={"path": ssh_path})).allowed
+
+
+def test_dollar_anchored_rule_patterns_match_raw_argument_values():
+    home = Path.home()
+
+    pem = _check_tool("read_file", {"path": str(home / "certs" / "server.pem")})
+    assert not pem.allowed
+    assert "sens-file-004" in pem.reason
+
+    env = _check_tool("read_file", {"path": str(home / "proj" / ".env")})
+    assert not env.allowed
+    assert "sens-file-003" in env.reason
+
+    # Exclude patterns still apply — .env.example stays readable.
+    assert _check_tool("read_file", {"path": str(home / "proj" / ".env.example")}).allowed
 
 
 if __name__ == "__main__":

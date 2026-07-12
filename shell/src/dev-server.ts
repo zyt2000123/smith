@@ -8,7 +8,6 @@ const REQUIRED_PATHS = [
   "/api/config/llm",
   "/api/agent",
   "/api/agent/ensure",
-  "/api/plugins",
   "/api/agent/skills",
   "/api/agent/sessions/{session_id}/messages/stream",
 ] as const;

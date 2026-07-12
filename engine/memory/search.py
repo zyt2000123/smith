@@ -129,10 +129,24 @@ class SearchIndex:
         await self._db.commit()
 
     async def search(self, query: str, top_k: int = 10) -> list[dict]:
-        if not self._db or not query.strip():
+        stripped = query.strip()
+        if not self._db or not stripped:
             return []
-        safe_query = '"' + query.replace('"', '""') + '"'
         try:
+            if len(stripped) < 3:
+                # The trigram tokenizer matches nothing for queries shorter
+                # than 3 characters (common for 2-char CJK words) — fall back
+                # to a LIKE scan over the small episode corpus.
+                escaped = (
+                    stripped.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+                )
+                rows = await self._db.execute_fetchall(
+                    "SELECT entry_id FROM memory_fts "
+                    r"WHERE content LIKE ? ESCAPE '\' LIMIT ?",
+                    (f"%{escaped}%", top_k),
+                )
+                return [{"id": r["entry_id"], "score": 0.0} for r in rows]
+            safe_query = '"' + stripped.replace('"', '""') + '"'
             rows = await self._db.execute_fetchall(
                 "SELECT entry_id, bm25(memory_fts) AS score "
                 "FROM memory_fts WHERE memory_fts MATCH ? "
@@ -140,5 +154,6 @@ class SearchIndex:
                 (safe_query, top_k),
             )
         except Exception:
+            logger.warning("memory search query failed", exc_info=True)
             return []
         return [{"id": r["entry_id"], "score": -r["score"]} for r in rows]

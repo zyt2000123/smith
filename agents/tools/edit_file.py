@@ -57,7 +57,7 @@ async def execute(
         )
 
     try:
-        from snapshot import get_snapshot
+        from engine.snapshot import get_snapshot
         get_snapshot().track(resolved)
     except Exception:
         pass

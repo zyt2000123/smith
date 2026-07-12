@@ -8,8 +8,9 @@ import pytest
 
 from common.yaml_utils import YamlConfigError
 from engine.llm.adapters.anthropic import AnthropicAdapter
+from engine.llm.adapters.openai import OpenAIAdapter
 from engine.llm.adapters._retry import MAX_RETRY_AFTER_SECONDS, retry_after_seconds
-from engine.llm.client import LLMClient, ProviderClient
+from engine.llm.client import ProviderClient
 from engine.llm.contracts import GEMINI_OPENAI_BASE_URL, LLMProviderConfig, LLMRequest
 from engine.llm.events import ProviderEventType
 from engine.llm.factory import create_llm_client, normalize_provider_name, supported_provider_names
@@ -27,6 +28,13 @@ class _SseStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         return None
+
+
+def _openai_client() -> ProviderClient:
+    return ProviderClient(OpenAIAdapter(LLMProviderConfig(
+        provider="openai", api_key="k",
+        base_url="http://llm.test", model="m",
+    )))
 
 
 def _anthropic_config(**overrides: object) -> LLMProviderConfig:
@@ -309,7 +317,7 @@ def test_anthropic_moves_late_system_instruction_into_ordered_user_turn() -> Non
 
 
 def test_openai_response_size_cap_aborts_before_full_parse() -> None:
-    from engine.llm.adapters.openai import _MAX_RESPONSE_BYTES, OpenAIAdapter
+    from engine.llm.adapters._http import MAX_RESPONSE_BYTES as _MAX_RESPONSE_BYTES
     from engine.llm.contracts import LLMResponseError as _Err
 
     adapter = OpenAIAdapter(LLMProviderConfig(
@@ -330,7 +338,7 @@ def test_openai_response_size_cap_aborts_before_full_parse() -> None:
 
 
 def test_anthropic_response_size_cap() -> None:
-    from engine.llm.adapters.anthropic import _MAX_RESPONSE_BYTES
+    from engine.llm.adapters._http import MAX_RESPONSE_BYTES as _MAX_RESPONSE_BYTES
     from engine.llm.contracts import LLMResponseError as _Err
 
     adapter = AnthropicAdapter(_anthropic_config())
@@ -350,13 +358,13 @@ def test_anthropic_response_size_cap() -> None:
 def test_openai_non_string_content_raises() -> None:
     from engine.llm.contracts import LLMResponseError as _Err
 
-    client = LLMClient(api_key="k", base_url="http://llm.test", model="m")
+    client = _openai_client()
     body = json.dumps({"choices": [{"message": {"content": 42}}]}).encode()
 
     async def fake_send(request, *, stream: bool = False):
         return httpx.Response(200, request=request, stream=_SseStream([body]))
 
-    client._http.send = fake_send  # type: ignore[assignment]
+    client.adapter._http.send = fake_send  # type: ignore[assignment]
     with pytest.raises(_Err, match="content must be a string"):
         asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
     asyncio.run(client.close())
@@ -365,7 +373,7 @@ def test_openai_non_string_content_raises() -> None:
 def test_openai_stream_malformed_delta_raises() -> None:
     from engine.llm.contracts import LLMResponseError as _Err
 
-    client = LLMClient(api_key="k", base_url="http://llm.test", model="m")
+    client = _openai_client()
 
     async def fake_send(request, *, stream: bool):
         return httpx.Response(200, request=request, stream=_SseStream([
@@ -373,7 +381,7 @@ def test_openai_stream_malformed_delta_raises() -> None:
             b"data: [DONE]\n\n",
         ]))
 
-    client._http.send = fake_send  # type: ignore[assignment]
+    client.adapter._http.send = fake_send  # type: ignore[assignment]
     with pytest.raises(_Err, match="delta must be an object"):
         asyncio.run(_collect_events_generic(client))
     asyncio.run(client.close())
@@ -419,12 +427,12 @@ def test_openai_stream_failure_raises_llm_response_error() -> None:
     """Streaming HTTP failures are wrapped as LLMResponseError, not raw httpx."""
     from engine.llm.contracts import LLMResponseError as _Err
 
-    client = LLMClient(api_key="k", base_url="http://llm.test", model="m")
+    client = _openai_client()
 
     async def fake_send(request, *, stream: bool):
         return httpx.Response(401, request=request, stream=_SseStream([b"unauthorized"]))
 
-    client._http.send = fake_send  # type: ignore[assignment]
+    client.adapter._http.send = fake_send  # type: ignore[assignment]
     with pytest.raises(_Err, match="HTTP 401"):
         asyncio.run(_collect_events_generic(client))
     asyncio.run(client.close())

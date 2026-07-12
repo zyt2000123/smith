@@ -6,8 +6,20 @@ import json as json_mod
 import httpx
 import pytest
 
-from engine.llm.client import LLMClient, LLMResponseError, LLMTimeouts
+from engine.llm.adapters.openai import OpenAIAdapter
+from engine.llm.client import ProviderClient
+from engine.llm.contracts import LLMProviderConfig, LLMResponseError, LLMTimeouts
 from engine.llm.events import ProviderEventType
+
+
+def _make_client(timeouts: LLMTimeouts | None = None) -> ProviderClient:
+    return ProviderClient(OpenAIAdapter(LLMProviderConfig(
+        provider="openai",
+        api_key="k",
+        base_url="http://llm.test",
+        model="m",
+        timeouts=timeouts or LLMTimeouts(),
+    )))
 
 
 class _SseStream(httpx.AsyncByteStream):
@@ -34,9 +46,9 @@ class _InterruptedSseStream(httpx.AsyncByteStream):
         return None
 
 
-def _client_with_post(post_fn) -> LLMClient:
+def _client_with_post(post_fn) -> ProviderClient:
     """Adapt old-style fake_post(url, json) -> Response into send()-based mock."""
-    client = LLMClient(api_key="k", base_url="http://llm.test", model="m")
+    client = _make_client()
 
     async def wrapped_send(request, *, stream: bool = False):
         url = str(request.url)
@@ -49,13 +61,13 @@ def _client_with_post(post_fn) -> LLMClient:
             stream=_SseStream([orig.content]),
         )
 
-    client._http.send = wrapped_send  # type: ignore[assignment]
+    client.adapter._http.send = wrapped_send  # type: ignore[assignment]
     return client
 
 
-def _client_with_send(send_fn) -> LLMClient:
-    client = LLMClient(api_key="k", base_url="http://llm.test", model="m")
-    client._http.send = send_fn  # type: ignore[assignment]
+def _client_with_send(send_fn) -> ProviderClient:
+    client = _make_client()
+    client.adapter._http.send = send_fn  # type: ignore[assignment]
     return client
 
 
@@ -70,10 +82,10 @@ def _successful_stream_response(request: httpx.Request) -> httpx.Response:
     )
 
 
-def _run_request(client: LLMClient) -> None:
+def _run_request(client: ProviderClient) -> None:
     try:
-        asyncio.run(client._request({"model": "m", "messages": []}))
-    except RuntimeError:
+        asyncio.run(client.adapter._request({"model": "m", "messages": []}))
+    except LLMResponseError:
         pass
     finally:
         asyncio.run(client.close())
@@ -168,6 +180,23 @@ def test_request_honors_retry_after_header(monkeypatch) -> None:
     assert retry_delays == [7.0]
 
 
+def test_request_failure_includes_bounded_error_body() -> None:
+    """Non-retryable HTTP failures must surface the provider's error body."""
+    async def fake_post(url, json):
+        return httpx.Response(
+            400,
+            request=httpx.Request("POST", "http://llm.test/chat/completions"),
+            text='{"error":{"message":"model not found"}}',
+        )
+
+    client = _client_with_post(fake_post)
+    try:
+        with pytest.raises(LLMResponseError, match="model not found"):
+            asyncio.run(client.chat([{"role": "user", "content": "hello"}]))
+    finally:
+        asyncio.run(client.close())
+
+
 def test_chat_reports_malformed_tool_arguments_as_provider_error() -> None:
     async def fake_post(url, json):
         return httpx.Response(
@@ -231,13 +260,8 @@ def test_client_uses_distinct_non_stream_and_stream_timeouts() -> None:
         body = json_mod.dumps({"choices": [{"message": {}}]}).encode()
         return httpx.Response(200, request=request, stream=_SseStream([body]))
 
-    client = LLMClient(
-        api_key="k",
-        base_url="http://llm.test",
-        model="m",
-        timeouts=selected_timeouts,
-    )
-    client._http.send = fake_send  # type: ignore[assignment]
+    client = _make_client(selected_timeouts)
+    client.adapter._http.send = fake_send  # type: ignore[assignment]
     try:
         asyncio.run(client.chat([{"role": "user", "content": "hello"}]))
     finally:
@@ -245,7 +269,7 @@ def test_client_uses_distinct_non_stream_and_stream_timeouts() -> None:
 
     non_stream_timeout = captured["timeout"]
     assert non_stream_timeout == {"connect": 1.0, "read": 2.0, "write": 4.0, "pool": 5.0}
-    assert client._http.timeout.read == 3.0
+    assert client.adapter._http.timeout.read == 3.0
 
 
 def test_chat_events_exposes_typed_provider_deltas_and_completion() -> None:
@@ -269,8 +293,7 @@ def test_chat_events_exposes_typed_provider_deltas_and_completion() -> None:
             ]),
         )
 
-    client = LLMClient(api_key="k", base_url="http://llm.test", model="m")
-    client._http.send = fake_send  # type: ignore[assignment]
+    client = _client_with_send(fake_send)
     try:
         events = asyncio.run(_collect_events(client))
     finally:
@@ -395,5 +418,5 @@ def test_chat_events_does_not_retry_after_content_delta(monkeypatch, first_chunk
     assert retry_delays == []
 
 
-async def _collect_events(client: LLMClient):
+async def _collect_events(client: ProviderClient):
     return [event async for event in client.chat_events([{"role": "user", "content": "hello"}])]

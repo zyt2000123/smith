@@ -12,15 +12,10 @@ from .infrastructure.database import get_app_db
 from .routers import (
     agent,
     config,
-    plugins,
 )
 from .services.scheduler import run_scheduler
-from .services.plugin_service import PluginService
 
-from common.config import BUILTIN_PLUGINS_DIR
 from .services.engine_runtime import close_shared_llm_clients, load_runtime_identity_catalog
-_plugin_service = PluginService(BUILTIN_PLUGINS_DIR)
-plugins.set_service(_plugin_service)
 
 
 @asynccontextmanager
@@ -28,9 +23,7 @@ async def lifespan(app: FastAPI):
     await get_app_db()
     load_runtime_identity_catalog(force=True)
     scheduler_task = asyncio.create_task(run_scheduler())
-    await _plugin_service.startup()
     yield
-    await _plugin_service.shutdown()
     scheduler_task.cancel()
     try:
         await scheduler_task
@@ -51,7 +44,6 @@ app.add_middleware(
 
 app.include_router(agent.router, dependencies=[Depends(require_auth)])
 app.include_router(config.router, dependencies=[Depends(require_auth)])
-app.include_router(plugins.router, dependencies=[Depends(require_auth)])
 
 
 @app.get("/api/health")

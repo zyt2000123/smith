@@ -9,6 +9,13 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
+# Canonical memory layer filenames
+# ---------------------------------------------------------------------------
+
+MEMORY_LAYER_FILES: tuple[str, ...] = ("durable.md", "recent.md")
+
+
+# ---------------------------------------------------------------------------
 # Secret detection — shared by dream.py, store.py, memory_ops.py
 # ---------------------------------------------------------------------------
 
@@ -100,15 +107,17 @@ def atomic_write_text(path: Path, content: str) -> None:
     )
     temp_path = Path(temp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            # fdopen failed, so the raw fd is still ours to close exactly once.
+            os.close(fd)
+            raise
+        with handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
     except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
         temp_path.unlink(missing_ok=True)
         raise

@@ -99,7 +99,9 @@ async def run_pipeline(
                         node.skill_name,
                     )
                     messages = base_messages + [{"role": "user", "content": f"[Skill: {node.skill_name}] {user_message}"}]
-                    if attempt == 1 and context.get(CTX_RETRY_HINT):
+                    # attempt==1：base gate 重试；attempt==0 且有 hint：域门禁
+                    # retry 重进本节点（见下方 retry 分支写入 CTX_RETRY_HINT）。
+                    if attempt <= 1 and context.get(CTX_RETRY_HINT):
                         messages.append({"role": "user", "content": context[CTX_RETRY_HINT]})
                     elif attempt == 2:
                         messages.append({"role": "user", "content": "Switch strategy: try a completely different approach."})
@@ -109,7 +111,7 @@ async def run_pipeline(
                     )
                 else:
                     skill_context = dict(context)
-                    if attempt == 1 and skill_context.get(CTX_RETRY_HINT):
+                    if attempt <= 1 and skill_context.get(CTX_RETRY_HINT):
                         skill_context[CTX_RUBRIC_FEEDBACK] = skill_context[CTX_RETRY_HINT]
                     elif attempt == 2:
                         skill_context[CTX_RUBRIC_FEEDBACK] = "Switch strategy: try a completely different approach."
@@ -117,6 +119,7 @@ async def run_pipeline(
                     event_stream = execute_skill_events(
                         skill, llm, tool_registry, messages, skill_context,
                         max_react_iters, tool_guard=tool_guard, provisional_lifecycle=False,
+                        react_event_loop_fn=react_event_loop,
                     )
 
                 result = _NodeResult()
@@ -223,12 +226,20 @@ async def run_pipeline(
                 node_idx = target_idx
                 continue
 
+            # 域门禁产出的 retry_hint 必须随重试流回节点，否则唯一一次
+            # retry 是盲跑（LLMGate 特意生成的反馈被静默丢弃）。
+            if gate_result.retry_hint:
+                context[CTX_RETRY_HINT] = gate_result.retry_hint
             yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "retry"})
         except Exception:
             if not provision_settled:
                 yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
                     "provision_id": provision_id, "reason": "execution_error",
                 })
+            # 进程内异常与 blocked/incomplete/failed 一样是终态：restore 尚未
+            # 接线，遗留 checkpoint 只会在 list_active 里堆成永远无人消费的
+            # "可恢复会话"。真正的进程崩溃本来就走不到这里，不受影响。
+            _clear_checkpoint(context)
             raise
 
     # Provisional events now reach the session UI.  The final semantic text is

@@ -160,18 +160,6 @@ def _increment_counter(counter_file: Path, retry_threshold: int) -> int:
     return count
 
 
-def _dream_report_completed(report) -> bool:
-    """Return whether Dream maintenance should reset its retry counter."""
-    if report.errors:
-        return False
-    benign_skips = {
-        "",
-        "no durable.md",
-        "durable.md too short to consolidate",
-    }
-    return report.skipped in benign_skips
-
-
 async def save_conversation_memory(
     agent_dir: Path,
     user_msg: str,
@@ -190,8 +178,8 @@ async def save_conversation_memory(
 
     recent_file = memory_dir / "recent.jsonl"
     now = datetime.now(timezone.utc).isoformat()
-    bounded_task = _sanitize_event_value(user_msg)
-    bounded_summary = _sanitize_event_value(reply)
+    bounded_task = sanitize_event_value(user_msg)
+    bounded_summary = sanitize_event_value(reply)
 
     entry = {
         "task": bounded_task,
@@ -220,7 +208,7 @@ async def save_conversation_memory(
             atomic_write_text(dream_counter, "0")
 
 
-def _sanitize_event_value(value: str) -> str:
+def sanitize_event_value(value: str) -> str:
     """Bound an event and redact values unsafe for future prompt use."""
     bounded = _bounded_event_value(value)
     cleaned, secrets_removed, injections_removed = sanitize_memory_text(bounded)

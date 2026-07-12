@@ -76,14 +76,6 @@ class AppPaths:
     def safety_rules_path(self) -> Path:
         return self.project_root / "agents" / "safety" / "dangerous_commands.json"
 
-    @property
-    def builtin_plugins_dir(self) -> Path:
-        return self.project_root / "agents" / "plugins"
-
-    @property
-    def user_plugins_dir(self) -> Path:
-        return self.data_dir / "plugins"
-
     def ensure_base_dirs(self) -> None:
         _ensure_private_dir(self.data_dir)
         _ensure_private_dir(self.agent_dir)

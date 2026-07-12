@@ -9,12 +9,12 @@ from pathlib import Path
 import httpx
 
 from engine.tool.interface import ToolCall
-from engine.execution.agent_loop import (
-    _mcp_server_log_summary,
-    _mcp_tool_prefix_from_config,
-    _mcp_transport_from_config,
+from engine.mcp.config import (
+    mcp_server_log_summary as _mcp_server_log_summary,
+    mcp_tool_prefix_from_config as _mcp_tool_prefix_from_config,
+    mcp_transport_from_config as _mcp_transport_from_config,
 )
-from engine.tool.mcp_client import (
+from engine.mcp.client import (
     MAX_TOOL_NAME_LENGTH,
     MCPClient,
     MCPTool,
@@ -415,6 +415,23 @@ def test_mcp_tool_names_are_capped_with_stable_hash_suffix():
     assert schema_name == MCPClient([sys.executable, "-V"]).to_openai_schemas(
         [MCPTool(long_name, "", {})]
     )[0]["function"]["name"]
+
+
+def test_stdio_transport_serializes_concurrent_requests():
+    """Concurrent tool calls over one stdio pipe must not steal each
+    other's responses (regression: interleaved reads dropped replies)."""
+    async def run():
+        with tempfile.TemporaryDirectory() as tmp:
+            client = await _new_client(Path(tmp))
+            try:
+                results = await asyncio.gather(
+                    *[client.call_tool("ok", {}) for _ in range(5)]
+                )
+                return results
+            finally:
+                await client.close()
+
+    assert asyncio.run(run()) == ["ok result"] * 5
 
 
 def test_stdio_transport_waits_after_killing_timed_out_process():

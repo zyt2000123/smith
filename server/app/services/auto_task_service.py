@@ -73,7 +73,10 @@ class AutoTaskService:
             updates["next_run_at"] = self._calc_next_run(new_type, new_config)
 
         row = await self.repo.update(task_id, updates)
-        return AutoTaskOut(**row)  # type: ignore[arg-type]
+        if row is None:
+            # Deleted by a concurrent request between the existence check and the update.
+            raise HTTPException(404, "Auto task not found")
+        return AutoTaskOut(**row)
 
     async def delete_auto_task(self, task_id: str) -> None:
         deleted = await self.repo.delete(task_id)

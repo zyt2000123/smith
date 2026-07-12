@@ -1,4 +1,4 @@
-import type { PluginManifest, SkillSummary } from "./api.js";
+import type { SkillSummary } from "./api.js";
 import type { NodeBridge } from "./bridge.js";
 import { createSetupDraft } from "./setup.js";
 import type { AppStore } from "./store.js";
@@ -27,14 +27,12 @@ const HELP_TEXT = [
   "- `/config` — edit LLM config",
   "- `/sessions` — recent sessions",
   "- `/skills` — inspect skills",
-  "- `/plugins` — inspect plugins",
   "- `/resume <id>` — resume session",
   "- `/compact` / `/transcript` — switch view",
-  "- `/plugin <enable|disable> <name>`",
   "- `/home` — welcome · `/exit` — quit",
 ].join("\n");
 
-export function buildSlashItems(skills: SkillSummary[], plugins: PluginManifest[]): SlashItem[] {
+export function buildSlashItems(skills: SkillSummary[]): SlashItem[] {
   const commands: SlashItem[] = [
     {
       id: "help",
@@ -68,14 +66,6 @@ export function buildSlashItems(skills: SkillSummary[], plugins: PluginManifest[
       title: "/skills",
       command: "/skills",
       description: "Inspect skills.",
-      category: "Commands",
-    },
-    {
-      id: "plugins",
-      kind: "command",
-      title: "/plugins",
-      command: "/plugins",
-      description: "Inspect plugins.",
       category: "Commands",
     },
     {
@@ -115,14 +105,6 @@ export function buildSlashItems(skills: SkillSummary[], plugins: PluginManifest[
       category: "Skills",
       skill,
     })),
-    ...plugins.map((plugin) => ({
-      id: `pl-${plugin.name}`,
-      kind: "command" as const,
-      title: plugin.enabled ? `/plugin disable ${plugin.name}` : `/plugin enable ${plugin.name}`,
-      command: plugin.enabled ? `/plugin disable ${plugin.name}` : `/plugin enable ${plugin.name}`,
-      description: plugin.enabled ? `Disable ${plugin.name}.` : `Enable ${plugin.name}.`,
-      category: "Plugins",
-    })),
   ];
 }
 
@@ -160,20 +142,6 @@ function openConfig(context: CommandContext): void {
   });
 }
 
-async function runPluginCommand(args: string[], context: CommandContext): Promise<void> {
-  const [action, name] = args;
-  if ((action !== "enable" && action !== "disable") || !name) {
-    context.getState().set({ statusLine: "Usage: /plugin <enable|disable> <name>" });
-    return;
-  }
-
-  try {
-    await context.bridge.togglePlugin(name, action === "enable");
-  } catch (error) {
-    context.getState().set({ statusLine: `Plugin error: ${errorMessage(error)}` });
-  }
-}
-
 async function resumeSession(args: string[], context: CommandContext): Promise<void> {
   const target = args[0];
   if (!target) {
@@ -204,10 +172,6 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
     context.getState().resetChat();
   },
   "/config": (_args, context) => openConfig(context),
-  "/plugins": (_args, context) => {
-    const state = context.getState();
-    state.set({ panel: "plugins", statusLine: `${state.plugins.length} plugin(s).` });
-  },
   "/skills": (_args, context) => {
     const state = context.getState();
     state.set({ panel: "skills", statusLine: `${state.skills.length} skill(s).` });
@@ -224,7 +188,6 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
     clearTerminal();
     context.getState().clearChat();
   },
-  "/plugin": runPluginCommand,
   "/resume": resumeSession,
   "/home": (_args, context) => context.getState().set({ panel: "welcome" }),
   "/help": (_args, context) => {

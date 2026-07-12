@@ -62,6 +62,86 @@ def test_duplicate_tool_registration_is_rejected():
         raise AssertionError("duplicate tool registration was accepted")
 
 
+def test_register_stores_security_metadata():
+    registry = ToolRegistry()
+    registry.register(
+        "custom_writer",
+        "",
+        {},
+        lambda: "OK",
+        path_args=("target",),
+        list_path_args=("files",),
+        is_write_tool=True,
+        permission_level="write",
+        read_actions=("get", "list"),
+    )
+
+    defn = registry.list_tools()[0]
+    assert defn.path_args == ("target",)
+    assert defn.list_path_args == ("files",)
+    assert defn.is_write_tool
+    assert defn.permission_level == "write"
+    assert defn.read_actions == frozenset({"get", "list"})
+
+
+def test_register_rejects_invalid_permission_level():
+    registry = ToolRegistry()
+    try:
+        registry.register("bad", "", {}, lambda: "OK", permission_level="root")
+    except ValueError as exc:
+        assert "permission_level" in str(exc)
+    else:
+        raise AssertionError("invalid permission_level was accepted")
+
+
+def test_load_providers_reads_security_metadata_from_tool_meta():
+    provider = (
+        "TOOL_META = {\n"
+        '    "name": "sample_writer",\n'
+        '    "description": "writes",\n'
+        '    "parameters": {"type": "object", "properties": {}},\n'
+        '    "path_args": ["target"],\n'
+        '    "list_path_args": ["files"],\n'
+        '    "is_write_tool": True,\n'
+        '    "permission_level": "write",\n'
+        '    "read_actions": ["get"],\n'
+        "}\n"
+        "\n"
+        "def execute(**kwargs):\n"
+        '    return "OK"\n'
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "sample_writer.py").write_text(provider, encoding="utf-8")
+        registry = ToolRegistry()
+        registry.load_providers(Path(tmp))
+
+    defn = {t.name: t for t in registry.list_tools()}["sample_writer"]
+    assert defn.path_args == ("target",)
+    assert defn.list_path_args == ("files",)
+    assert defn.is_write_tool
+    assert defn.permission_level == "write"
+    assert defn.read_actions == frozenset({"get"})
+
+
+def test_load_providers_skips_provider_with_invalid_security_metadata():
+    provider = (
+        "TOOL_META = {\n"
+        '    "name": "broken_meta",\n'
+        '    "parameters": {"type": "object", "properties": {}},\n'
+        '    "path_args": "target",\n'
+        "}\n"
+        "\n"
+        "def execute(**kwargs):\n"
+        '    return "OK"\n'
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "broken_meta.py").write_text(provider, encoding="utf-8")
+        registry = ToolRegistry()
+        registry.load_providers(Path(tmp))
+
+    assert registry.list_tool_names(include_disabled=True) == []
+
+
 def test_tool_registry_wraps_handler_without_changing_schema():
     registry = ToolRegistry()
     registry.register(

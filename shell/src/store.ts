@@ -5,7 +5,7 @@
 
 import { createStore } from "zustand/vanilla";
 import { applyToolActivity, createToolActivity, type ToolActivity } from "./activity.js";
-import type { AgentProfile, LlmConfig, PluginManifest, Session, SkillSummary, StreamEvent, TokenUsage } from "./api.js";
+import type { AgentProfile, LlmConfig, Session, SkillSummary, StreamEvent, TokenUsage } from "./api.js";
 import { createEmptyConversation } from "./conversation.js";
 import { HISTORY_LIMIT } from "./history.js";
 import {
@@ -17,7 +17,7 @@ import {
   type TranscriptViewMode,
 } from "./transcript-state.js";
 
-export type Panel = "welcome" | "chat" | "sessions" | "plugins" | "skills";
+export type Panel = "welcome" | "chat" | "sessions" | "skills";
 export type Mode = "boot" | "setup" | "chat";
 
 export type SetupDraft = {
@@ -40,7 +40,6 @@ export type AppState = {
   config: LlmConfig | null;
   agent: AgentProfile | null;
   sessions: Session[];
-  plugins: PluginManifest[];
   skills: SkillSummary[];
   currentSession: Session | null;
   transcript: TranscriptEntry[];
@@ -74,7 +73,6 @@ export type AppActions = {
   hydrate: (opts: {
     agent: AgentProfile;
     sessions: Session[];
-    plugins: PluginManifest[];
     skills: SkillSummary[];
     config: LlmConfig;
     notices?: string[];
@@ -86,7 +84,6 @@ export type AppStore = AppState & AppActions;
 type HydrateOptions = {
   agent: AgentProfile;
   sessions: Session[];
-  plugins: PluginManifest[];
   skills: SkillSummary[];
   config: LlmConfig;
   notices?: string[];
@@ -98,7 +95,6 @@ function hydrateShellState(state: AppState, options: HydrateOptions): Partial<Ap
   return {
     agent: options.agent,
     sessions: options.sessions,
-    plugins: options.plugins,
     skills: options.skills,
     config: options.config,
     mode: "chat",
@@ -117,7 +113,6 @@ export function createAppStore(initialHistory: string[] = []) {
     config: null,
     agent: null,
     sessions: [],
-    plugins: [],
     skills: [],
     currentSession: null,
     transcript: [],

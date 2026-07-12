@@ -185,6 +185,23 @@ class SkillChain:
                 data = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
                 route = data.get("route", yaml_file.stem)
             except Exception:
+                logger.warning(
+                    "failed to read route key from %s; falling back to file stem",
+                    yaml_file, exc_info=True,
+                )
                 route = yaml_file.stem
+            if not isinstance(route, str) or not route:
+                # 非字符串 route（如 `route: 123`）按原样入库后，字符串
+                # pipeline_id 永远查不到它，只会报一句误导性的 missing pipeline。
+                logger.warning(
+                    "pipeline %s declares non-string route %r; using file stem",
+                    yaml_file.name, route,
+                )
+                route = yaml_file.stem
+            if route in result:
+                logger.warning(
+                    "duplicate pipeline route %r: %s overrides an earlier definition",
+                    route, yaml_file.name,
+                )
             result[route] = chain
         return result

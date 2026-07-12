@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from engine.llm.port import LLMPort
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +111,7 @@ def needs_compaction(conversation: list[dict], context_limit: int = 120000) -> b
     return _conversation_tokens(conversation) > context_limit * CONTEXT_TRIGGER_RATIO
 
 
-async def compress(conversation: list[dict], llm: "LLMPort" = None) -> list[dict]:
+async def compress(conversation: list[dict], llm: "LLMPort | None" = None) -> list[dict]:
     """Two-stage compression: prune first, compact if still over threshold.
 
     Returns the conversation list (mutated in-place for prune, replaced for compact).

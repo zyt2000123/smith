@@ -58,59 +58,44 @@ def _memory_dir(memory_dir: str | Path | None = None) -> Path:
     return Path.home() / ".agent-smith" / "agent" / "memory"
 
 
-def _check_sensitive(text: str) -> str | None:
+def _engine_memory():
+    """Import engine.memory, adding the repo root to sys.path when this tool
+    module is loaded standalone (outside an installed engine package)."""
     try:
-        from engine.memory._files import contains_injection, contains_secret
+        import engine.memory
     except ModuleNotFoundError:
         import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from engine.memory._files import contains_injection, contains_secret
-    if contains_secret(text):
+        root = str(Path(__file__).resolve().parents[2])
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        import engine.memory
+    return engine.memory
+
+
+def _check_sensitive(text: str) -> str | None:
+    mem = _engine_memory()
+    if mem.contains_secret(text):
         return "Memory rejected: contains sensitive information"
-    if contains_injection(text):
+    if mem.contains_injection(text):
         return "Memory rejected: contains instruction-injection patterns"
     return None
 
 
 def _sanitize_for_tool_output(text: str) -> str:
     """Keep legacy memory content safe before it re-enters model context."""
-    try:
-        from engine.memory._files import sanitize_memory_text
-    except ModuleNotFoundError:
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from engine.memory._files import sanitize_memory_text
-    return sanitize_memory_text(text)[0]
+    return _engine_memory().sanitize_memory_text(text)[0]
 
 
 def _safe_file_in_dir(root: Path, path: Path) -> Path | None:
-    try:
-        from engine.memory._files import safe_file_in_dir
-    except ModuleNotFoundError:
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from engine.memory._files import safe_file_in_dir
-    return safe_file_in_dir(root, path)
+    return _engine_memory().safe_file_in_dir(root, path)
 
 
 def _safe_markdown_files(directory: Path) -> list[Path]:
-    try:
-        from engine.memory._files import safe_markdown_files
-    except ModuleNotFoundError:
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from engine.memory._files import safe_markdown_files
-    return safe_markdown_files(directory)
+    return _engine_memory().safe_markdown_files(directory)
 
 
 def _sanitize_event_value_for_storage(value: str) -> str:
-    try:
-        from engine.memory.store import _sanitize_event_value
-    except ModuleNotFoundError:
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from engine.memory.store import _sanitize_event_value
-    return _sanitize_event_value(value)
+    return _engine_memory().sanitize_event_value(value)
 
 
 async def execute(
@@ -191,7 +176,7 @@ async def _search(mem_dir: Path, query: str) -> str:
 
     matches: list[str] = []
 
-    for name in ("durable.md", "recent.md"):
+    for name in _engine_memory().MEMORY_LAYER_FILES:
         path = _safe_file_in_dir(mem_dir, mem_dir / name)
         if path is not None:
             content = _sanitize_for_tool_output(path.read_text(encoding="utf-8"))
@@ -211,6 +196,8 @@ async def _search(mem_dir: Path, query: str) -> str:
                 if any(kw in line.lower() for kw in keywords):
                     try:
                         entry = json.loads(line)
+                        if not isinstance(entry, dict):
+                            continue
                         task = _sanitize_for_tool_output(str(entry.get("task", "?")))
                         summary = _sanitize_for_tool_output(str(entry.get("summary", "?")))
                         content = f"{task} {summary}"
@@ -244,11 +231,13 @@ async def _create_episode(
     for line in recent_file.read_text(encoding="utf-8").strip().splitlines():
         try:
             entry = json.loads(line)
-            text = f"{entry.get('task', '')} {entry.get('summary', '')}".lower()
-            if any(kw in text for kw in topic_keywords):
-                related.append(entry)
         except json.JSONDecodeError:
             continue
+        if not isinstance(entry, dict):
+            continue
+        text = f"{entry.get('task', '')} {entry.get('summary', '')}".lower()
+        if any(kw in text for kw in topic_keywords):
+            related.append(entry)
 
     if not related:
         return f"No events found matching topic '{topic}'"
@@ -275,8 +264,7 @@ def _update_episode(mem_dir: Path, episode_id: str, content: str) -> str:
     if not ep_path.resolve().is_relative_to(ep_root):
         return "Error: invalid episode path"
 
-    from engine.memory._files import atomic_write_text
-    atomic_write_text(ep_path, content)
+    _engine_memory().atomic_write_text(ep_path, content)
     return f"OK: updated episode '{episode_id}'"
 
 
@@ -292,6 +280,7 @@ async def _remove_episode(mem_dir: Path, episode_id: str) -> str:
 
     ep_path.unlink()
     try:
+        _engine_memory()  # ensure repo root is importable in standalone mode
         from engine.memory.search import SearchIndex
         idx = SearchIndex(mem_dir / "episodes")
         await idx.open()

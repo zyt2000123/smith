@@ -7,6 +7,10 @@ import os
 import shutil
 from pathlib import Path
 
+# ponytail: track() runs on every write_file/edit_file, so without a cap the
+# per-file version list (and backup files on disk) grow unbounded per session.
+_MAX_VERSIONS_PER_FILE = 20
+
 
 class FileSnapshot:
     """Track and backup files before they are modified by Agent tools.
@@ -15,7 +19,6 @@ class FileSnapshot:
         snap = FileSnapshot(session_id)
         snap.track(path)         # call BEFORE write_file/edit
         snap.rewind(path)        # restore to pre-modification state
-        snap.rewind_all()        # restore all tracked files
     """
 
     def __init__(self, session_id: str = "default"):
@@ -26,6 +29,10 @@ class FileSnapshot:
             self._backup_dir = Path.home() / ".agent-smith" / "snapshots" / session_id
         self._backup_dir.mkdir(parents=True, exist_ok=True)
         self._tracked: dict[str, list[str]] = {}
+        # Monotonic per-file version counter. Never derived from
+        # len(versions): pruning shrinks the list, and reusing a version
+        # number would overwrite a backup file that is still referenced.
+        self._version_seq: dict[str, int] = {}
 
     def _backup_name(self, filepath: str, version: int) -> str:
         h = hashlib.sha256(filepath.encode()).hexdigest()[:16]
@@ -36,20 +43,36 @@ class FileSnapshot:
         resolved = os.path.realpath(filepath)
         if not os.path.isfile(resolved):
             self._tracked.setdefault(resolved, []).append("")
+            self._prune(resolved)
             return True
 
-        versions = self._tracked.get(resolved, [])
-        version = len(versions) + 1
+        version = self._version_seq.get(resolved, 0) + 1
         backup_name = self._backup_name(resolved, version)
         backup_path = self._backup_dir / backup_name
 
         try:
             shutil.copy2(resolved, backup_path)
-            versions.append(backup_name)
-            self._tracked[resolved] = versions
-            return True
         except Exception:
             return False
+        self._version_seq[resolved] = version
+        self._tracked.setdefault(resolved, []).append(backup_name)
+        self._prune(resolved)
+        return True
+
+    def _prune(self, resolved: str) -> None:
+        # ponytail: keep only the newest _MAX_VERSIONS_PER_FILE backups per
+        # file; delete the pruned backup files from disk as well.
+        versions = self._tracked.get(resolved)
+        if not versions:
+            return
+        while len(versions) > _MAX_VERSIONS_PER_FILE:
+            oldest = versions.pop(0)
+            if not oldest:
+                continue  # "" marks "file did not exist" — nothing on disk
+            try:
+                (self._backup_dir / oldest).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def rewind(self, filepath: str) -> bool:
         """Restore a file to its state before the last modification."""
@@ -74,18 +97,6 @@ class FileSnapshot:
             return True
         except Exception:
             return False
-
-    def rewind_all(self) -> dict[str, bool]:
-        """Restore all tracked files. Returns {path: success}."""
-        return {path: self.rewind(path) for path in self._tracked}
-
-    def list_tracked(self) -> list[dict]:
-        """List all tracked files with version counts."""
-        return [
-            {"path": path, "versions": len(versions)}
-            for path, versions in self._tracked.items()
-        ]
-
 
 _active_snapshots: dict[str, FileSnapshot] = {}
 

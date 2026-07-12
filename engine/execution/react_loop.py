@@ -446,11 +446,11 @@ async def react_event_loop(
             # A length-limited tool call may have incomplete JSON arguments.
             # Never execute it or append a generic continuation prompt that
             # could change the requested action.
+            # 上面的 has_tool_calls 分支已把草稿 retract（tool_call_pending），
+            # 屏幕上的流式文本已被消费方删除；这里若再打 already_streamed
+            # 标记，消费方会跳过渲染 → 文本落库但用户永远看不到。
             if response.text:
-                yield _text_event(
-                    response.text,
-                    already_streamed=response_text_was_streamed,
-                )
+                yield _text_event(response.text)
             yield ExecutionEvent(EventType.INCOMPLETE, {
                 "reason": "model_output_limit",
                 "phase": "tool_call",
@@ -459,11 +459,9 @@ async def react_event_loop(
             return
 
         if response.has_tool_calls and response.finish_reason in {"content_filter", "other", "error"}:
+            # 同上：草稿已 retract，不能再标 already_streamed。
             if response.text:
-                yield _text_event(
-                    response.text,
-                    already_streamed=response_text_was_streamed,
-                )
+                yield _text_event(response.text)
             if response.finish_reason == "error":
                 yield ExecutionEvent(EventType.FAILED, {"reason": "provider_finish_error"})
             else:
@@ -663,9 +661,7 @@ async def react_event_loop(
                 )
                 yield ExecutionEvent(EventType.INCOMPLETE, {"reason": "tool_failure_budget"})
                 return
-
-        if round_had_preflight:
-            continue
+        # 纯 preflight 轮不计入任何预算直接进入下一轮（preflight_iters 已在上方封顶）。
 
     for provision_id in active_provision_ids:
         yield _provisional_retract_event(provision_id, "tool_call_budget")

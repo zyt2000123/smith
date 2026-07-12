@@ -671,6 +671,7 @@ def test_execute_skill_failed_tool_round_does_not_consume_main_budget():
             [{"role": "user", "content": "try a tool"}],
             {"user_message": "try a tool"},
             max_iters=1,
+            react_loop_fn=_react_loop,
         )
 
     assert asyncio.run(run()) == "skill recovered"
@@ -906,6 +907,17 @@ def test_react_event_loop_stream_fallback_on_early_error():
         if e.type == EventType.TEXT_DELTA
     )
     assert text == "fallback result"
+
+
+def test_incomplete_final_detects_chinese_look_verbs():
+    from engine.react_budget import looks_like_incomplete_final_after_tool
+
+    # 看看/看一下 belong to the Chinese verb set (regression: they were
+    # sliced into the English pattern and never matched).
+    assert looks_like_incomplete_final_after_tool("好的，让我看一下相关文件。")
+    assert looks_like_incomplete_final_after_tool("接下来看看测试结果。")
+    assert looks_like_incomplete_final_after_tool("Let me check the config file.")
+    assert not looks_like_incomplete_final_after_tool("修复完成，所有测试通过。")
 
 
 if __name__ == "__main__":

@@ -72,6 +72,10 @@ class StdioMCPTransport:
         self._close_timeout = close_timeout
         self._process: asyncio.subprocess.Process | None = None
         self._request_id = 0
+        # stdio is a single shared pipe: concurrent send_request calls would
+        # interleave reads and one waiter would consume (and drop) another
+        # waiter's response, so request/response exchanges are serialized.
+        self._request_lock = asyncio.Lock()
         self.label = " ".join(command)
 
     async def connect(self) -> None:
@@ -87,26 +91,27 @@ class StdioMCPTransport:
         if self._process is None or self._process.stdin is None or self._process.stdout is None:
             raise RuntimeError("MCP stdio transport not connected")
 
-        self._request_id += 1
-        request_id = self._request_id
-        msg = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-            "params": params,
-        }
-        self._process.stdin.write((json.dumps(msg) + "\n").encode())
-        await self._process.stdin.drain()
+        async with self._request_lock:
+            self._request_id += 1
+            request_id = self._request_id
+            msg = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+            self._process.stdin.write((json.dumps(msg) + "\n").encode())
+            await self._process.stdin.drain()
 
-        while True:
-            line = await asyncio.wait_for(self._process.stdout.readline(), timeout=30)
-            if not line:
-                raise RuntimeError("MCP server closed stdout unexpectedly")
-            resp = json.loads(line.decode())
-            if resp.get("id") != request_id:
-                log.debug("Ignoring MCP message while waiting for id %s: %s", request_id, resp)
-                continue
-            break
+            while True:
+                line = await asyncio.wait_for(self._process.stdout.readline(), timeout=30)
+                if not line:
+                    raise RuntimeError("MCP server closed stdout unexpectedly")
+                resp = json.loads(line.decode())
+                if resp.get("id") != request_id:
+                    log.debug("Ignoring MCP message while waiting for id %s: %s", request_id, resp)
+                    continue
+                break
 
         if "error" in resp:
             raise RuntimeError(f"MCP error: {resp['error']}")

@@ -25,7 +25,7 @@ import {
   setupFieldLabel,
 } from "./setup.js";
 import { type AppStore, createAppStore } from "./store.js";
-import { ACCENT, BORDER, ERROR, INFO, MUTED, SUCCESS, WARNING } from "./theme.js";
+import { ACCENT, BORDER, ERROR, INFO, MUTED, WARNING } from "./theme.js";
 import { TranscriptEntryView } from "./transcript.js";
 import { splitTranscript, type TranscriptEntry, type TranscriptViewMode } from "./transcript-state.js";
 
@@ -138,28 +138,6 @@ function SessionsPanel() {
   );
 }
 
-function PluginsPanel() {
-  const plugins = useS((state) => state.plugins);
-  return (
-    <Box flexDirection="column">
-      <Text color={ACCENT}>Plugins</Text>
-      {plugins.length === 0 ? (
-        <Text color={MUTED}>No plugins.</Text>
-      ) : (
-        plugins.slice(0, 8).map((plugin) => (
-          <Box key={plugin.name} flexDirection="column" marginBottom={1}>
-            <Text color={plugin.enabled ? SUCCESS : MUTED}>
-              {plugin.enabled ? "●" : "○"} {plugin.name}
-              {plugin.version ? `  v${plugin.version}` : ""}
-            </Text>
-            <Text color={MUTED}>{plugin.description || "No description."}</Text>
-          </Box>
-        ))
-      )}
-    </Box>
-  );
-}
-
 function SkillsPanel() {
   const skills = useS((state) => state.skills);
   return (
@@ -236,7 +214,6 @@ function ShellContent({
   return (
     <>
       {welcomeNotice ? <Text color={welcomeNotice.tone === "error" ? ERROR : MUTED}>{welcomeNotice.text}</Text> : null}
-      {panel === "plugins" ? <PluginsPanel /> : null}
       {panel === "skills" ? <SkillsPanel /> : null}
       {panel === "sessions" ? <SessionsPanel /> : null}
       {active.map((entry, index) => (
@@ -427,7 +404,6 @@ function SmithApp() {
   const toolActivity = useS((state) => state.toolActivity);
   const tokenUsage = useS((state) => state.tokenUsage);
   const skills = useS((state) => state.skills);
-  const plugins = useS((state) => state.plugins);
   const config = useS((state) => state.config);
   const currentSession = useS((state) => state.currentSession);
   const welcomeNotice = useS((state) => state.welcomeNotice);
@@ -436,8 +412,8 @@ function SmithApp() {
 
   const activeSetupField = setupFieldAt(setupIndex);
   const slashItems = useMemo(
-    () => filterSlash(buildSlashItems(skills, plugins), inputValue),
-    [inputValue, plugins, skills],
+    () => filterSlash(buildSlashItems(skills), inputValue),
+    [inputValue, skills],
   );
   const slashMenuOpen = mode === "chat" && inputValue.startsWith("/");
 

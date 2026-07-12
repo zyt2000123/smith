@@ -400,3 +400,120 @@ def test_empty_base_gates_skip_straight_to_node_gate() -> None:
 
     asyncio.run(run())
     assert calls == ["node"]
+
+
+class PassThenBrokenStreamingLLM(FakeLLM):
+    """第一次调用正常完成，第二次在产出内容后断流。"""
+
+    stream = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat_events(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ):
+        self.calls += 1
+        yield ProviderEvent(ProviderEventType.RESPONSE_CREATED)
+        yield ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": "node output "})
+        if self.calls == 1:
+            yield ProviderEvent(
+                ProviderEventType.RESPONSE_COMPLETED,
+                {"finish_reason": "stop", "raw_finish_reason": "stop"},
+            )
+        else:
+            raise RuntimeError("provider disconnected")
+
+
+def test_execution_error_clears_saved_checkpoint(tmp_path: Path) -> None:
+    """节点间执行异常不能留下孤儿 checkpoint（restore 未接线，无人消费）。"""
+
+    async def run() -> tuple[bool, bool]:
+        state_path = tmp_path / "sessions" / ".state" / "sess-err.json"
+        saw_checkpoint = False
+        try:
+            async for event in run_agent_stream(
+                PassThenBrokenStreamingLLM(),
+                "system prompt",
+                "build a feature",
+                FakeToolRegistry(),
+                FakeSkillRegistry(),
+                FEATURE_ROUTE,
+                SkillChain([
+                    SkillNode("planning", PassingGate()),
+                    SkillNode("testing", PassingGate()),
+                ]),
+                FailureLoopGuard(),
+                execution_context={
+                    "agent_id": "smith-id",
+                    "session_id": "sess-err",
+                    "_state_dir": str(tmp_path),
+                },
+            ):
+                if event.type == EventType.SKILL_END:
+                    saw_checkpoint = saw_checkpoint or state_path.is_file()
+        except RuntimeError as exc:
+            assert str(exc) == "provider disconnected"
+        return saw_checkpoint, state_path.exists()
+
+    saw_checkpoint, still_exists = asyncio.run(run())
+    assert saw_checkpoint
+    assert not still_exists
+
+
+class RecordingStreamingLLM(FakeLLM):
+    stream = True
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict]] = []
+
+    async def chat_events(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ):
+        self.calls.append([dict(m) for m in messages])
+        yield ProviderEvent(ProviderEventType.RESPONSE_CREATED)
+        yield ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": "candidate output"})
+        yield ProviderEvent(
+            ProviderEventType.RESPONSE_COMPLETED,
+            {"finish_reason": "stop", "raw_finish_reason": "stop"},
+        )
+
+
+def test_domain_gate_retry_hint_reaches_retry_attempt() -> None:
+    """域门禁 retry_hint 必须随重试流回节点，而不是被静默丢弃。"""
+
+    class RetryHintGate:
+        def __init__(self) -> None:
+            self.checks = 0
+
+        async def check(self, output: str, context: dict) -> GateResult:
+            self.checks += 1
+            if self.checks == 1:
+                return GateResult("fail", "too vague", retry_hint="ADD-EVIDENCE-HINT")
+            return GateResult("pass", "ok")
+
+    async def run() -> RecordingStreamingLLM:
+        llm = RecordingStreamingLLM()
+        async for _ in run_agent_stream(
+            llm,
+            "system prompt",
+            "build a feature",
+            FakeToolRegistry(),
+            FakeSkillRegistry(),
+            FEATURE_ROUTE,
+            SkillChain([SkillNode("planning", RetryHintGate())]),
+            FailureLoopGuard(),
+        ):
+            pass
+        return llm
+
+    llm = asyncio.run(run())
+    assert len(llm.calls) == 2
+    first = "".join(str(m.get("content", "")) for m in llm.calls[0])
+    second = "".join(str(m.get("content", "")) for m in llm.calls[1])
+    assert "ADD-EVIDENCE-HINT" not in first
+    assert "ADD-EVIDENCE-HINT" in second

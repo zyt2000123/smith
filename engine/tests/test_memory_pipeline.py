@@ -994,6 +994,79 @@ def test_save_conversation_memory_resets_dream_counter_after_benign_skip(tmp_pat
     assert (memory_dir / ".dream_counter").read_text(encoding="utf-8") == "0"
 
 
+def test_episode_search_falls_back_to_like_for_short_cjk_queries(tmp_path: Path) -> None:
+    """Trigram FTS matches nothing under 3 chars; 2-char CJK queries must still hit."""
+    episodes_dir = tmp_path / "memory" / "episodes"
+    episodes_dir.mkdir(parents=True)
+    (episodes_dir / "topic.md").write_text("# 部署\n\n我们讨论了记忆系统的部署方案", encoding="utf-8")
+
+    async def run() -> list[dict]:
+        idx = SearchIndex(episodes_dir)
+        await idx.open()
+        try:
+            await _sync_episode_index(idx, episodes_dir)
+            return await idx.search("记忆")
+        finally:
+            await idx.close()
+
+    assert [hit["id"] for hit in asyncio.run(run())] == ["topic"]
+
+
+def test_generate_and_review_tolerates_malformed_reviewer_shapes() -> None:
+    """Non-dict JSON and non-list fail fields from the reviewer must not crash."""
+    class ShapeShiftReviewer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, messages, **_):
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResponse(text='["not", "a", "dict"]')
+            return ChatResponse(text='{"pass": true, "hard_fail": null, "soft_fail": 0, "feedback": ""}')
+
+        async def close(self):
+            pass
+
+    result = asyncio.run(
+        _generate_and_review(StaticLLM("safe draft"), ShapeShiftReviewer(), "prompt", "source"),
+    )
+
+    assert result == "safe draft"
+
+
+def test_dream_cleanup_respects_lagging_durable_offset(tmp_path: Path) -> None:
+    """Lines the durable merge has not consumed yet must never be deleted."""
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    lines = [
+        json.dumps({"task": f"task {i}", "summary": f"r {i}", "timestamp": "2026-06-01T00:00:00"})
+        for i in range(10)
+    ]
+    (memory_dir / "recent.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (memory_dir / ".compile_offset").write_text("7", encoding="utf-8")
+    (memory_dir / ".durable_offset").write_text("3", encoding="utf-8")
+    (memory_dir / "durable.md").write_text("exists", encoding="utf-8")
+
+    report = asyncio.run(run_dream(memory_dir, StaticLLM()))
+
+    assert report.log_lines_cleaned == 3
+    remaining = (memory_dir / "recent.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(remaining) == 7
+    assert (memory_dir / ".compile_offset").read_text(encoding="utf-8") == "4"
+    assert (memory_dir / ".durable_offset").read_text(encoding="utf-8") == "0"
+
+
+def test_compile_recent_skips_non_dict_json_lines(tmp_path: Path) -> None:
+    """A valid-JSON-but-non-dict line must not wedge compilation forever."""
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    event = {"task": "valid task", "summary": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+    (memory_dir / "recent.jsonl").write_text('["not-a-dict"]\n' + json.dumps(event) + "\n", encoding="utf-8")
+
+    assert asyncio.run(compile_recent(memory_dir, StaticLLM())) is True
+    assert "valid task" in (memory_dir / "recent.md").read_text(encoding="utf-8")
+
+
 def test_save_conversation_memory_retries_dream_after_insufficient_output(tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir()

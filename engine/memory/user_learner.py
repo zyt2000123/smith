@@ -148,12 +148,18 @@ class UserPreferenceLearner:
             key_counters = counters.setdefault(key, {})
             key_counters[value] = key_counters.get(value, 0) + 1
 
-            if key_counters[value] == _CONFIDENCE_THRESHOLD:
-                # Reached confidence — write to context.md
+            written_map = state.setdefault("written", {})
+            if (
+                key_counters[value] >= _CONFIDENCE_THRESHOLD
+                and written_map.get(key) != value
+            ):
+                # Reached confidence — write to context.md. Using >= (not ==)
+                # so a write that fails at the exact threshold (e.g. context.md
+                # not created yet) is retried instead of being lost forever.
                 written = self._write_preference(key, value)
                 if written:
                     observations.append(f"{key}={value}")
-                    state.setdefault("written", {})[key] = value
+                    written_map[key] = value
 
         self._save_state(state)
         return observations
