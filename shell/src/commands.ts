@@ -29,6 +29,7 @@ const HELP_TEXT = [
   "- `/skills` — inspect skills",
   "- `/resume <id>` — resume session",
   "- `/compact` / `/transcript` — switch view",
+  "- `/retry` — retry startup",
   "- `/home` — welcome · `/exit` — quit",
 ].join("\n");
 
@@ -40,6 +41,14 @@ export function buildSlashItems(skills: SkillSummary[]): SlashItem[] {
       title: "/help",
       command: "/help",
       description: "Show commands.",
+      category: "Commands",
+    },
+    {
+      id: "retry",
+      kind: "command",
+      title: "/retry",
+      command: "/retry",
+      description: "Retry startup.",
       category: "Commands",
     },
     { id: "exit", kind: "command", title: "/exit", command: "/exit", description: "Quit Smith.", category: "Commands" },
@@ -169,6 +178,15 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
     context.getState().resetChat();
   },
   "/config": (_args, context) => openConfig(context),
+  "/retry": async (_args, context) => {
+    const state = context.getState();
+    if (state.busy) {
+      state.set({ statusLine: "Cancel the current task before retrying startup." });
+      return;
+    }
+    state.set({ mode: "boot", statusLine: "Retrying Smith startup…", welcomeNotice: null });
+    await context.bridge.boot();
+  },
   "/skills": (_args, context) => {
     const state = context.getState();
     state.set({ panel: "skills", statusLine: `${state.skills.length} skill(s).` });

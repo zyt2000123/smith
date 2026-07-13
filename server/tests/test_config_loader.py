@@ -147,13 +147,19 @@ llm:
         model_config.resolve_llm_config(usage=model_config.LLMUsage.GATE)
 
 
-def test_build_engine_runtime_selects_interactive_and_gate_clients(monkeypatch) -> None:
+def test_build_engine_runtime_selects_interactive_gate_and_background_clients(monkeypatch) -> None:
     selected_usages: list[model_config.LLMUsage] = []
     clients: list[object] = []
 
     def fake_resolve(*, usage: model_config.LLMUsage) -> dict:
         selected_usages.append(usage)
-        return {"usage": usage.value}
+        return {
+            "usage": usage.value,
+            "provider": "openai",
+            "model": f"{usage.value}-model",
+            "api_key": "must-not-reach-the-prompt",
+            "base_url": "https://provider.example/v1",
+        }
 
     def fake_build(config: dict) -> object:
         client = object()
@@ -170,9 +176,18 @@ def test_build_engine_runtime_selects_interactive_and_gate_clients(monkeypatch) 
     runtime, services = engine_runtime.build_engine_runtime("smith-id", "Smith")
 
     assert runtime.agent_id == "smith-id"
-    assert selected_usages == [model_config.LLMUsage.INTERACTIVE, model_config.LLMUsage.GATE]
+    assert runtime.metadata == {
+        "current_provider": "openai",
+        "current_model": "interactive-model",
+    }
+    assert selected_usages == [
+        model_config.LLMUsage.INTERACTIVE,
+        model_config.LLMUsage.GATE,
+        model_config.LLMUsage.BACKGROUND,
+    ]
     assert services.llm is clients[0]
     assert services.gate_llm is clients[1]
+    assert services.background_llm is clients[2]
     assert services.owns_llm_clients is False
 
 

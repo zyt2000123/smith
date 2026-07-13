@@ -3,8 +3,12 @@
 import { MarkdownText } from "@assistant-ui/react-ink-markdown";
 import { Box, Text, useWindowSize } from "ink";
 import Spinner from "ink-spinner";
+import { useEffect, useState } from "react";
 
 import type { ToolState } from "./activity.js";
+import { CodeBlock, type CodeHighlighter } from "./code-block.js";
+import { splitMarkdownLayoutBlocks } from "./markdown-layout.js";
+import { renderMermaidDiagram, splitMarkdownBlocks } from "./mermaid.js";
 import { stripEmojiIcons } from "./output.js";
 import { ACCENT, ASSISTANT, BORDER, ERROR, INFO, MUTED, SKILL, SUCCESS, WARNING } from "./theme.js";
 import type {
@@ -25,6 +29,72 @@ const TOOL_PRESENTATION: Record<ToolState, { color: string; marker: string; labe
   blocked: { color: WARNING, marker: "⛔", label: "permission blocked" },
   preflight: { color: WARNING, marker: "◆", label: "fact preflight" },
 };
+
+const MARKDOWN_OPTIONS = {
+  theme: { listMarker: { color: ASSISTANT } },
+  listIndent: 1,
+} as const;
+
+function MarkdownMessage({ text, highlighter }: { text: string; highlighter?: CodeHighlighter }) {
+  const segments = splitMarkdownBlocks(text);
+  const keyCounts = new Map<string, number>();
+
+  return (
+    <>
+      {segments.map((segment) => {
+        const baseKey = `${segment.type}-${segment.type === "code" ? segment.language : ""}-${segment.text}`;
+        const occurrence = keyCounts.get(baseKey) ?? 0;
+        keyCounts.set(baseKey, occurrence + 1);
+        const key = `${baseKey}-${occurrence}`;
+        if (segment.type === "markdown") {
+          if (!segment.text) return null;
+
+          const layoutBlocks = splitMarkdownLayoutBlocks(segment.text);
+          const blockKeyCounts = new Map<string, number>();
+          return (
+            <Box key={key} flexDirection="column">
+              {layoutBlocks.map((block, index) => {
+                const next = layoutBlocks[index + 1];
+                const needsSpacing = block.kind === "content" && next?.kind === "table";
+                const blockBaseKey = `${block.kind}-${block.text}`;
+                const blockOccurrence = blockKeyCounts.get(blockBaseKey) ?? 0;
+                blockKeyCounts.set(blockBaseKey, blockOccurrence + 1);
+                return (
+                  <Box key={`${key}-${blockBaseKey}-${blockOccurrence}`} marginBottom={needsSpacing ? 1 : 0}>
+                    <MarkdownText text={block.text} {...MARKDOWN_OPTIONS} />
+                  </Box>
+                );
+              })}
+            </Box>
+          );
+        }
+
+        if (segment.type === "code") {
+          return <CodeBlock key={key} code={segment.text} language={segment.language} highlighter={highlighter} />;
+        }
+
+        const rendered = renderMermaidDiagram(segment.text);
+        if (!rendered) {
+          return (
+            <MarkdownText
+              key={`${key}-fallback`}
+              text={`\`\`\`mermaid\n${segment.text}\n\`\`\``}
+              {...MARKDOWN_OPTIONS}
+            />
+          );
+        }
+
+        return (
+          <Box key={key} flexDirection="column" marginTop={1} marginBottom={1}>
+            <Text color={ASSISTANT} wrap="truncate">
+              {rendered}
+            </Text>
+          </Box>
+        );
+      })}
+    </>
+  );
+}
 
 type ToolGroupBlock = {
   id: string;
@@ -57,12 +127,12 @@ function truncateLines(text: string, max = 4): { text: string; hidden: number } 
   };
 }
 
-function SystemMessage({ entry }: { entry: SystemEntry }) {
+function SystemMessage({ entry, highlighter }: { entry: SystemEntry; highlighter?: CodeHighlighter }) {
   const trimmed = entry.text.trim();
   return (
     <Box marginBottom={1} paddingLeft={1}>
       {trimmed ? (
-        <MarkdownText text={trimmed} />
+        <MarkdownMessage text={trimmed} highlighter={highlighter} />
       ) : (
         <Text color={entry.tone === "error" ? ERROR : MUTED}>{entry.text}</Text>
       )}
@@ -264,7 +334,41 @@ function SkillMessage({ block }: { block: SkillBlock }) {
   );
 }
 
-function TurnView({ entry, viewMode }: { entry: TurnEntry; viewMode: TranscriptViewMode }) {
+function useBlink(active: boolean): boolean {
+  const [visible, setVisible] = useState(true);
+
+  useEffect(() => {
+    if (!active) {
+      setVisible(true);
+      return;
+    }
+
+    const timer = setInterval(() => setVisible((current) => !current), 1_000);
+    return () => clearInterval(timer);
+  }, [active]);
+
+  return visible;
+}
+
+function AssistantMarker({ active }: { active: boolean }) {
+  const visible = useBlink(active);
+
+  return (
+    <Text color={WARNING} bold>
+      {visible ? "● " : "  "}
+    </Text>
+  );
+}
+
+function TurnView({
+  entry,
+  viewMode,
+  highlighter,
+}: {
+  entry: TurnEntry;
+  viewMode: TranscriptViewMode;
+  highlighter?: CodeHighlighter;
+}) {
   const hasAssistantBody = entry.assistantText.trim().length > 0;
   const assistantBody = hasAssistantBody ? stripEmojiIcons(entry.assistantText).trimEnd() : "";
   const provisionalBody = stripEmojiIcons(entry.provisional.map((item) => item.text).join(""));
@@ -273,10 +377,10 @@ function TurnView({ entry, viewMode }: { entry: TurnEntry; viewMode: TranscriptV
   const renderBlocks = viewMode === "compact" ? collapseCompletedTools(grouped) : grouped;
 
   return (
-    <Box flexDirection="column" marginBottom={2}>
+    <Box flexDirection="column" marginBottom={1}>
       {entry.userText ? (
         <Box>
-          <Text color={ACCENT}>{"❯ "}</Text>
+          <Text color={ACCENT}>❯ </Text>
           <Text>{entry.userText}</Text>
         </Box>
       ) : null}
@@ -299,23 +403,21 @@ function TurnView({ entry, viewMode }: { entry: TurnEntry; viewMode: TranscriptV
       })}
 
       {hasAssistantBody || hasProvisionalBody || entry.streaming ? (
-        <Box flexDirection="column" marginTop={1}>
-          <Text color={ASSISTANT} bold>
-            smith
-          </Text>
-          <Box marginTop={1} paddingLeft={1}>
-            {hasAssistantBody ? <MarkdownText text={assistantBody} /> : null}
+        <Box marginTop={1}>
+          <AssistantMarker active={entry.streaming} />
+          <Box flexDirection="column" flexGrow={1}>
+            {hasAssistantBody ? <MarkdownMessage text={assistantBody} highlighter={highlighter} /> : null}
             {hasProvisionalBody ? (
               <Box flexDirection="column">
                 <Text color={MUTED} italic>
                   draft…
                 </Text>
-                <MarkdownText text={provisionalBody} />
+                <MarkdownMessage text={provisionalBody} highlighter={highlighter} />
               </Box>
             ) : hasAssistantBody ? null : (
               <Box>
+                <Text color={WARNING}>Processing </Text>
                 <Spinner type="dots" />
-                <Text color={WARNING}> Processing…</Text>
               </Box>
             )}
           </Box>
@@ -329,7 +431,7 @@ function TurnDivider() {
   const { columns } = useWindowSize();
   const lineWidth = Math.max(1, columns - 6);
   return (
-    <Box marginBottom={2} paddingLeft={1} paddingRight={1}>
+    <Box marginBottom={1} paddingLeft={1} paddingRight={1}>
       <Text color={BORDER}>{"─".repeat(lineWidth)}</Text>
     </Box>
   );
@@ -344,19 +446,21 @@ export function TranscriptEntryView({
   entry,
   showDivider,
   viewMode,
+  highlighter,
 }: {
   entry: TranscriptEntry;
   showDivider: boolean;
   viewMode: TranscriptViewMode;
+  highlighter?: CodeHighlighter;
 }) {
   if (entry.kind === "system") {
-    return <SystemMessage entry={entry} />;
+    return <SystemMessage entry={entry} highlighter={highlighter} />;
   }
 
   return (
     <Box flexDirection="column">
       {showDivider ? <TurnDivider /> : null}
-      <TurnView entry={entry} viewMode={viewMode} />
+      <TurnView entry={entry} viewMode={viewMode} highlighter={highlighter} />
     </Box>
   );
 }

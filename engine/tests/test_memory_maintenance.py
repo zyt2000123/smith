@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 from engine.execution.memory_maintenance import (
     MemoryLifecycleHooks,
     MemoryMaintenanceService,
 )
-from engine.execution.agent_loop import run_memory_idle_tick
+from engine.execution.agent_loop import _ensure_memory_lifecycle_hooks, run_memory_idle_tick
 from engine.execution.runtime import RuntimeServices
 from engine.hook import HookManager, HookType
 from engine.llm.client import ChatResponse
@@ -16,7 +17,7 @@ from engine.tool.registry import ToolRegistry
 
 
 class StaticLLM:
-    def __init__(self, text: str = "stable memory summary") -> None:
+    def __init__(self, text: str | None = None) -> None:
         self.text = text
         self.messages: list[list[dict]] = []
 
@@ -27,7 +28,49 @@ class StaticLLM:
         prefix_cache_key: str | None = None,
     ) -> ChatResponse:
         self.messages.append(messages)
-        return ChatResponse(text=self.text)
+        if self.text is not None:
+            return ChatResponse(text=self.text)
+        prompt = messages[-1]["content"]
+        if "`memory/recent.md`" in prompt:
+            return ChatResponse(text="""# Recent Working Memory
+
+## Active Work
+- **Hook test** — 状态：active；下一步：verify；更新：2026-07-13。
+
+## Pending
+
+## Recent Verified Outcomes
+""")
+        if "`memory/durable.md`" in prompt:
+            return ChatResponse(text="""# Durable Project Memory
+
+## Confirmed Facts
+- **Hook test**: The memory hook records tool-assisted work.
+
+## Decisions
+
+## Reusable Procedures
+
+## Known Pitfalls
+""")
+        if "`context.md`" in prompt:
+            return ChatResponse(text="""# Smith Context
+
+## Confirmed Preferences
+- **Memory**: Honor explicit remember requests.
+
+## Collaboration Patterns
+
+## Stable User Context
+""")
+        return ChatResponse(text="stable memory summary")
+
+
+class PassReviewer(StaticLLM):
+    def __init__(self) -> None:
+        super().__init__(
+            '{"pass": true, "hard_fail": [], "soft_fail": [], "feedback": ""}'
+        )
 
 
 def test_memory_after_turn_hook_records_and_compiles(tmp_path: Path) -> None:
@@ -37,7 +80,9 @@ def test_memory_after_turn_hook_records_and_compiles(tmp_path: Path) -> None:
         (memory_dir / ".compile_counter").write_text("4", encoding="utf-8")
         llm = StaticLLM()
         hooks = HookManager()
-        hooks.register(MemoryLifecycleHooks(MemoryMaintenanceService(llm)))  # type: ignore[arg-type]
+        hooks.register(MemoryLifecycleHooks(
+            MemoryMaintenanceService(llm, reviewer=PassReviewer())  # type: ignore[arg-type]
+        ))
 
         results = await hooks.apply(
             "memory_after_turn_completed",
@@ -54,6 +99,27 @@ def test_memory_after_turn_hook_records_and_compiles(tmp_path: Path) -> None:
     assert (memory_dir / "recent.md").is_file()
     assert (memory_dir / ".compile_counter").read_text(encoding="utf-8") == "0"
     assert llm.messages
+
+
+def test_explicit_toolless_preference_compiles_context_immediately(tmp_path: Path) -> None:
+    result = asyncio.run(
+        MemoryMaintenanceService(
+            StaticLLM(),
+            reviewer=PassReviewer(),
+        ).record_turn(
+            tmp_path,
+            "以后默认用中文回答",
+            "好的",
+            had_tools=False,
+        )
+    )
+
+    assert result is True
+    assert (tmp_path / "context.md").is_file()
+    assert (tmp_path / "memory" / "recent.jsonl").is_file()
+    assert (tmp_path / "memory" / ".compile_counter").read_text(
+        encoding="utf-8"
+    ) == "0"
 
 
 def test_memory_idle_hook_uses_same_maintenance_service(tmp_path: Path) -> None:
@@ -109,11 +175,76 @@ def test_memory_compilation_reports_partial_progress(
     monkeypatch.setattr("engine.memory.compile.compile_durable", fail_durable)
 
     result = asyncio.run(
-        MemoryMaintenanceService(StaticLLM()).run_compile(memory_dir)
+        MemoryMaintenanceService(
+            StaticLLM(),
+            reviewer=PassReviewer(),
+        ).run_compile(memory_dir)
     )
 
-    assert result is True
+    assert result is False
     assert (memory_dir / "recent.md").is_file()
+
+
+def test_deferred_memory_maintenance_does_not_block_turn_and_can_be_drained(
+    tmp_path: Path,
+) -> None:
+    async def run() -> tuple[bool, float, Path]:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / ".compile_counter").write_text("4", encoding="utf-8")
+        service = MemoryMaintenanceService(
+            StaticLLM(),
+            reviewer=PassReviewer(),
+            defer_maintenance=True,
+        )
+
+        started = time.perf_counter()
+        result = await service.record_turn(
+            tmp_path,
+            "tool task",
+            "tool result",
+            had_tools=True,
+        )
+        elapsed = time.perf_counter() - started
+        await service.wait_for_pending_tasks(memory_dir)
+        return result, elapsed, memory_dir
+
+    result, elapsed, memory_dir = asyncio.run(run())
+
+    assert result is True
+    assert elapsed < 0.2
+    assert (memory_dir / "recent.md").is_file()
+    assert (memory_dir / ".compile_counter").read_text(encoding="utf-8") == "0"
+
+
+def test_deferred_memory_maintenance_uses_background_llm(
+    tmp_path: Path,
+) -> None:
+    async def run() -> tuple[StaticLLM, StaticLLM]:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / ".compile_counter").write_text("4", encoding="utf-8")
+        interactive = StaticLLM()
+        background = StaticLLM()
+        service = MemoryMaintenanceService(
+            background,
+            reviewer=PassReviewer(),
+            defer_maintenance=True,
+        )
+
+        assert await service.record_turn(
+            tmp_path,
+            "tool task",
+            "tool result",
+            had_tools=True,
+        ) is True
+        await service.wait_for_pending_tasks(memory_dir)
+        return interactive, background
+
+    interactive, background = asyncio.run(run())
+
+    assert not interactive.messages
+    assert background.messages
 
 
 def test_runtime_idle_tick_dispatches_memory_hook(tmp_path: Path) -> None:
@@ -134,3 +265,21 @@ def test_runtime_idle_tick_dispatches_memory_hook(tmp_path: Path) -> None:
 
     assert ok is True
     assert services.hooks is not None
+
+
+def test_shared_runtime_defers_heavy_memory_maintenance(tmp_path: Path) -> None:
+    background = StaticLLM()
+    services = RuntimeServices(
+        llm=StaticLLM(),  # type: ignore[arg-type]
+        tool_registry=ToolRegistry(),
+        skill_registry=SkillRegistry(),
+        background_llm=background,  # type: ignore[arg-type]
+        owns_llm_clients=False,
+    )
+
+    _ensure_memory_lifecycle_hooks(services)
+
+    assert services.hooks is not None
+    handler = services.hooks._handlers[0]
+    assert handler.maintenance.defer_maintenance is True
+    assert handler.maintenance.llm is background

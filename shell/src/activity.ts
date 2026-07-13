@@ -2,6 +2,8 @@ import type { StreamEvent } from "./api.js";
 
 export type ToolState = "running" | "success" | "error" | "blocked" | "preflight";
 
+export const TOOL_ACTIVITY_CALL_LIMIT = 256;
+
 type ToolCall = {
   name: string;
   state: ToolState;
@@ -61,6 +63,17 @@ function changeStateCount(activity: ToolActivity, state: ToolState, name: string
   }
 }
 
+function pruneCalls(calls: Record<string, ToolCall>): Record<string, ToolCall> {
+  if (Object.keys(calls).length <= TOOL_ACTIVITY_CALL_LIMIT) return calls;
+
+  const next = { ...calls };
+  for (const [id, call] of Object.entries(calls)) {
+    if (Object.keys(next).length <= TOOL_ACTIVITY_CALL_LIMIT) break;
+    if (call.state !== "running") delete next[id];
+  }
+  return next;
+}
+
 function startTool(activity: ToolActivity, event: Extract<StreamEvent, { type: "tool_call" }>): ToolActivity {
   if (!event.id) return activity;
 
@@ -71,7 +84,7 @@ function startTool(activity: ToolActivity, event: Extract<StreamEvent, { type: "
   const name = event.name || previous?.name || "tool";
   return {
     ...activity,
-    calls: { ...activity.calls, [event.id]: { name, state: "running" } },
+    calls: pruneCalls({ ...activity.calls, [event.id]: { name, state: "running" } }),
     running: { ...activity.running, [event.id]: name },
   };
 }
@@ -86,7 +99,7 @@ function settleTool(activity: ToolActivity, event: Extract<StreamEvent, { type: 
 
   let next: ToolActivity = {
     ...activity,
-    calls: { ...activity.calls, [event.id]: { name, state: nextState } },
+    calls: pruneCalls({ ...activity.calls, [event.id]: { name, state: nextState } }),
   };
   if (previous?.state === "running") {
     const { [event.id]: _removed, ...running } = next.running;

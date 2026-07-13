@@ -21,10 +21,11 @@ import {
   streamMessage,
 } from "./api.js";
 import { ensureLocalServer } from "./dev-server.js";
+import { MAX_QUEUED_MESSAGES, type QueuedMessage } from "./queue.js";
 import { createSetupDraft } from "./setup.js";
-import type { AppStore } from "./store.js";
+import { type AppStore, TRANSCRIPT_LIMIT } from "./store.js";
 import { clearTerminal } from "./term.js";
-import { restoreTranscript } from "./transcript-state.js";
+import { limitTranscript, restoreTranscript } from "./transcript-state.js";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -139,6 +140,41 @@ export class NodeBridge {
     return this.store.getState();
   }
 
+  enqueueMessage(text: string, skillName?: string): boolean {
+    const normalized = text.trim();
+    if (!normalized) return false;
+
+    const queuedMessages = this.s.queuedMessages;
+    if (queuedMessages.length >= MAX_QUEUED_MESSAGES) {
+      this.s.set({ statusLine: `Queue is full (${MAX_QUEUED_MESSAGES}). Press Esc to remove the newest message.` });
+      return false;
+    }
+
+    const item: QueuedMessage = {
+      id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      text: normalized,
+      ...(skillName ? { skillName } : {}),
+    };
+    this.s.set({
+      queuedMessages: [...queuedMessages, item],
+      statusLine: `Queued ${queuedMessages.length + 1}/${MAX_QUEUED_MESSAGES}.`,
+    });
+    return true;
+  }
+
+  removeQueuedMessage(index: number): QueuedMessage | null {
+    const queuedMessages = this.s.queuedMessages;
+    const removed = queuedMessages[index];
+    if (!removed) return null;
+
+    this.s.set({ queuedMessages: queuedMessages.filter((_item, itemIndex) => itemIndex !== index) });
+    return removed;
+  }
+
+  removeLatestQueuedMessage(): QueuedMessage | null {
+    return this.removeQueuedMessage(this.s.queuedMessages.length - 1);
+  }
+
   cancelRequest(): boolean {
     const controller = this.activeRequest;
     if (!controller || controller.signal.aborted) return false;
@@ -235,7 +271,7 @@ export class NodeBridge {
     const { baseUrl } = this.s;
     try {
       const messages = await listMessages(baseUrl, session.id);
-      const transcript = restoreTranscript(messages);
+      const transcript = limitTranscript(restoreTranscript(messages), TRANSCRIPT_LIMIT);
       clearTerminal();
       this.s.set({
         currentSession: session,
@@ -244,32 +280,38 @@ export class NodeBridge {
         turnCount: transcript.filter((entry) => entry.kind === "turn").length,
         toolActivity: createToolActivity(),
         tokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+        queuedMessages: [],
         panel: "chat",
         statusLine: `Resumed ${session.id} (${messages.length} messages).`,
       });
     } catch {
-      this.s.set({ currentSession: session, panel: "chat" });
+      this.s.set({ currentSession: session, panel: "chat", queuedMessages: [] });
       this.s.pushSystemLine(`Resumed ${session.id} (history unavailable).`);
     }
   }
 
-  async sendMessage(text: string, skillName?: string): Promise<void> {
+  async sendMessage(text: string, skillName?: string): Promise<boolean> {
+    if (this.activeRequest) return this.enqueueMessage(text, skillName);
+
     const ready = this.getReadySession();
-    if (!ready) return;
+    if (!ready) return false;
 
     const controller = this.startRequest();
     // 回显先于建会话的网络往返：失败时该轮也留在转录里，由 reportRequestError 收尾。
     this.s.pushTurn(text);
     try {
-      const session = await this.getOrCreateSession(ready.baseUrl, ready.currentSession, text);
+      const session = await this.getOrCreateSession(ready.baseUrl, ready.currentSession, text, controller.signal);
+      if (controller.signal.aborted) return true;
       await this.streamResponse(ready.baseUrl, session, text, skillName, controller.signal);
+      if (controller.signal.aborted) return true;
       this.s.closeTurn();
-      await this.refreshSessions(ready.baseUrl, session, ready.currentSession === null);
+      await this.refreshSessions(ready.baseUrl, session, ready.currentSession === null, controller.signal);
     } catch (error) {
       if (!controller.signal.aborted) this.reportRequestError(error);
     } finally {
       this.finishRequest(controller);
     }
+    return true;
   }
 
   private getReadySession(): { baseUrl: string; currentSession: Session | null } | null {
@@ -281,7 +323,6 @@ export class NodeBridge {
   }
 
   private startRequest(): AbortController {
-    this.activeRequest?.abort();
     const controller = new AbortController();
     this.activeRequest = controller;
     this.s.set({ busy: true, panel: "chat", statusLine: "Processing…" });
@@ -292,14 +333,37 @@ export class NodeBridge {
     if (this.activeRequest !== controller) return;
 
     this.activeRequest = null;
+    const next = this.takeQueuedMessage();
+    if (next) {
+      void this.sendMessage(next.text, next.skillName).then((accepted) => {
+        if (!accepted) this.enqueueMessage(next.text, next.skillName);
+      });
+      return;
+    }
     this.s.set({ busy: false });
   }
 
-  private async getOrCreateSession(baseUrl: string, currentSession: Session | null, text: string): Promise<Session> {
+  private takeQueuedMessage(): QueuedMessage | null {
+    const next = this.s.queuedMessages[0];
+    if (!next) return null;
+
+    this.s.set({ queuedMessages: this.s.queuedMessages.slice(1) });
+    return next;
+  }
+
+  private async getOrCreateSession(
+    baseUrl: string,
+    currentSession: Session | null,
+    text: string,
+    signal: AbortSignal,
+  ): Promise<Session> {
     if (currentSession) return currentSession;
 
     const title = text.trim().split(/\n+/)[0]?.slice(0, 40) || "Smith Session";
-    const session = await createSession(baseUrl, title);
+    const session = await createSession(baseUrl, title, { signal });
+    if (signal.aborted) {
+      throw signal.reason ?? new DOMException("The request was aborted.", "AbortError");
+    }
     this.s.set({ currentSession: session });
     return session;
   }
@@ -349,15 +413,22 @@ export class NodeBridge {
     this.s.set({ statusLine: message });
   }
 
-  private async refreshSessions(baseUrl: string, session: Session, selectSession: boolean): Promise<void> {
+  private async refreshSessions(
+    baseUrl: string,
+    session: Session,
+    selectSession: boolean,
+    signal: AbortSignal,
+  ): Promise<void> {
     try {
-      const sessions = await listSessions(baseUrl);
+      const sessions = await listSessions(baseUrl, { signal });
+      if (signal.aborted) return;
       this.s.set({ sessions });
       if (!selectSession) return;
 
       const currentSession = sessions.find((item) => item.id === session.id);
       if (currentSession) this.s.set({ currentSession });
     } catch (error) {
+      if (signal.aborted) return;
       this.s.pushSystemLine(`Session list unavailable: ${errorMessage(error)}`);
     }
   }
@@ -366,6 +437,6 @@ export class NodeBridge {
     const message = errorMessage(error);
     this.s.closeTurn();
     this.s.pushSystemLine(`[error] ${message}`, "error");
-    this.s.set({ statusLine: `Request failed: ${message}` });
+    this.s.set({ statusLine: "Request failed. See the transcript for details." });
   }
 }

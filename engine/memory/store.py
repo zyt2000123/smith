@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -30,18 +31,31 @@ MemoryMaintenance = Callable[[Path], Awaitable[bool]]
 # ---------------------------------------------------------------------------
 
 _MAX_EPISODE_CONTEXT_CHARS = 6000
+_MAX_DURABLE_CONTEXT_CHARS = 4000
 
 
 async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) -> str:
-    """Search episode summaries relevant to *query* for prompt injection.
+    """Search durable memory and episode summaries relevant to *query*.
 
-    durable.md and recent.md are already injected by assembler (fixed);
-    this function only searches episodes (on-demand). Returns "" on any
-    failure so prompt assembly never blocks.
+    Recent working memory remains a bounded passive layer. Durable and episode
+    memory are recalled on demand. Every failure degrades to whatever safe
+    section was already found, never to a blocked prompt assembly.
     """
-    episodes_dir = agent_dir / "memory" / "episodes"
-    if not episodes_dir.is_dir() or not query.strip():
+    if not query.strip():
         return ""
+
+    sections: list[str] = []
+    try:
+        durable = _select_relevant_durable(agent_dir / "memory", query)
+    except Exception:
+        logger.warning("durable-memory retrieval failed", exc_info=True)
+        durable = ""
+    if durable:
+        sections.append(durable)
+
+    episodes_dir = agent_dir / "memory" / "episodes"
+    if not episodes_dir.is_dir():
+        return "\n\n".join(sections)
 
     try:
         from .search import SearchIndex
@@ -53,7 +67,7 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) 
 
             hits = await idx.search(query, top_k)
             if not hits:
-                return ""
+                return "\n\n".join(sections)
 
             lines = ["## Relevant Episodes"]
             total_chars = 0
@@ -70,12 +84,59 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) 
                 lines.append(content)
                 total_chars += len(content)
 
-            return "\n\n".join(lines) if len(lines) > 1 else ""
+            if len(lines) > 1:
+                sections.append("\n\n".join(lines))
+            return "\n\n".join(sections)
         finally:
             await idx.close()
     except Exception:
         logger.warning("episode-memory retrieval failed", exc_info=True)
+        return "\n\n".join(sections)
+
+
+def _select_relevant_durable(memory_dir: Path, query: str) -> str:
+    """Return matching durable bullets using dependency-free lexical recall."""
+    durable_path = safe_file_in_dir(memory_dir, memory_dir / "durable.md")
+    if durable_path is None:
         return ""
+    content, _, _ = sanitize_memory_text(durable_path.read_text(encoding="utf-8"))
+    terms = _query_terms(query)
+    if not terms:
+        return ""
+
+    matches: list[tuple[int, int, str]] = []
+    for index, line in enumerate(content.splitlines()):
+        if not line.lstrip().startswith("-"):
+            continue
+        lowered = line.lower()
+        score = sum(1 for term in terms if term in lowered)
+        if score:
+            matches.append((-score, index, line))
+    if not matches:
+        return ""
+
+    selected: list[str] = []
+    used = 0
+    for _, _, line in sorted(matches):
+        if used + len(line) > _MAX_DURABLE_CONTEXT_CHARS:
+            continue
+        selected.append(line)
+        used += len(line)
+    if not selected:
+        return ""
+    return "## Relevant Durable Memory\n\n" + "\n".join(selected)
+
+
+def _query_terms(query: str) -> set[str]:
+    lowered = query.lower()
+    terms = {
+        token
+        for token in re.findall(r"[a-z0-9_./-]{2,}", lowered)
+        if token not in {"the", "and", "for", "with", "this", "that"}
+    }
+    for sequence in re.findall(r"[\u4e00-\u9fff]{2,}", lowered):
+        terms.update(sequence[index:index + 2] for index in range(len(sequence) - 1))
+    return terms
 
 
 _EPISODE_INDEX_STATE = ".index_state.json"
@@ -132,6 +193,27 @@ async def _sync_episode_index(idx, episodes_dir: Path) -> None:
 
 _COMPILE_INTERVAL = 5
 _MAX_EVENT_VALUE_CHARS = 16_000
+_MAX_LEARNING_SIGNALS = 16
+
+_LEARNING_SIGNAL_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
+    ("forget", "user", re.compile(r"忘记|不要再记|forget\b", re.IGNORECASE)),
+    (
+        "correction",
+        "user",
+        re.compile(r"不对|纠正|不是.+而是|that's wrong|actually\b", re.IGNORECASE),
+    ),
+    (
+        "preference",
+        "user",
+        re.compile(
+            r"我希望|我喜欢|我习惯|默认.{0,12}(?:用|使用|回答)|以后.{0,12}(?:请|用|不要)|"
+            r"\bi prefer\b|\bplease always\b|\bi want you to\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("decision", "project", re.compile(r"决定|定下来|就按|we decided", re.IGNORECASE)),
+    ("remember", "project", re.compile(r"记住|记一下|remember\b", re.IGNORECASE)),
+)
 
 
 def _bounded_event_value(value: str) -> str:
@@ -166,11 +248,18 @@ async def save_conversation_memory(
     reply: str,
     had_tools: bool,
     *,
+    learning_signals: list[str] | None = None,
     compile_maintenance: MemoryMaintenance | None = None,
     dream_maintenance: MemoryMaintenance | None = None,
 ) -> None:
-    """Append tool-assisted turns and periodically compile their memory views."""
-    if not had_tools:
+    """Append useful work/learning evidence and schedule memory maintenance."""
+    explicit_signal = _detect_learning_signal(user_msg)
+    stable_signals = [
+        sanitize_event_value(signal)
+        for signal in (learning_signals or [])[:_MAX_LEARNING_SIGNALS]
+        if signal.strip()
+    ]
+    if not had_tools and explicit_signal is None and not stable_signals:
         return
 
     memory_dir = agent_dir / "memory"
@@ -181,20 +270,40 @@ async def save_conversation_memory(
     bounded_task = sanitize_event_value(user_msg)
     bounded_summary = sanitize_event_value(reply)
 
-    entry = {
-        "task": bounded_task,
-        "summary": bounded_summary,
-        "timestamp": now,
-    }
+    entries: list[dict] = []
+    if had_tools:
+        entries.append({
+            "task": bounded_task,
+            "summary": bounded_summary,
+            "timestamp": now,
+            "kind": "work",
+            "scope": "project",
+            "evidence": "tool_result",
+        })
+    if explicit_signal is not None or stable_signals:
+        kind, scope = explicit_signal or ("pattern", "user")
+        signal_entry = {
+            "task": bounded_task,
+            "summary": bounded_summary,
+            "timestamp": now,
+            "kind": kind,
+            "scope": scope,
+            "evidence": "user_explicit" if explicit_signal is not None else "repeated_observation",
+        }
+        if stable_signals:
+            signal_entry["signals"] = stable_signals
+        entries.append(signal_entry)
 
     with open(recent_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        for entry in entries:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     # Periodic compilation (recent + durable)
     counter_file = memory_dir / ".compile_counter"
     count = _increment_counter(counter_file, _COMPILE_INTERVAL)
 
-    if count >= _COMPILE_INTERVAL and compile_maintenance is not None:
+    has_learning_signal = explicit_signal is not None or bool(stable_signals)
+    if (count >= _COMPILE_INTERVAL or has_learning_signal) and compile_maintenance is not None:
         if await compile_maintenance(memory_dir):
             atomic_write_text(counter_file, "0")
 
@@ -219,3 +328,10 @@ def sanitize_event_value(value: str) -> str:
     if injections_removed:
         return "[REDACTED — contained instruction-injection patterns]"
     return bounded
+
+
+def _detect_learning_signal(user_message: str) -> tuple[str, str] | None:
+    for kind, scope, pattern in _LEARNING_SIGNAL_PATTERNS:
+        if pattern.search(user_message):
+            return kind, scope
+    return None

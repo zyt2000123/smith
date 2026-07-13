@@ -30,3 +30,6 @@ packages = [
 
 [tool.setuptools.package-dir]
 engine = "."
+
+[tool.setuptools.package-data]
+"engine.memory" = ["MEMORY_POLICY.md"]

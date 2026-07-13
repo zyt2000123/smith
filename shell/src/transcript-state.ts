@@ -10,6 +10,10 @@ type SystemTone = "info" | "error";
 export type SkillState = "running" | "done" | "error";
 export type TranscriptViewMode = "compact" | "transcript";
 
+export function limitTranscript(entries: TranscriptEntry[], limit: number): TranscriptEntry[] {
+  return entries.length <= limit ? entries : entries.slice(-limit);
+}
+
 export type SystemEntry = {
   id: string;
   kind: "system";

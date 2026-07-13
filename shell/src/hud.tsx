@@ -295,7 +295,7 @@ export const StatusHud = memo(function StatusHud(options: {
 }) {
   const { columns } = useWindowSize();
   const gitBranch = useGitBranch(options.cwd);
-  const maxWidth = Math.max(24, columns - 4);
+  const maxWidth = Math.max(1, columns - 4);
   const headerLines = wrapParts(buildHeaderParts({ ...options, gitBranch }), maxWidth);
   const activityLines = wrapParts(collectToolParts(options.toolActivity), maxWidth);
 
