@@ -22,6 +22,9 @@ routes:
     examples: ["\u7528\u6237\u6545\u4e8b", "\u9a8c\u6536\u6807\u51c6"]
     keywords: [\u5b9e\u73b0, \u65b0\u589e]
     pipeline: feature
+  - id: git
+    keywords: [git, \u5206\u652f]
+    priority: 30
 """.strip(),
         encoding="utf-8",
     )
@@ -51,6 +54,13 @@ def test_plain_chat_uses_default_identity_direct_fallback(tmp_path: Path) -> Non
 
     assert decision.identity_id == "smith"
     assert decision.route_id == "direct"
+    assert decision.pipeline_id is None
+
+
+def test_git_branch_request_uses_direct_git_route_instead_of_feature_pipeline(tmp_path: Path) -> None:
+    decision = route_task("\u4f60\u80fd\u5e2e\u6211\u521b\u5efa\u4e00\u4e2agit\u5206\u652f\u5417\uff1f", _catalog(tmp_path))
+
+    assert decision.route_id == "git"
     assert decision.pipeline_id is None
 
 

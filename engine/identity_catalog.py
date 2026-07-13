@@ -128,8 +128,10 @@ def _parse_route(raw: object, identity_id: str, index: int) -> RouteSpec:
     priority = raw.get("priority", 0)
     if isinstance(priority, bool) or not isinstance(priority, int):
         raise IdentityCatalogError(f"{label}.priority must be an integer")
-    if not pipeline and (keywords or examples):
-        raise IdentityCatalogError(f"{label} needs a pipeline when it declares match terms")
+    # A declared route may intentionally remain direct.  This lets narrow,
+    # operational intents (for example Git commands) avoid an unrelated
+    # multi-skill implementation pipeline while still selecting the identity's
+    # normal tools and safety checks.
     return RouteSpec(route_id, pipeline, keywords, examples, priority)
 
 

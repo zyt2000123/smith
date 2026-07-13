@@ -250,6 +250,7 @@ function buildHeaderParts(options: {
   sessionId?: string;
   turnCount: number;
   viewMode: TranscriptViewMode;
+  turnTokenUsage: TokenUsage;
   tokenUsage: TokenUsage;
 }): HudPart[] {
   const parts: HudPart[] = [
@@ -273,9 +274,16 @@ function buildHeaderParts(options: {
     [{ text: options.viewMode, color: MUTED }],
   );
 
+  if (options.turnTokenUsage.total_tokens > 0) {
+    parts.push([
+      { text: "turn tok ", color: MUTED },
+      { text: formatTokenCount(options.turnTokenUsage.total_tokens), color: WARNING },
+    ]);
+  }
+
   if (options.tokenUsage.total_tokens > 0) {
     parts.push([
-      { text: "tok ", color: MUTED },
+      { text: "session tok ", color: MUTED },
       { text: formatTokenCount(options.tokenUsage.total_tokens), color: WARNING },
     ]);
   }
@@ -290,6 +298,7 @@ export const StatusHud = memo(function StatusHud(options: {
   sessionId?: string;
   turnCount: number;
   viewMode: TranscriptViewMode;
+  turnTokenUsage: TokenUsage;
   tokenUsage: TokenUsage;
   toolActivity: ToolActivity;
 }) {

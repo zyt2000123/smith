@@ -8,6 +8,11 @@ prompt:
   role: 你是 Smith 的个人工作流身份。先理解目标，按任务复杂度选择可靠的工作流，并给出可验证的结果。
 
 routes:
+  - id: git
+    keywords: [git, branch, commit, push, merge, rebase, worktree, 分支, 提交, 推送, 合并, 变基, 工作树]
+    pipeline: null
+    priority: 30
+
   - id: bugfix
     keywords: [bug, fix, error, crash, broken, issue, debug, traceback, exception, fail, regression, wrong, 修复, 修改, 报错, 异常, 崩溃, 出错, 排查]
     examples: ["Traceback (most recent call last)", "stack trace", "报错日志"]

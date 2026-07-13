@@ -140,7 +140,9 @@ function openConfig(context: CommandContext): void {
   const draft = createSetupDraft(state.config);
   state.set({
     mode: "setup",
-    setupFlow: "advanced",
+    // Reopen the same small setup form shown to new users. Values are read
+    // from the saved server config, so opening /config never resets them.
+    setupFlow: "initial",
     setupIndex: 0,
     setupDraft: draft,
     inputValue: draft.provider,

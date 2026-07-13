@@ -279,6 +279,7 @@ export class NodeBridge {
         transcriptEpoch: this.s.transcriptEpoch + 1,
         turnCount: transcript.filter((entry) => entry.kind === "turn").length,
         toolActivity: createToolActivity(),
+        turnTokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
         tokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
         queuedMessages: [],
         panel: "chat",

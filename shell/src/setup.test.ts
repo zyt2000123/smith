@@ -26,7 +26,7 @@ test("initial setup only asks for the five essential model fields", () => {
   assert.deepEqual([...INITIAL_SETUP_FIELDS], ["provider", "base_url", "api_key", "model", "review_model", "save"]);
 });
 
-test("setup draft exposes route and timeout config without exposing stored secrets", () => {
+test("setup draft restores the five essential values from saved config", () => {
   const config: LlmConfig = {
     configured: true,
     has_api_key: true,
@@ -53,63 +53,21 @@ test("setup draft exposes route and timeout config without exposing stored secre
   assert.deepEqual(JSON.parse(result.timeout_profiles), { gate: { read: 45, stream_read: 50 } });
 });
 
-test("setup maps the optional review model to the gate route", () => {
+test("setup saves only essential fields and clears legacy advanced settings", () => {
   const result = buildLlmConfigInput(draft({ review_model: "review-model" }));
-
-  assert.deepEqual(result.routes, { gate: { model: "review-model" } });
-});
-
-test("setup builds complete route and timeout patches while keeping route keys masked", () => {
-  const result = buildLlmConfigInput(
-    draft({
-      max_output_tokens: "2048",
-      routes:
-        '{"gate":{"model":"cheap-gate-model","max_output_tokens":512,"timeout_profile":"gate"},"background":{"base_url":null,"max_output_tokens":null}}',
-      gate_api_key: "gate-secret",
-      background_api_key: "-",
-      timeout_profiles: '{"gate":{"read":45,"stream_read":50},"background":{"read":null}}',
-    }),
-  );
 
   assert.deepEqual(result, {
     provider: "openai",
     base_url: "https://api.openai.com/v1",
     model: "gpt-4.1-mini",
-    max_output_tokens: 2048,
-    routes: {
-      gate: { model: "cheap-gate-model", max_output_tokens: 512, timeout_profile: "gate", api_key: "gate-secret" },
-      background: { base_url: null, max_output_tokens: null, api_key: null },
-    },
-    timeout_profiles: {
-      gate: { read: 45, stream_read: 50 },
-      background: { read: null },
-    },
+    routes: { gate: { model: "review-model" } },
+    timeout_profiles: {},
   });
 });
 
-test("setup permits clearing advanced configuration with empty JSON objects", () => {
-  const result = buildLlmConfigInput(draft({ routes: "{}", timeout_profiles: "{}" }));
+test("setup clears the review route when no review model is configured", () => {
+  const result = buildLlmConfigInput(draft({ review_model: "" }));
 
   assert.deepEqual(result.routes, {});
   assert.deepEqual(result.timeout_profiles, {});
-});
-
-test("setup rejects route API keys pasted into visible JSON", () => {
-  assert.throws(
-    () => buildLlmConfigInput(draft({ routes: '{"gate":{"api_key":"should-not-be-visible"}}' })),
-    /gate route API key field/,
-  );
-});
-
-test("setup validates top-level and route output-token limits", () => {
-  assert.equal("max_output_tokens" in buildLlmConfigInput(draft()), false);
-  assert.deepEqual(buildLlmConfigInput(draft({ max_output_tokens: "-" })).max_output_tokens, null);
-  assert.throws(
-    () => buildLlmConfigInput(draft({ max_output_tokens: "1.5" })),
-    /Max output tokens must be a positive integer/,
-  );
-  assert.throws(
-    () => buildLlmConfigInput(draft({ routes: '{"gate":{"max_output_tokens":true}}' })),
-    /routes\.gate\.max_output_tokens must be a positive integer or null/,
-  );
 });

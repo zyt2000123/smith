@@ -255,6 +255,7 @@ type ShellFooterProps = {
   viewMode: TranscriptViewMode;
   config: AppStore["config"];
   currentSession: AppStore["currentSession"];
+  turnTokenUsage: AppStore["turnTokenUsage"];
   tokenUsage: AppStore["tokenUsage"];
   turnCount: number;
   toolActivity: AppStore["toolActivity"];
@@ -304,6 +305,7 @@ function ShellFooter(props: ShellFooterProps) {
         projectName={path.basename(process.cwd())}
         cwd={process.cwd()}
         sessionId={props.currentSession?.id}
+        turnTokenUsage={props.turnTokenUsage}
         tokenUsage={props.tokenUsage}
         toolActivity={props.toolActivity}
         turnCount={props.turnCount}
@@ -470,6 +472,7 @@ function SmithApp() {
   const transcriptEpoch = useS((state) => state.transcriptEpoch);
   const turnCount = useS((state) => state.turnCount);
   const toolActivity = useS((state) => state.toolActivity);
+  const turnTokenUsage = useS((state) => state.turnTokenUsage);
   const tokenUsage = useS((state) => state.tokenUsage);
   const skills = useS((state) => state.skills);
   const config = useS((state) => state.config);
@@ -587,6 +590,7 @@ function SmithApp() {
           slashItems={slashItems}
           slashMenuOpen={slashMenuOpen}
           statusLine={statusLine}
+          turnTokenUsage={turnTokenUsage}
           tokenUsage={tokenUsage}
           toolActivity={toolActivity}
           turnCount={turnCount}
