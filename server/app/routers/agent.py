@@ -10,6 +10,7 @@ from ..schemas.auto_task import (
     AutoTaskUpdate,
 )
 from ..schemas.session import MessageCreate, MessageOut, SessionCreate, SessionOut
+from ..schemas.run import RunStateOut
 from ..schemas.skill import SkillSummaryOut
 from ..schemas.task import TaskCreate, TaskOut
 from ..services.agent_service import AgentService
@@ -136,6 +137,14 @@ async def update_file(
 @router.get("/stats")
 async def get_stats(svc: AgentService = Depends(get_agent_service)):
     return await svc.get_stats()
+
+
+@router.get("/runs/{run_id}", response_model=RunStateOut)
+async def get_run(
+    run_id: str,
+    svc: AgentService = Depends(get_agent_service),
+):
+    return await svc.get_run(run_id)
 
 
 @router.get("/tasks", response_model=list[TaskOut])

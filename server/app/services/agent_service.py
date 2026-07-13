@@ -15,6 +15,7 @@ from ..schemas.task import TaskCreate, TaskOut
 from .auto_task_service import AutoTaskService
 from .agent_profile_service import AgentProfileService
 from .profile_file_service import ProfileFileService
+from .run_state_service import RunStateService
 from .session_service import SessionService
 from .skill_service import SkillService
 from .stats_service import StatsService
@@ -40,6 +41,7 @@ class AgentService:
         profile_file_service: ProfileFileService | Any | None = None,
         skill_service: SkillService | Any | None = None,
         stats_service: StatsService | Any | None = None,
+        run_state_service: RunStateService | Any | None = None,
     ) -> None:
         agent_profile_repo = AgentProfileRepo()
         session_repo = SessionRepo()
@@ -55,6 +57,7 @@ class AgentService:
         self.profile_file_service = profile_file_service or ProfileFileService()
         self.skill_service = skill_service or SkillService(agent_profile_repo)
         self.stats_service = stats_service or StatsService()
+        self.run_state_service = run_state_service or RunStateService()
 
     async def ensure_profile(self) -> AgentProfileOut:
         from ..schemas.agent_profile import AgentProfileCreate
@@ -181,6 +184,9 @@ class AgentService:
 
     async def get_stats(self) -> dict:
         return await self.stats_service.get_agent_stats(await self._profile_id())
+
+    async def get_run(self, run_id: str):
+        return self.run_state_service.get_run(await self._profile_id(), run_id)
 
     async def list_tasks(self) -> list[TaskOut]:
         return await self.task_service.list_tasks(await self._profile_id())

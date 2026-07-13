@@ -160,6 +160,9 @@ export function closeLatestTurn(entries: TranscriptEntry[]): TranscriptEntry[] {
 
 export function applyStreamEvent(entries: TranscriptEntry[], event: StreamEvent): TranscriptEntry[] {
   switch (event.type) {
+    case "run_started":
+      return entries;
+
     case "provisional_text_delta":
       if (!event.provisionId || !event.text) return entries;
       return updateLastTurn(entries, (turn) => ({

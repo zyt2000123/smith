@@ -13,6 +13,7 @@ from engine.execution.agent_loop import (
     run_stream_with_runtime,
 )
 from engine.execution.events import EventType
+from engine.execution.run_state import RunStateStore, RunStatus
 from engine.execution.runtime import EngineRequest, RuntimeContext, RuntimeServices
 from engine.identity_catalog import IdentityCatalog
 from engine.llm.client import ChatResponse, ToolCallData
@@ -170,6 +171,29 @@ def test_reply_with_runtime_uses_explicit_profile_context(tmp_path: Path) -> Non
     assert llm.messages[-1]["content"] == "hello\n\ncwd=/tmp/work"
     assert "agent_id: smith" in llm.messages[0]["content"]
     assert "_profile_dir:" in llm.messages[0]["content"]
+
+
+def test_run_stream_persists_queued_and_terminal_run_state(tmp_path: Path) -> None:
+    async def run() -> tuple[str, RunStatus, int]:
+        runtime, services, _ = _runtime(tmp_path)
+        stream = run_stream_with_runtime(EngineRequest(message="hello"), runtime, services)
+        store = RunStateStore(runtime.profile_dir)
+        queued = store.get(stream.run_id)
+        assert queued is not None
+        assert queued.status is RunStatus.QUEUED
+
+        events = [event async for event in stream.stream_events()]
+        finished = store.get(stream.run_id)
+        assert finished is not None
+        assert finished.status is RunStatus.COMPLETED
+        assert finished.last_event_type == EventType.RUN_FINISHED.value
+        assert finished.event_seq == len(events)
+        return stream.run_id, finished.status, finished.event_seq
+
+    run_id, status, event_seq = asyncio.run(run())
+    assert run_id
+    assert status is RunStatus.COMPLETED
+    assert event_seq > 1
 
 
 def test_reply_with_runtime_marks_actual_tool_activity(tmp_path: Path) -> None:
