@@ -211,6 +211,7 @@ class SessionService:
 
         full_reply: list[str] = []
         msg: dict | None = None
+        run_id: str | None = None
         terminal_status = "completed"
         terminal_notice: str | None = None
         try:
@@ -227,9 +228,13 @@ class SessionService:
                 runtime,
                 services,
             )
+            run_id = getattr(run, "run_id", None)
             async for ev in run.stream_events():
                 t = ev.type.value
-                if t == "raw_response_event":
+                if t == "run_started":
+                    run_id = str(ev.data.get("run_id") or run_id or "") or None
+                    yield sse("run_started", {"run_id": run_id})
+                elif t == "raw_response_event":
                     raw_type = ev.data.get("type")
                     raw_data = ev.data.get("data")
                     if (
@@ -318,7 +323,10 @@ class SessionService:
 
         if terminal_notice:
             yield sse("message", {"text": f"\n⚠️ {terminal_notice}\n"})
-        yield sse("done", {
+        done_payload = {
             "id": msg["id"] if msg else None,
             "status": terminal_status,
-        })
+        }
+        if run_id is not None:
+            done_payload["run_id"] = run_id
+        yield sse("done", done_payload)

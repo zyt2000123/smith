@@ -45,6 +45,7 @@ from .react_loop import (
     react_loop as _react_loop,
     react_stream_loop as _react_stream_loop,
 )
+from .run_state import RunStateError, RunStateStore, RunStatus
 from .run_stream import AgentRunStream
 from .runtime import EngineRequest, EngineResult, RuntimeContext, RuntimeServices
 from .skill_chain import SkillChain, load_gate_content
@@ -533,6 +534,46 @@ def _fact_gate_for_request(
     ), tool_registry=definitions)
 
 
+def _record_run_event(
+    store: RunStateStore | None,
+    run_id: str,
+    event: ExecutionEvent,
+) -> None:
+    """Best-effort projection of engine events into durable run metadata."""
+    if store is None:
+        return
+    try:
+        event_type = event.type.value
+        if event.type is EventType.RUN_STARTED:
+            store.transition(run_id, RunStatus.RUNNING, event_type=event_type)
+            return
+        if event.type is EventType.RUN_FINISHED:
+            status = RunStatus(str(event.data.get("status", RunStatus.FAILED.value)))
+            reason = event.data.get("reason")
+            store.transition(
+                run_id,
+                status,
+                event_type=event_type,
+                reason=str(reason) if reason is not None else None,
+                error=str(reason) if status is RunStatus.FAILED and reason is not None else None,
+            )
+            return
+
+        kwargs: dict[str, object] = {}
+        if event.type is EventType.SKILL_START:
+            kwargs["current_skill"] = event.data.get("skill")
+        elif event.type is EventType.SKILL_END:
+            kwargs["clear_skill"] = True
+        elif event.type is EventType.TOOL_CALL_START:
+            kwargs["current_tool"] = event.data.get("name")
+        elif event.type is EventType.TOOL_CALL_RESULT:
+            kwargs["clear_tool"] = True
+        store.record_event(run_id, event_type, **kwargs)
+    except (RunStateError, ValueError, TypeError):
+        # Run observability must not take down an otherwise valid execution.
+        logger.warning("failed to record run state event (run=%s, event=%s)", run_id, event.type.value)
+
+
 def run_stream_with_runtime(
     request: EngineRequest,
     runtime: RuntimeContext,
@@ -540,9 +581,21 @@ def run_stream_with_runtime(
 ) -> AgentRunStream:
     """Create a typed, single-consumer stream for one Agent run."""
     run_id = uuid4().hex
+    state_store: RunStateStore | None = None
+    try:
+        state_store = RunStateStore(runtime.profile_dir)
+        state_store.create(
+            run_id,
+            agent_id=runtime.agent_id,
+            session_id=runtime.session_id,
+            identity_id=request.identity_id,
+        )
+    except (RunStateError, OSError, ValueError):
+        logger.warning("failed to initialize run state (run=%s)", run_id, exc_info=True)
+        state_store = None
     return AgentRunStream(
         run_id,
-        _run_events_with_runtime(request, runtime, services, run_id),
+        _run_events_with_runtime(request, runtime, services, run_id, state_store),
     )
 
 
@@ -551,6 +604,7 @@ async def _run_events_with_runtime(
     runtime: RuntimeContext,
     services: RuntimeServices,
     run_id: str,
+    state_store: RunStateStore | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Produce one complete run, including persistence and cleanup."""
     full_text: list[str] = []
@@ -561,7 +615,9 @@ async def _run_events_with_runtime(
     state_dir: Path | None = None
     memory_persist_failed = False
 
-    yield ExecutionEvent(EventType.RUN_STARTED, {"run_id": run_id})
+    run_started = ExecutionEvent(EventType.RUN_STARTED, {"run_id": run_id})
+    _record_run_event(state_store, run_id, run_started)
+    yield run_started
     try:
         s = await prepare_runtime(request, runtime, services)
         state_dir = s.state_dir
@@ -591,17 +647,24 @@ async def _run_events_with_runtime(
                     terminal_reason = "blocked"
                 elif _has_memory_worthy_activity(event):
                     had_tools = True
+                _record_run_event(state_store, run_id, event)
                 yield event
         drained = True
     except Exception as exc:
         logger.exception("agent execution failed (agent=%s)", runtime.agent_id)
         terminal_status = "failed"
         terminal_reason = "execution_error"
-        yield ExecutionEvent(EventType.TEXT_DELTA, {
+        failure_text = ExecutionEvent(EventType.TEXT_DELTA, {
             "text": f"⚠️ 执行失败：{type(exc).__name__}（详情见服务端日志）",
         })
-        yield ExecutionEvent(EventType.FAILED, {"reason": terminal_reason})
-        yield ExecutionEvent(EventType.DONE, {})
+        _record_run_event(state_store, run_id, failure_text)
+        yield failure_text
+        failure_event = ExecutionEvent(EventType.FAILED, {"reason": terminal_reason})
+        _record_run_event(state_store, run_id, failure_event)
+        yield failure_event
+        done_event = ExecutionEvent(EventType.DONE, {})
+        _record_run_event(state_store, run_id, done_event)
+        yield done_event
         drained = True
     finally:
         if drained and terminal_status == "completed" and state_dir is not None:
@@ -612,6 +675,16 @@ async def _run_events_with_runtime(
             except Exception:
                 memory_persist_failed = True
                 logger.warning("failed to finalize conversation memory", exc_info=True)
+        if state_store is not None and not drained:
+            try:
+                state_store.transition(
+                    run_id,
+                    RunStatus.CANCELLED,
+                    event_type="run_cancelled",
+                    reason="consumer_disconnected",
+                )
+            except (RunStateError, OSError, ValueError):
+                logger.warning("failed to mark cancelled run (run=%s)", run_id, exc_info=True)
         try:
             await services.close()
         except Exception:
@@ -625,7 +698,9 @@ async def _run_events_with_runtime(
             # 记忆写入失败对用户默认不可见；在终态事件上打标，
             # 让前端有机会提示"本轮未写入长期记忆"。
             terminal_data["memory_persist_failed"] = True
-        yield ExecutionEvent(EventType.RUN_FINISHED, terminal_data)
+        finished_event = ExecutionEvent(EventType.RUN_FINISHED, terminal_data)
+        _record_run_event(state_store, run_id, finished_event)
+        yield finished_event
 
 
 # ---------------------------------------------------------------------------

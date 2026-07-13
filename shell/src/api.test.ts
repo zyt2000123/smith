@@ -9,6 +9,13 @@ test("SSE decoder accepts standard data fields without a trailing space", () => 
   assert.deepEqual(event, { type: "done", id: "message-1", status: "completed" });
 });
 
+test("SSE decoder exposes the run id when execution starts", () => {
+  assert.deepEqual(
+    decodeSseEvent('event: run_started\ndata: {"run_id":"run-1"}'),
+    { type: "run_started", runId: "run-1" },
+  );
+});
+
 test("SSE decoder preserves an incomplete terminal status", () => {
   const event = decodeSseEvent('event: done\ndata: {"id":"message-1","status":"incomplete"}');
 

@@ -61,6 +61,7 @@ export type StreamTerminalStatus = "completed" | "failed" | "incomplete";
 
 export type StreamEvent =
   | { type: "message"; text: string }
+  | { type: "run_started"; runId: string }
   | { type: "provisional_text_delta"; provisionId: string; text: string }
   | { type: "provisional_commit"; provisionId: string }
   | { type: "provisional_retract"; provisionId: string; reason: string }
@@ -231,6 +232,7 @@ function terminalStatus(payload: Record<string, unknown>): StreamTerminalStatus 
 
 const SSE_EVENT_DECODERS: Partial<Record<string, SseEventDecoder>> = {
   message: (payload) => ({ type: "message", text: String(payload.text ?? "") }),
+  run_started: (payload) => ({ type: "run_started", runId: String(payload.run_id ?? "") }),
   provisional_text_delta: (payload) => ({
     type: "provisional_text_delta",
     provisionId: String(payload.provision_id ?? ""),
