@@ -18,11 +18,11 @@ import {
   hasStoredApiKey,
   isApiKeySetupField,
   nextSetupIndex,
-  SETUP_FIELDS,
   setProvider,
   setSetupField,
   setupFieldAt,
   setupFieldLabel,
+  setupFields,
 } from "./setup.js";
 import { type AppStore, createAppStore } from "./store.js";
 import { ACCENT, BORDER, ERROR, INFO, MUTED, WARNING } from "./theme.js";
@@ -89,21 +89,21 @@ function HeroPanel() {
 function SetupPanel() {
   const config = useS((state) => state.config);
   const draft = useS((state) => state.setupDraft);
+  const flow = useS((state) => state.setupFlow);
   const index = useS((state) => state.setupIndex);
-  const activeField = setupFieldAt(index);
+  const fields = setupFields(flow);
+  const activeField = setupFieldAt(index, flow);
 
   return (
     <Box flexDirection="column" marginBottom={1}>
-      <Text color={ACCENT}>SMITH SETUP</Text>
+      <Text color={ACCENT}>{flow === "initial" ? "SMITH SETUP" : "LLM CONFIG"}</Text>
       <Text color={MUTED}>
-        Tab/arrows to move, Enter to apply. Route/profile JSON is optional; omitted values inherit defaults.
+        {flow === "initial"
+          ? "Connect a model to get started."
+          : "Tab/arrows to move. Advanced route and timeout fields are optional."}
       </Text>
-      <Text color={MUTED}>
-        API keys are write-only: blank keeps one, and `-` clears one. Enter `{}` in a JSON field to clear that section.
-      </Text>
-      <Text color={MUTED}>For max output tokens, blank keeps its current value and `-` restores the provider default.</Text>
       <Box flexDirection="column" marginTop={1}>
-        {SETUP_FIELDS.map((field) => (
+        {fields.map((field) => (
           <Text key={field} color={field === activeField ? ACCENT : INFO}>
             {field === activeField ? ">" : " "}{" "}
             {isApiKeySetupField(field) && hasStoredApiKey(config, field)
@@ -348,6 +348,7 @@ async function submitSetup(
   activeField: ReturnType<typeof setupFieldAt>,
   configHasApiKey: boolean,
   setupIndex: number,
+  setupFlow: AppStore["setupFlow"],
 ): Promise<void> {
   const state = getState();
   if (activeField === "save") {
@@ -378,8 +379,8 @@ async function submitSetup(
     return;
   }
 
-  const nextIndex = nextSetupIndex(setupIndex, 1, false);
-  const nextField = setupFieldAt(nextIndex);
+  const nextIndex = nextSetupIndex(setupIndex, 1, false, setupFlow);
+  const nextField = setupFieldAt(nextIndex, setupFlow);
   state.set({
     setupDraft: draft,
     setupIndex: nextIndex,
@@ -408,13 +409,11 @@ function SmithApp() {
   const currentSession = useS((state) => state.currentSession);
   const welcomeNotice = useS((state) => state.welcomeNotice);
   const setupIndex = useS((state) => state.setupIndex);
+  const setupFlow = useS((state) => state.setupFlow);
   const slashIndex = useS((state) => state.slashIndex);
 
-  const activeSetupField = setupFieldAt(setupIndex);
-  const slashItems = useMemo(
-    () => filterSlash(buildSlashItems(skills), inputValue),
-    [inputValue, skills],
-  );
+  const activeSetupField = setupFieldAt(setupIndex, setupFlow);
+  const slashItems = useMemo(() => filterSlash(buildSlashItems(skills), inputValue), [inputValue, skills]);
   const slashMenuOpen = mode === "chat" && inputValue.startsWith("/");
 
   const { done, active } = useMemo(() => splitTranscript(transcript), [transcript]);
@@ -452,13 +451,15 @@ function SmithApp() {
         activeSetupField,
         Boolean(config?.has_api_key || config?.routes?.interactive?.has_api_key),
         setupIndex,
+        setupFlow,
       );
     },
-    [activeSetupField, config?.has_api_key, config?.routes?.interactive?.has_api_key, setupIndex],
+    [activeSetupField, config?.has_api_key, config?.routes?.interactive?.has_api_key, setupFlow, setupIndex],
   );
 
   useShellInput({
     mode,
+    setupFlow,
     busy,
     viewMode,
     slashMenuOpen,

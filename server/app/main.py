@@ -7,7 +7,7 @@ from fastapi import Depends
 
 from common.database import close_db
 
-from .infrastructure.auth import require_auth
+from .infrastructure.auth import get_local_token, require_auth
 from .infrastructure.database import get_app_db
 from .routers import (
     agent,
@@ -20,6 +20,7 @@ from .services.engine_runtime import close_shared_llm_clients, load_runtime_iden
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    get_local_token()
     await get_app_db()
     load_runtime_identity_catalog(force=True)
     scheduler_task = asyncio.create_task(run_scheduler())

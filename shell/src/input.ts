@@ -10,6 +10,7 @@ import type { TranscriptViewMode } from "./transcript-state.js";
 
 export type ShellInputOptions = {
   mode: Mode;
+  setupFlow: AppStore["setupFlow"];
   busy: boolean;
   viewMode: TranscriptViewMode;
   slashMenuOpen: boolean;
@@ -26,12 +27,12 @@ export type ShellInputOptions = {
 
 function moveSetupSelection(options: ShellInputOptions, direction: 1 | -1): void {
   const state = options.getState();
-  const field = setupFieldAt(state.setupIndex);
+  const field = setupFieldAt(state.setupIndex, state.setupFlow);
   const draft = isEditableSetupField(field)
     ? setSetupField(state.setupDraft, field, state.inputValue)
     : state.setupDraft;
-  const index = nextSetupIndex(state.setupIndex, direction, true);
-  const nextField = setupFieldAt(index);
+  const index = nextSetupIndex(state.setupIndex, direction, true, state.setupFlow);
+  const nextField = setupFieldAt(index, state.setupFlow);
   state.set({
     setupDraft: draft,
     setupIndex: index,

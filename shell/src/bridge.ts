@@ -21,6 +21,7 @@ import {
   streamMessage,
 } from "./api.js";
 import { ensureLocalServer } from "./dev-server.js";
+import { createSetupDraft } from "./setup.js";
 import type { AppStore } from "./store.js";
 import { clearTerminal } from "./term.js";
 import { restoreTranscript } from "./transcript-state.js";
@@ -159,10 +160,13 @@ export class NodeBridge {
       const config = await getLlmConfig(server.baseUrl);
       this.s.set({ config });
       if (!config.configured) {
+        const setupDraft = createSetupDraft(config);
         this.s.set({
           mode: "setup",
+          setupFlow: "initial",
+          setupDraft,
           setupIndex: 0,
-          inputValue: "openai",
+          inputValue: setupDraft.provider,
           statusLine: "Run the initial setup to wake Smith up.",
         });
         return;
