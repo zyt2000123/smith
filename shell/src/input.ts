@@ -96,9 +96,10 @@ function handleSlashNavigation(key: Key, options: ShellInputOptions): boolean {
   return false;
 }
 
-function handleEscape(key: Key, options: ShellInputOptions): boolean {
+export function handleEscape(key: Key, options: ShellInputOptions): boolean {
   if (!key.escape) return false;
 
+  if (options.bridge.removeLatestQueuedMessage()) return true;
   if (options.busy && options.bridge.cancelRequest()) return true;
   if (options.slashMenuOpen) {
     options.getState().set({ inputValue: "", slashIndex: 0 });
@@ -109,6 +110,18 @@ function handleEscape(key: Key, options: ShellInputOptions): boolean {
     return true;
   }
   return false;
+}
+
+export function handleQueuedEdit(key: Key, options: ShellInputOptions): boolean {
+  if (!key.shift || !key.leftArrow) return false;
+
+  const queued = options.bridge.removeLatestQueuedMessage();
+  if (!queued) return false;
+
+  const state = options.getState();
+  const skill = queued.skillName ? state.skills.find((item) => item.name === queued.skillName) : undefined;
+  state.set({ inputValue: queued.text, ...(skill ? { pendingSkill: skill } : {}) });
+  return true;
 }
 
 function handleHistoryNavigation(key: Key, options: ShellInputOptions): boolean {
@@ -147,6 +160,7 @@ function routeInput(input: string, key: Key, options: ShellInputOptions): void {
     return;
   }
   if (handleViewToggle(input, key, options)) return;
+  if (handleQueuedEdit(key, options)) return;
   if (handleSlashNavigation(key, options)) return;
   if (handleEscape(key, options)) return;
   if (handleHistoryNavigation(key, options)) return;

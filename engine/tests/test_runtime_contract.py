@@ -79,7 +79,43 @@ class ToolCallingMemoryLLM(ToolCallingLLM):
         self.messages = messages
         if self.responses:
             return self.responses.pop(0)
+        prompt = messages[-1]["content"]
+        if "`memory/recent.md`" in prompt:
+            return ChatResponse(text="""# Recent Working Memory
+
+## Active Work
+- **Runtime memory** — 状态：active；下一步：verify；更新：2026-07-13。
+
+## Pending
+
+## Recent Verified Outcomes
+""")
+        if "`memory/durable.md`" in prompt:
+            return ChatResponse(text="""# Durable Project Memory
+
+## Confirmed Facts
+- **Runtime memory**: Tool-assisted turns enter the memory pipeline.
+
+## Decisions
+
+## Reusable Procedures
+
+## Known Pitfalls
+""")
         return ChatResponse(text="stable memory summary")
+
+
+class PassReviewer(FakeLLM):
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        prefix_cache_key: str | None = None,
+    ) -> ChatResponse:
+        self.messages = messages
+        return ChatResponse(
+            text='{"pass": true, "hard_fail": [], "soft_fail": [], "feedback": ""}'
+        )
 
 
 def _write_profile(profile_dir: Path) -> None:
@@ -152,6 +188,39 @@ def test_prepare_runtime_binds_memory_ops_but_keeps_it_hidden(tmp_path: Path) ->
     assert all(schema["function"]["name"] != "memory_ops" for schema in schemas)
 
 
+def test_prepare_runtime_keeps_recent_and_retrieves_only_matching_durable(
+    tmp_path: Path,
+) -> None:
+    async def run() -> str:
+        runtime, services, _ = _runtime(tmp_path)
+        memory_dir = runtime.profile_dir / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "recent.md").write_text(
+            "# Recent Working Memory\n\n## Active Work\n- RECENT_ACTIVE_WORK\n",
+            encoding="utf-8",
+        )
+        (memory_dir / "durable.md").write_text(
+            "# Durable Project Memory\n\n"
+            "## Confirmed Facts\n"
+            "- PostgreSQL migration uses Alembic.\n"
+            "- Redis caching uses a separate worker.\n",
+            encoding="utf-8",
+        )
+
+        setup = await prepare_runtime(
+            EngineRequest(message="Continue the PostgreSQL migration"),
+            runtime,
+            services,
+        )
+        return setup.system_prompt
+
+    prompt = asyncio.run(run())
+
+    assert "RECENT_ACTIVE_WORK" in prompt
+    assert "PostgreSQL migration uses Alembic" in prompt
+    assert "Redis caching uses a separate worker" not in prompt
+
+
 def test_reply_with_runtime_uses_explicit_profile_context(tmp_path: Path) -> None:
     async def run() -> FakeLLM:
         runtime, services, llm = _runtime(tmp_path)
@@ -196,6 +265,27 @@ def test_run_stream_persists_queued_and_terminal_run_state(tmp_path: Path) -> No
     assert event_seq > 1
 
 
+def test_run_stream_bounds_post_run_learning_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def slow_persist(*_args, **_kwargs):
+        await asyncio.sleep(1)
+        return True
+
+    monkeypatch.setattr(agent_loop_module, "_persist_runtime_learning", slow_persist)
+    monkeypatch.setattr(agent_loop_module, "_RUNTIME_LEARNING_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    async def collect_events():
+        runtime, services, _ = _runtime(tmp_path)
+        stream = run_stream_with_runtime(EngineRequest(message="hello"), runtime, services)
+        return [event async for event in stream.stream_events()]
+
+    events = asyncio.run(asyncio.wait_for(collect_events(), timeout=0.2))
+
+    assert events[-1].type is EventType.RUN_FINISHED
+
+
 def test_reply_with_runtime_marks_actual_tool_activity(tmp_path: Path) -> None:
     async def run() -> ToolCallingLLM:
         runtime, services, _ = _runtime(tmp_path)
@@ -218,6 +308,7 @@ def test_runtime_reuses_llm_for_memory_compilation(tmp_path: Path) -> None:
         runtime, services, _ = _runtime(tmp_path)
         llm = ToolCallingMemoryLLM()
         services.llm = llm  # type: ignore[assignment]
+        services.gate_llm = PassReviewer()  # type: ignore[assignment]
         state_dir = runtime.profile_dir / "memory"
         state_dir.mkdir(parents=True)
         (state_dir / ".compile_counter").write_text("4", encoding="utf-8")
@@ -235,7 +326,7 @@ def test_runtime_reuses_llm_for_memory_compilation(tmp_path: Path) -> None:
     assert llm.closed is True
     assert len(llm.chat_calls) >= 3
     assert any(
-        messages[0]["content"].startswith("You are a memory compiler")
+        messages[0]["content"].startswith("You are Smith's memory compiler")
         for messages in llm.chat_calls
     )
 
@@ -323,26 +414,32 @@ def test_reply_events_with_runtime_emits_decision_reply_and_closes(tmp_path: Pat
 def test_runtime_services_close_closes_the_gate_client(tmp_path: Path) -> None:
     runtime, services, llm = _runtime(tmp_path)
     gate_llm = FakeLLM()
+    background_llm = FakeLLM()
     services.gate_llm = gate_llm  # type: ignore[assignment]
+    services.background_llm = background_llm  # type: ignore[assignment]
 
     asyncio.run(services.close())
 
     assert runtime.agent_id == "smith"
     assert llm.closed is True
     assert gate_llm.closed is True
+    assert background_llm.closed is True
 
 
 def test_runtime_services_close_leaves_borrowed_llm_clients_open(tmp_path: Path) -> None:
     runtime, services, llm = _runtime(tmp_path)
     gate_llm = FakeLLM()
+    background_llm = FakeLLM()
     services.gate_llm = gate_llm  # type: ignore[assignment]
     services.owns_llm_clients = False
+    services.background_llm = background_llm  # type: ignore[assignment]
 
     asyncio.run(services.close())
 
     assert runtime.agent_id == "smith"
     assert llm.closed is False
     assert gate_llm.closed is False
+    assert background_llm.closed is False
 
 
 def test_run_stream_reports_terminal_state_only_after_it_is_drained(tmp_path: Path) -> None:

@@ -256,6 +256,51 @@ async def test_stream_message_forwards_provider_text_delta_without_replaying_fin
 
 
 @pytest.mark.asyncio
+async def test_stream_message_surfaces_memory_persistence_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_build_engine_runtime(agent_id: str, name: str, *, session_id: str | None = None):
+        return SimpleNamespace(agent_id=agent_id, agent_name=name, session_id=session_id), object()
+
+    async def fake_engine_reply_events(request, runtime, services):
+        yield SimpleNamespace(
+            type=SimpleNamespace(value="text_delta"),
+            data={"text": "done"},
+        )
+        yield SimpleNamespace(
+            type=SimpleNamespace(value="run_finished"),
+            data={
+                "run_id": "run-1",
+                "status": "completed",
+                "memory_persist_failed": True,
+            },
+        )
+
+    monkeypatch.setattr(session_service_module, "build_engine_runtime", fake_build_engine_runtime)
+    monkeypatch.setattr(
+        session_service_module,
+        "engine_run_stream_with_runtime",
+        _fake_run(fake_engine_reply_events),
+    )
+
+    events = [
+        event
+        async for event in SessionService(FakeSessionRepo(), FakeAgentProfileRepo()).stream_message(
+            "smith-id",
+            "sess-1",
+            "hello",
+        )
+    ]
+
+    messages = [
+        json.loads(event["data"])["text"]
+        for event in events
+        if event["event"] == "message"
+    ]
+    assert any("记忆" in message and "失败" in message for message in messages)
+
+
+@pytest.mark.asyncio
 async def test_stream_message_forwards_provisional_lifecycle_and_persists_only_committed_final_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

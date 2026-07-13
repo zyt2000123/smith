@@ -1,5 +1,7 @@
-# Interaction Preferences
+# Smith Context
 
-- Preferred Language: {{to_be_learned}}
-- Communication Style: {{to_be_learned}}
-- Code Style: {{to_be_learned}}
+## Confirmed Preferences
+
+## Collaboration Patterns
+
+## Stable User Context

@@ -1,6 +1,7 @@
 """Memory compilation — recent events + durable facts + episode summaries.
 
-Three compilation targets:
+Four compilation targets:
+  compile_context()  → ../context.md  (stable user collaboration memory)
   compile_recent()   → recent.md     (last 3-7 days, budget-capped)
   compile_durable()  → durable.md    (incremental merge of stable facts)
   compact_episode()  → episodes/*.md (on an explicit user summary request)
@@ -31,22 +32,35 @@ from ._files import (
 from ._review import (
     MemoryCompilationError,
     _generate_and_review,
+    _generate_and_review_result,
     _llm_summarize,
     _truncate_source,
+)
+from .history import append_memory_history
+from .policy import (
+    MemoryPolicy,
+    MemoryPolicyError,
+    MemoryViewName,
+    load_memory_policy,
+    resolve_view_path,
+    validate_rendered_view,
 )
 
 if TYPE_CHECKING:
     from engine.llm.port import LLMPort
 
-MAX_RECENT_CHARS = 8000
-MAX_DURABLE_CHARS = 10_000
+_MEMORY_POLICY = load_memory_policy()
+MAX_RECENT_CHARS = _MEMORY_POLICY.view("recent").max_chars
+MAX_DURABLE_CHARS = _MEMORY_POLICY.view("durable").max_chars
 MAX_RECENT_SOURCE_CHARS = 24_000
 MAX_DURABLE_SOURCE_CHARS = 16_000
 MAX_EPISODE_SOURCE_CHARS = 16_000
-MIN_WINDOW_DAYS = 3
-MAX_WINDOW_DAYS = 7
-_RECENT_REVIEW_TIMEOUT_SECONDS = 15.0
-_DURABLE_REVIEW_TIMEOUT_SECONDS = 15.0
+MIN_WINDOW_DAYS, MAX_WINDOW_DAYS = _MEMORY_POLICY.view("recent").window_days
+# Compilation is deferred from the interactive turn and may require several
+# generator/reviewer calls. Keep a finite bound, but do not make a normal
+# background request fail at the same 30-second budget as a chat turn.
+_RECENT_REVIEW_TIMEOUT_SECONDS = 300.0
+_DURABLE_REVIEW_TIMEOUT_SECONDS = 300.0
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +83,27 @@ def _write_fp(path: Path, fp: str) -> None:
 def _clear_recent_view(memory_dir: Path) -> bool:
     """Remove stale derived recent-memory artifacts without touching events."""
     removed = False
+    recent_path = memory_dir / "recent.md"
+    old_text = ""
+    safe_recent = safe_file_in_dir(memory_dir, recent_path)
+    if safe_recent is not None:
+        old_text = safe_recent.read_text(encoding="utf-8")
+        atomic_write_text(memory_dir / "recent.md.bak", old_text)
+
     for name in ("recent.md", ".fp_recent"):
         path = memory_dir / name
-        if path.exists():
+        if path.is_file() or path.is_symlink():
             path.unlink()
             removed = True
+    if removed:
+        append_memory_history(
+            memory_dir,
+            target="recent",
+            policy_version=_MEMORY_POLICY.version,
+            status="written",
+            old_text=old_text,
+            new_text="",
+        )
     return removed
 
 
@@ -171,15 +201,345 @@ def _entries_to_source(
         summary, _, _ = sanitize_memory_text(str(entry.get("summary", "?")))
         if summary_limit is not None:
             summary = _truncate_source(summary, summary_limit)
-        lines.append(f"- [{str(entry.get('timestamp', '?'))[:16]}] {task}: {summary}")
+        metadata = ", ".join(
+            f"{key}={entry[key]}"
+            for key in ("kind", "scope", "evidence")
+            if entry.get(key)
+        )
+        signals = entry.get("signals")
+        if isinstance(signals, list):
+            safe_signals = []
+            for signal in signals:
+                cleaned, _, _ = sanitize_memory_text(str(signal))
+                if cleaned.strip():
+                    safe_signals.append(cleaned.strip())
+            if safe_signals:
+                metadata = ", ".join(filter(None, (metadata, f"signals={safe_signals}")))
+        metadata_suffix = f" ({metadata})" if metadata else ""
+        lines.append(
+            f"- [{str(entry.get('timestamp', '?'))[:16]}]{metadata_suffix} {task}: {summary}"
+        )
 
     source = "\n".join(lines)
     return _truncate_source(source, source_limit) if source_limit is not None else source
 
 
+_RECENT_KINDS = {"work", "decision", "correction", "remember", "forget"}
+
+
+def _entries_for_view(entries: list[dict], view: MemoryViewName) -> list[dict]:
+    """Select evidence for a view while remaining compatible with old events."""
+    selected: list[dict] = []
+    for entry in entries:
+        kind = str(entry.get("kind") or "work")
+        scope = str(entry.get("scope") or "project")
+        if view == "context":
+            if scope == "user":
+                selected.append(entry)
+        elif view == "recent":
+            if kind in _RECENT_KINDS and (scope == "project" or kind in {"correction", "forget"}):
+                selected.append(entry)
+        elif view == "durable":
+            if kind not in {"preference", "pattern"} and (
+                scope == "project" or kind in {"correction", "remember", "forget"}
+            ):
+                selected.append(entry)
+    return selected
+
+
+_VIEW_COMPILER_SYSTEM_PROMPT = (
+    "You are Smith's memory compiler. Follow the supplied canonical MemoryPolicy exactly. "
+    "Return only the complete Markdown document for the requested target view."
+)
+
+
+def _build_view_prompt(
+    policy: MemoryPolicy,
+    view: MemoryViewName,
+    *,
+    existing: str,
+    source: str,
+) -> str:
+    spec = policy.view(view)
+    current_time = datetime.now(timezone.utc).isoformat()
+    return f"""\
+Generate the complete `{spec.path.as_posix()}` memory view.
+
+Current time (UTC): {current_time}
+
+Canonical MemoryPolicy:
+{policy.instructions_for(view, role="compiler")}
+
+Current accepted Markdown:
+{existing or "(empty)"}
+
+Selected evidence:
+{source}
+
+Output only the complete Markdown document beginning with `# {spec.title}`.
+"""
+
+
+async def _generate_view(
+    policy: MemoryPolicy,
+    view: MemoryViewName,
+    llm: "LLMPort",
+    reviewer: "LLMPort | None",
+    *,
+    existing: str,
+    source: str,
+) -> tuple[str, int]:
+    if reviewer is None:
+        raise MemoryCompilationError(
+            f"{view} compilation requires a reviewer model"
+        )
+    prompt = _build_view_prompt(policy, view, existing=existing, source=source)
+    review_source = (
+        f"CURRENT TIME (UTC): {datetime.now(timezone.utc).isoformat()}\n\n"
+        "PRIOR ACCEPTED MEMORY (reference state; retain only when the target "
+        "policy permits it, and never use it alone to prove that recent work "
+        f"is still current):\n{existing or '(empty)'}\n\n"
+        f"SELECTED NEW EVIDENCE (ground truth):\n{source}"
+    )
+    outcome = await _generate_and_review_result(
+        llm,
+        reviewer,
+        prompt,
+        system_prompt=_VIEW_COMPILER_SYSTEM_PROMPT,
+        source=review_source,
+        target_view=f"{view}.md",
+        review_policy=policy.instructions_for(view, role="reviewer"),
+    )
+    return _normalize_markdown(outcome.text), outcome.rounds
+
+
+def _normalize_markdown(text: str) -> str:
+    return text.strip() + "\n" if text.strip() else ""
+
+
+def _read_view(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    content, _, _ = sanitize_memory_text(path.read_text(encoding="utf-8"))
+    return _normalize_markdown(content)
+
+
+def _commit_view(
+    policy: MemoryPolicy,
+    view: MemoryViewName,
+    memory_dir: Path,
+    *,
+    existing: str,
+    draft: str,
+    review_rounds: int,
+    status: str = "written",
+    error: str | None = None,
+) -> None:
+    validate_rendered_view(policy, view, draft)
+    if contains_secret(draft) or contains_injection(draft):
+        raise MemoryCompilationError(f"{view} compilation output contains unsafe content")
+
+    target = resolve_view_path(policy, memory_dir.parent, view)
+    if existing and existing != draft:
+        atomic_write_text(target.with_name(f"{target.name}.bak"), existing)
+    atomic_write_text(target, draft)
+    append_memory_history(
+        memory_dir,
+        target=view,
+        policy_version=policy.version,
+        status="unchanged" if existing == draft and status == "written" else status,
+        old_text=existing,
+        new_text=draft,
+        review_rounds=review_rounds,
+        error=error,
+    )
+
+
+def _fallback_inline(value: object, limit: int) -> str:
+    """Render already-sanitized event data as one bounded Markdown line."""
+    cleaned, _, _ = sanitize_memory_text(str(value or ""))
+    cleaned = " ".join(cleaned.split()).replace("#", "＃").replace("`", "'")
+    return cleaned[:limit].rstrip(" .。；;")
+
+
+def _fallback_date(value: object) -> str:
+    parsed = _parse_ts(str(value or ""))
+    return (parsed or datetime.now(timezone.utc)).date().isoformat()
+
+
+def _fallback_recent_document(entries: list[dict]) -> str:
+    """Build a safe, extractive recent view when the model pipeline is unavailable."""
+    active_lines: list[str] = []
+    outcome_lines: list[str] = []
+    for entry in entries[-16:]:
+        topic = _fallback_inline(entry.get("task"), 80) or "未命名工作"
+        date = _fallback_date(entry.get("timestamp"))
+        active_lines.append(
+            f"- **{topic}** — 状态：已记录；下一步：依据现有证据继续处理；更新：{date}。"
+        )
+        summary = _fallback_inline(entry.get("summary"), 180)
+        if summary:
+            evidence = _fallback_inline(entry.get("evidence"), 40) or "memory_event"
+            outcome_lines.append(
+                f"- **{topic}** — 结果：{summary}；证据：{evidence}。"
+            )
+
+    return "\n".join([
+        "# Recent Working Memory",
+        "",
+        "## Active Work",
+        *(active_lines or ["- **暂无近期工作** — 状态：空；下一步：无；更新：" + _fallback_date(None) + "。"]),
+        "",
+        "## Pending",
+        "",
+        "## Recent Verified Outcomes",
+        *outcome_lines,
+        "",
+    ])
+
+
+_DURABLE_FALLBACK_SECTIONS: tuple[str, ...] = (
+    "Confirmed Facts",
+    "Decisions",
+    "Reusable Procedures",
+    "Known Pitfalls",
+)
+
+
+def _existing_fallback_bullets(existing: str, section: str) -> list[str]:
+    """Keep only bounded bullets from an accepted durable section."""
+    in_section = False
+    bullets: list[str] = []
+    for line in existing.splitlines():
+        if line.startswith("## "):
+            in_section = line[3:].strip() == section
+            continue
+        if in_section and line.lstrip().startswith("-"):
+            item = _fallback_inline(line.lstrip()[1:], 320)
+            if item:
+                bullets.append(f"- {item}")
+    return bullets
+
+
+def _fallback_durable_document(existing: str, entries: list[dict]) -> str:
+    """Build a safe extractive durable view without inventing facts."""
+    grouped = {
+        section: _existing_fallback_bullets(existing, section)
+        for section in _DURABLE_FALLBACK_SECTIONS
+    }
+    for entry in entries:
+        topic = _fallback_inline(entry.get("task"), 80) or "未命名事实"
+        summary = _fallback_inline(entry.get("summary"), 260)
+        if not summary:
+            continue
+        evidence = _fallback_inline(entry.get("evidence"), 40) or "memory_event"
+        kind = str(entry.get("kind") or "work")
+        if kind == "decision":
+            section = "Decisions"
+            line = f"- **{topic}**: 决定 {summary}；适用范围：当前项目；证据：{evidence}。"
+        elif kind == "correction":
+            section = "Known Pitfalls"
+            line = f"- **{topic}**: 记录已确认修正：{summary}；证据：{evidence}。"
+        elif kind == "work":
+            section = "Confirmed Facts"
+            line = f"- **{topic}**: 已记录项目事实：{summary}；证据：{evidence}。"
+        else:
+            section = "Confirmed Facts"
+            line = f"- **{topic}**: {summary}；证据：{evidence}。"
+        if line not in grouped[section]:
+            grouped[section].append(line)
+
+    parts = ["# Durable Project Memory"]
+    for section in _DURABLE_FALLBACK_SECTIONS:
+        parts.extend(["", f"## {section}", *grouped[section]])
+    parts.append("")
+    return "\n".join(parts)
+
+
+def _can_use_compilation_fallback(exc: Exception) -> bool:
+    """Fallback only for transient/review-loop failures, never policy violations."""
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(exc, MemoryCompilationError) and getattr(exc, "review_rounds", 0) > 0
+
+
+def _record_compile_failure(
+    memory_dir: Path,
+    view: MemoryViewName,
+    policy: MemoryPolicy,
+    existing: str,
+    exc: Exception,
+) -> None:
+    status = (
+        "rejected"
+        if isinstance(exc, (MemoryCompilationError, MemoryPolicyError))
+        else "failed"
+    )
+    append_memory_history(
+        memory_dir,
+        target=view,
+        policy_version=policy.version,
+        status=status,
+        old_text=existing,
+        review_rounds=getattr(exc, "review_rounds", 0),
+        error=f"{type(exc).__name__}: {exc}",
+    )
+
+
 # ---------------------------------------------------------------------------
-# compile_recent: replace today.md + week.md with a single budget-capped view
+# Structured context/recent/durable views
 # ---------------------------------------------------------------------------
+
+
+async def compile_context(
+    memory_dir: Path,
+    llm: "LLMPort",
+    reviewer: "LLMPort | None" = None,
+) -> bool:
+    """Compile user-scoped learning signals into ``agent_dir/context.md``."""
+    policy = _MEMORY_POLICY
+    entries = _entries_for_view(_load_recent(memory_dir), "context")
+    if not entries:
+        return False
+
+    target = resolve_view_path(policy, memory_dir.parent, "context")
+    existing = _read_view(target)
+    fp_file = memory_dir / ".fp_context"
+    fp = _fingerprint([
+        f"{entry.get('timestamp', '')}:{entry.get('kind', '')}:{entry.get('task', '')[:80]}"
+        for entry in entries
+    ])
+    if _read_fp(fp_file) == fp and target.is_file():
+        return False
+
+    source = _entries_to_source(entries, source_limit=MAX_DURABLE_SOURCE_CHARS)
+    try:
+        draft, rounds = await asyncio.wait_for(
+            _generate_view(
+                policy,
+                "context",
+                llm,
+                reviewer,
+                existing=existing,
+                source=source,
+            ),
+            timeout=_DURABLE_REVIEW_TIMEOUT_SECONDS,
+        )
+        _commit_view(
+            policy,
+            "context",
+            memory_dir,
+            existing=existing,
+            draft=draft,
+            review_rounds=rounds,
+        )
+    except Exception as exc:
+        _record_compile_failure(memory_dir, "context", policy, existing, exc)
+        raise
+
+    _write_fp(fp_file, fp)
+    return True
+
 
 async def compile_recent(
     memory_dir: Path,
@@ -187,89 +547,77 @@ async def compile_recent(
     reviewer: "LLMPort | None" = None,
 ) -> bool:
     """Compile recent events into recent.md. Budget-capped, elastic 3-7 day window."""
+    policy = _MEMORY_POLICY
     now = datetime.now(timezone.utc)
     # ponytail: recent.md is a rolling window — must read ALL events, not just
     # new ones. Offset is only for compile_durable's incremental merge.
     all_entries = _load_recent(memory_dir, from_offset=False)
 
-    entries = _filter_by_time(all_entries, now - timedelta(days=MIN_WINDOW_DAYS))
+    entries = _entries_for_view(
+        _filter_by_time(all_entries, now - timedelta(days=MIN_WINDOW_DAYS)),
+        "recent",
+    )
     if not entries:
-        entries = _filter_by_time(all_entries, now - timedelta(days=MAX_WINDOW_DAYS))
+        entries = _entries_for_view(
+            _filter_by_time(all_entries, now - timedelta(days=MAX_WINDOW_DAYS)),
+            "recent",
+        )
     if not entries:
         return _clear_recent_view(memory_dir)
 
-    out = memory_dir / "recent.md"
+    out = resolve_view_path(policy, memory_dir.parent, "recent")
     fp_file = memory_dir / ".fp_recent"
 
     fp = _fingerprint([f"{e.get('timestamp', '')}:{e.get('task', '')[:50]}" for e in entries])
     if _read_fp(fp_file) == fp and out.is_file():
         return False
 
+    existing = _read_view(out)
     source = _entries_to_source(entries, source_limit=MAX_RECENT_SOURCE_CHARS)
-    if len(source) > MAX_RECENT_CHARS:
-        prompt = (
-            f"Summarize recent activity into key events, grouped by date. "
-            f"Max {MAX_RECENT_CHARS} chars.\n\n{source}"
+    try:
+        draft, rounds = await asyncio.wait_for(
+            _generate_view(
+                policy,
+                "recent",
+                llm,
+                reviewer,
+                existing=existing,
+                source=source,
+            ),
+            timeout=_RECENT_REVIEW_TIMEOUT_SECONDS,
         )
-        if reviewer:
-            try:
-                summary = await asyncio.wait_for(
-                    _generate_and_review(llm, reviewer, prompt, source),
-                    timeout=_RECENT_REVIEW_TIMEOUT_SECONDS,
-                )
-            except Exception as exc:
-                # Recent memory is a derived activity view, not a source of new
-                # facts. Keep it available from sanitized events even when the
-                # optional LLM reviewer is unavailable or repeatedly rejects a
-                # summary; durable memory remains fail-closed below.
-                logger.warning(
-                    "recent reviewer unavailable (%s); using sanitized event projection",
-                    exc,
-                    exc_info=True,
-                )
-                summary = _truncate_source(source, MAX_RECENT_CHARS)
-        else:
-            summary = await _llm_summarize(llm, prompt)
-    else:
-        summary = source
+        _commit_view(
+            policy,
+            "recent",
+            memory_dir,
+            existing=existing,
+            draft=draft,
+            review_rounds=rounds,
+        )
+    except Exception as exc:
+        if reviewer is None or not _can_use_compilation_fallback(exc):
+            _record_compile_failure(memory_dir, "recent", policy, existing, exc)
+            raise
+        try:
+            fallback = _fallback_recent_document(entries)
+            _commit_view(
+                policy,
+                "recent",
+                memory_dir,
+                existing=existing,
+                draft=fallback,
+                review_rounds=getattr(exc, "review_rounds", 0),
+                status="fallback",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception:
+            _record_compile_failure(memory_dir, "recent", policy, existing, exc)
+            raise
+        _write_fp(fp_file, fp)
+        return True
 
-    if len(summary) > MAX_RECENT_CHARS:
-        logger.warning("recent compilation exceeded budget (%d > %d), rejecting", len(summary), MAX_RECENT_CHARS)
-        raise MemoryCompilationError("recent compilation output exceeded character budget")
-
-    if contains_secret(summary) or contains_injection(summary):
-        logger.warning("recent compilation output contains unsafe content — retrying later")
-        raise MemoryCompilationError("recent compilation output contains unsafe content")
-
-    atomic_write_text(out, f"## Recent Activity\n\n{summary}\n")
     _write_fp(fp_file, fp)
     return True
-
-
-# ---------------------------------------------------------------------------
-# compile_durable: incremental merge of stable facts (replace longterm+facts)
-# ---------------------------------------------------------------------------
-
-_DURABLE_MERGE_PROMPT = """\
-Update the long-term memory based on new events.
-
-Rules:
-1. Keep existing facts that are still valid.
-2. Add new stable information that will remain useful in future sessions.
-3. When new info conflicts with old, replace the old.
-4. Remove outdated, completed, or superseded content.
-5. Do NOT record temporary debugging, one-off operations, or chat.
-6. Do NOT record language, tone, verbosity, or interaction preferences (managed separately).
-7. Do NOT repeat the same fact in different phrasings.
-8. Keep the Markdown structure; add new headings if needed.
-9. Keep the complete output, including headings, within {max_chars} characters.
-10. Output ONLY the updated memory content.
-
-Existing memory:
-{existing}
-
-New events:
-{new_events}"""
 
 
 async def compile_durable(
@@ -278,25 +626,29 @@ async def compile_durable(
     reviewer: "LLMPort | None" = None,
 ) -> bool:
     """Incrementally merge new events into durable.md."""
+    policy = _MEMORY_POLICY
     durable_offset = _read_durable_offset(memory_dir)
     all_entries = _load_recent(memory_dir, offset=durable_offset)
+    entries = _entries_for_view(all_entries, "durable")
     total = _total_lines(memory_dir)
 
-    out = memory_dir / "durable.md"
+    out = resolve_view_path(policy, memory_dir.parent, "durable")
     fp_file = memory_dir / ".fp_durable"
 
-    fp = _fingerprint([f"{e.get('timestamp', '')}:{e.get('task', '')[:50]}" for e in all_entries])
+    if not entries:
+        if all_entries:
+            _write_durable_offset(memory_dir, total)
+        return False
+
+    fp = _fingerprint([f"{e.get('timestamp', '')}:{e.get('task', '')[:50]}" for e in entries])
     if _read_fp(fp_file) == fp and out.is_file():
         if not (memory_dir / ".durable_offset").is_file():
             _write_durable_offset(memory_dir, total)
         return False
 
-    original_path = safe_file_in_dir(memory_dir, out)
-    original = original_path.read_text(encoding="utf-8") if original_path else ""
-    existing, _, _ = sanitize_memory_text(original)
-    existing = existing.strip()
+    existing = _read_view(out)
     new_source = _entries_to_source(
-        all_entries,
+        entries,
         summary_limit=1000,
         source_limit=MAX_DURABLE_SOURCE_CHARS,
     )
@@ -304,37 +656,51 @@ async def compile_durable(
     if not new_source.strip():
         return False
 
-    merge_prompt = _DURABLE_MERGE_PROMPT.format(
-        existing=existing or "(empty — first compilation)",
-        new_events=new_source,
-        max_chars=MAX_DURABLE_CHARS,
-    )
-    if reviewer:
-        summary = await asyncio.wait_for(
-            _generate_and_review(llm, reviewer, merge_prompt, new_source),
+    try:
+        draft, rounds = await asyncio.wait_for(
+            _generate_view(
+                policy,
+                "durable",
+                llm,
+                reviewer,
+                existing=existing,
+                source=new_source,
+            ),
             timeout=_DURABLE_REVIEW_TIMEOUT_SECONDS,
         )
-    else:
-        summary = await asyncio.wait_for(
-            _llm_summarize(llm, merge_prompt),
-            timeout=_DURABLE_REVIEW_TIMEOUT_SECONDS,
+        if not draft:
+            raise MemoryCompilationError("durable compilation output was empty")
+        _commit_view(
+            policy,
+            "durable",
+            memory_dir,
+            existing=existing,
+            draft=draft,
+            review_rounds=rounds,
         )
+    except Exception as exc:
+        if reviewer is None or not _can_use_compilation_fallback(exc):
+            _record_compile_failure(memory_dir, "durable", policy, existing, exc)
+            raise
+        try:
+            fallback = _fallback_durable_document(existing, entries)
+            _commit_view(
+                policy,
+                "durable",
+                memory_dir,
+                existing=existing,
+                draft=fallback,
+                review_rounds=getattr(exc, "review_rounds", 0),
+                status="fallback",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception:
+            _record_compile_failure(memory_dir, "durable", policy, existing, exc)
+            raise
+        _write_fp(fp_file, fp)
+        _write_durable_offset(memory_dir, total)
+        return True
 
-    summary = summary.strip()
-    if not summary:
-        logger.warning("durable compilation output was empty — keeping existing memory")
-        raise MemoryCompilationError("durable compilation output was empty")
-    if contains_secret(summary) or contains_injection(summary):
-        logger.warning("durable compilation output contains unsafe content — keeping existing memory")
-        raise MemoryCompilationError("durable compilation output contains unsafe content")
-
-    durable = f"## Durable Memory\n\n{summary}\n"
-    if len(durable) > MAX_DURABLE_CHARS:
-        logger.warning("durable memory exceeded %s characters; rejecting", MAX_DURABLE_CHARS)
-        raise MemoryCompilationError("durable compilation output exceeded character budget")
-    if original and original != durable:
-        atomic_write_text(out.with_name("durable.md.bak"), original)
-    atomic_write_text(out, durable)
     _write_fp(fp_file, fp)
     _write_durable_offset(memory_dir, total)
     return True
@@ -387,7 +753,10 @@ async def compact_episode(
 
     _MAX_EPISODE_CHARS = 800
     if len(summary) > _MAX_EPISODE_CHARS:
-        logger.warning("episode summary exceeded %s characters — skipping write", _MAX_EPISODE_CHARS)
+        logger.warning(
+            "episode summary exceeded %s characters — skipping write",
+            _MAX_EPISODE_CHARS,
+        )
         raise MemoryCompilationError("episode summary exceeded character budget")
 
     if contains_secret(summary):
@@ -405,7 +774,12 @@ async def compact_episode(
 # assemble_memory: combine compiled layers for prompt injection
 # ---------------------------------------------------------------------------
 
-def assemble_memory(memory_dir: Path) -> str:
+def assemble_memory(
+    memory_dir: Path,
+    *,
+    include_durable: bool = True,
+    include_recent: bool = True,
+) -> str:
     """Combine durable + recent into a single memory block for prompt injection.
 
     Episodes are not included here — they should be retrieved via FTS5
@@ -413,7 +787,13 @@ def assemble_memory(memory_dir: Path) -> str:
     """
     sections = []
 
+    enabled = {
+        "durable.md": include_durable,
+        "recent.md": include_recent,
+    }
     for name in MEMORY_LAYER_FILES:
+        if not enabled.get(name, True):
+            continue
         path = safe_file_in_dir(memory_dir, memory_dir / name)
         if path is not None:
             content, _, _ = sanitize_memory_text(path.read_text(encoding="utf-8"))
@@ -425,7 +805,7 @@ def assemble_memory(memory_dir: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# run_compilation: entry point called by store.py after Dream
+# run_compilation: lifecycle entry point for the three formal views
 # ---------------------------------------------------------------------------
 
 async def run_compilation(
@@ -435,6 +815,7 @@ async def run_compilation(
     reviewer: "LLMPort | None" = None,
     raise_on_error: bool = False,
     allow_partial_progress: bool = False,
+    return_diagnostics: bool = False,
 ) -> dict:
     """Run compilation, optionally surfacing failures for retry control.
 
@@ -444,27 +825,35 @@ async def run_compilation(
     """
     memory_dir.mkdir(parents=True, exist_ok=True)
     total = _total_lines(memory_dir)
-    results = {"recent": False, "durable": False}
-    errors: list[str] = []
+    results = {"context": False, "recent": False, "durable": False}
+    errors: dict[str, str] = {}
+    try:
+        results["context"] = await compile_context(memory_dir, llm, reviewer)
+    except Exception:
+        logger.warning("context-memory compilation failed", exc_info=True)
+        errors["context"] = "context-memory compilation failed"
     try:
         results["recent"] = await compile_recent(memory_dir, llm, reviewer)
     except Exception:
         logger.warning("recent-memory compilation failed", exc_info=True)
-        errors.append("recent-memory compilation failed")
+        errors["recent"] = "recent-memory compilation failed"
     try:
         results["durable"] = await compile_durable(memory_dir, llm, reviewer)
     except Exception:
         logger.warning("durable-memory compilation failed", exc_info=True)
-        errors.append("durable-memory compilation failed")
-    if not errors and (results["recent"] or results["durable"]):
+        errors["durable"] = "durable-memory compilation failed"
+    if not errors and any(results.values()):
         _write_offset(memory_dir, total)
     # A successful layer is useful progress even when a later layer failed.
     # Only lifecycle callers opt into resetting their retry counter here; the
     # direct API keeps its strict raise-on-error behavior by default.
-    if (
-        errors
-        and raise_on_error
-        and not (allow_partial_progress and (results["recent"] or results["durable"]))
-    ):
-        raise RuntimeError("; ".join(errors))
+    partial_progress_is_safe = (
+        allow_partial_progress
+        and set(errors) == {"durable"}
+        and results["recent"]
+    )
+    if errors and raise_on_error and not partial_progress_is_safe:
+        raise RuntimeError("; ".join(errors.values()))
+    if return_diagnostics:
+        return {"results": results, "errors": errors}
     return results

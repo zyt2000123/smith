@@ -75,7 +75,60 @@ export type StreamEvent =
 type RequestOptions = {
   method?: string;
   body?: unknown;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 };
+
+export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 120_000;
+
+type TimeoutSignal = {
+  signal: AbortSignal;
+  didTimeout: () => boolean;
+  touch: () => void;
+  dispose: () => void;
+};
+
+export function createTimeoutSignal(timeoutMs: number, parentSignal?: AbortSignal): TimeoutSignal {
+  const controller = new AbortController();
+  let timedOut = false;
+
+  const abortFromParent = () => {
+    if (!controller.signal.aborted) {
+      controller.abort(parentSignal?.reason ?? new DOMException("The request was aborted.", "AbortError"));
+    }
+  };
+
+  const expire = () => {
+    timedOut = true;
+    controller.abort(new DOMException(`Request timed out after ${timeoutMs}ms.`, "TimeoutError"));
+  };
+  let timer = setTimeout(expire, timeoutMs);
+
+  if (parentSignal?.aborted) {
+    abortFromParent();
+  } else {
+    parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    touch: () => {
+      if (controller.signal.aborted) return;
+      clearTimeout(timer);
+      timer = setTimeout(expire, timeoutMs);
+    },
+    dispose: () => {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener("abort", abortFromParent);
+    },
+  };
+}
+
+function timeoutError(timeoutMs: number): Error {
+  return new Error(`Request timed out after ${timeoutMs}ms.`);
+}
 
 export type LlmRouteInput = {
   provider?: string | null;
@@ -105,22 +158,32 @@ function buildUrl(baseUrl: string, pathname: string): string {
 
 async function request<T>(baseUrl: string, pathname: string, options: RequestOptions = {}): Promise<T> {
   const authHeaders = await localAuthHeaders();
-  const response = await fetch(buildUrl(baseUrl, pathname), {
-    method: options.method ?? "GET",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      ...authHeaders,
-    },
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
-  });
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const timeout = createTimeoutSignal(timeoutMs, options.signal);
+  try {
+    const response = await fetch(buildUrl(baseUrl, pathname), {
+      method: options.method ?? "GET",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        ...authHeaders,
+      },
+      signal: timeout.signal,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`HTTP ${response.status}: ${text || response.statusText}`);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`HTTP ${response.status}: ${text || response.statusText}`);
+    }
+
+    return (await response.json()) as T;
+  } catch (error) {
+    if (timeout.didTimeout()) throw timeoutError(timeoutMs);
+    throw error;
+  } finally {
+    timeout.dispose();
   }
-
-  return response.json() as Promise<T>;
 }
 
 export async function getLlmConfig(baseUrl: string): Promise<LlmConfig> {
@@ -144,14 +207,19 @@ export async function ensureAgentProfile(baseUrl: string): Promise<AgentProfile>
   });
 }
 
-export async function listSessions(baseUrl: string): Promise<Session[]> {
-  return request<Session[]>(baseUrl, "/api/agent/sessions");
+export async function listSessions(baseUrl: string, options: Pick<RequestOptions, "signal"> = {}): Promise<Session[]> {
+  return request<Session[]>(baseUrl, "/api/agent/sessions", options);
 }
 
-export async function createSession(baseUrl: string, title: string): Promise<Session> {
+export async function createSession(
+  baseUrl: string,
+  title: string,
+  options: Pick<RequestOptions, "signal"> = {},
+): Promise<Session> {
   return request<Session>(baseUrl, "/api/agent/sessions", {
     method: "POST",
     body: { title },
+    signal: options.signal,
   });
 }
 
@@ -175,6 +243,7 @@ type StreamMessageOptions = {
   context?: string;
   skillName?: string;
   signal?: AbortSignal;
+  timeoutMs?: number;
 };
 
 type ParsedSseChunk = {
@@ -309,31 +378,45 @@ function consumeSseChunks(chunks: string[], sawDone: boolean): { events: StreamE
   return { events, sawDone: completed };
 }
 
-async function* readSseEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<StreamEvent, void, void> {
+async function* readSseEvents(
+  body: ReadableStream<Uint8Array>,
+  onActivity?: () => void,
+): AsyncGenerator<StreamEvent, void, void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let sawDone = false;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      onActivity?.();
 
-    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      const parsed = splitSseBuffer(buffer);
+      buffer = parsed.remainder;
+      const consumed = consumeSseChunks(parsed.chunks, sawDone);
+      sawDone = consumed.sawDone;
+      yield* consumed.events;
+      if (sawDone) return;
+    }
+
+    buffer += decoder.decode().replace(/\r\n/g, "\n");
     const parsed = splitSseBuffer(buffer);
-    buffer = parsed.remainder;
-    const consumed = consumeSseChunks(parsed.chunks, sawDone);
-    sawDone = consumed.sawDone;
+    const chunks = parsed.remainder.trim() ? [...parsed.chunks, parsed.remainder] : parsed.chunks;
+    const consumed = consumeSseChunks(chunks, sawDone);
     yield* consumed.events;
-  }
-
-  buffer += decoder.decode().replace(/\r\n/g, "\n");
-  const parsed = splitSseBuffer(buffer);
-  const chunks = parsed.remainder.trim() ? [...parsed.chunks, parsed.remainder] : parsed.chunks;
-  const consumed = consumeSseChunks(chunks, sawDone);
-  yield* consumed.events;
-  if (!consumed.sawDone) {
-    throw new Error("SSE stream ended before a done event was received.");
+    if (!consumed.sawDone) {
+      throw new Error("SSE stream ended before a done event was received.");
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // The response may already be closed or aborted.
+    }
+    reader.releaseLock();
   }
 }
 
@@ -344,29 +427,38 @@ export async function* streamMessage(
   options: StreamMessageOptions = {},
 ): AsyncGenerator<StreamEvent, void, void> {
   const authHeaders = await localAuthHeaders();
-  const response = await fetch(buildUrl(baseUrl, `/api/agent/sessions/${sessionId}/messages/stream`), {
-    method: "POST",
-    headers: {
-      Accept: "text/event-stream",
-      "Content-Type": "application/json",
-      ...authHeaders,
-    },
-    signal: options.signal,
-    body: JSON.stringify({
-      content,
-      context: options.context,
-      skill_name: options.skillName,
-    }),
-  });
+  const timeoutMs = options.timeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+  const timeout = createTimeoutSignal(timeoutMs, options.signal);
+  try {
+    const response = await fetch(buildUrl(baseUrl, `/api/agent/sessions/${sessionId}/messages/stream`), {
+      method: "POST",
+      headers: {
+        Accept: "text/event-stream",
+        "Content-Type": "application/json",
+        ...authHeaders,
+      },
+      signal: timeout.signal,
+      body: JSON.stringify({
+        content,
+        context: options.context,
+        skill_name: options.skillName,
+      }),
+    });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`HTTP ${response.status}: ${text || response.statusText}`);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`HTTP ${response.status}: ${text || response.statusText}`);
+    }
+
+    if (!response.body) {
+      throw new Error("Streaming response body is missing.");
+    }
+
+    yield* readSseEvents(response.body, timeout.touch);
+  } catch (error) {
+    if (timeout.didTimeout()) throw timeoutError(timeoutMs);
+    throw error;
+  } finally {
+    timeout.dispose();
   }
-
-  if (!response.body) {
-    throw new Error("Streaming response body is missing.");
-  }
-
-  yield* readSseEvents(response.body);
 }

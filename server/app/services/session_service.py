@@ -302,6 +302,16 @@ class SessionService:
                     status = ev.data.get("status")
                     if status in ("completed", "incomplete", "failed"):
                         terminal_status = status
+                    if ev.data.get("memory_persist_failed"):
+                        yield sse(
+                            "message",
+                            {
+                                "text": (
+                                    "\n⚠️ 本轮回答已完成，但记忆保存失败，"
+                                    "系统会在后续维护中重试。\n"
+                                )
+                            },
+                        )
                 # route_decided / gate_result / backtrack / done / run_started：前端暂不展示，跳过
         except Exception:
             logger.exception("agent SSE execution failed (session=%s)", session_id)

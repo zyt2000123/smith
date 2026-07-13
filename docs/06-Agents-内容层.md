@@ -96,19 +96,21 @@ tools:
 
 ### 1.6 context.md — 用户偏好
 
-包含 `{{to_be_learned}}` 占位符的用户画像模板，由 `UserPreferenceLearner`（`engine/memory/user_learner.py`）在交互过程中自动填充：
+`context.md` 是 Smith 自动学习后形成的常驻用户协作记忆，不再使用占位符，也不由 `UserPreferenceLearner` 直接改写。学习器只产出证据信号，Compiler 与 Reviewer 按 `engine/memory/MEMORY_POLICY.md` 生成完整文件：
 
 ```markdown
-# User Profile
-- Name: {{to_be_learned}}
-- Preferred Language: {{to_be_learned}}
-- Communication Style: {{to_be_learned}}
-- Technical Level: {{to_be_learned}}
-- Code Style: {{to_be_learned}}
+# Smith Context
 
-# Preferences
-(Auto-filled through interaction)
+## Confirmed Preferences
+- **Language**: 默认使用中文回答。
+
+## Collaboration Patterns
+- **Answer structure**: 先给结论，再说明必要依据。
+
+## Stable User Context
 ```
+
+用户手写的长期规则属于 `SMITH.md`；自动记忆不得修改它。context 的完整准入和格式规则以 MemoryPolicy 为准。
 
 ### 1.7 已移除的旧结构化人格文件
 

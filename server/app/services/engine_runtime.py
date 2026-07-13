@@ -64,6 +64,25 @@ class LLMClientManager:
 _llm_client_manager = LLMClientManager()
 
 
+def _single_line_runtime_value(value: object) -> str:
+    """Return a small display-safe runtime fact without widening config exposure."""
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:200]
+
+
+def _interactive_model_metadata(config: dict[str, Any]) -> dict[str, str]:
+    """Expose only the active chat route's non-secret identity to the engine."""
+    metadata: dict[str, str] = {}
+    provider = _single_line_runtime_value(config.get("provider"))
+    model = _single_line_runtime_value(config.get("model"))
+    if provider:
+        metadata["current_provider"] = normalize_provider_name(provider)
+    if model:
+        metadata["current_model"] = model
+    return metadata
+
+
 def load_runtime_identity_catalog(*, force: bool = False) -> IdentityCatalog:
     """Load the one catalog and validate its declared assets for every entry point."""
     catalog = load_identity_catalog(BUILTIN_IDENTITIES_DIR, force=force)
@@ -89,17 +108,22 @@ def build_engine_runtime(
 ) -> tuple[RuntimeContext, RuntimeServices]:
     """Build the engine runtime for the FastAPI product layer."""
     manager = llm_client_manager or _llm_client_manager
+    interactive_config = resolve_llm_config(usage=LLMUsage.INTERACTIVE)
+    gate_config = resolve_llm_config(usage=LLMUsage.GATE)
+    background_config = resolve_llm_config(usage=LLMUsage.BACKGROUND)
     runtime = RuntimeContext(
         agent_id=agent_id,
         agent_name=agent_name,
         profile_dir=AGENT_DIR,
         agents_dir=PATHS.project_root / "agents",
         session_id=session_id,
+        metadata=_interactive_model_metadata(interactive_config),
         identity_catalog=load_runtime_identity_catalog(),
     )
     services = RuntimeServices(
-        llm=manager.get(LLMUsage.INTERACTIVE),
-        gate_llm=manager.get(LLMUsage.GATE),
+        llm=manager.get_for_config(interactive_config),
+        gate_llm=manager.get_for_config(gate_config),
+        background_llm=manager.get_for_config(background_config),
         tool_registry=ToolRegistry(),
         skill_registry=SkillRegistry(),
         tool_guard=ToolGuard(SAFETY_RULES_PATH),

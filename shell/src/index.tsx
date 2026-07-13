@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import path from "node:path";
-import { Box, render, Static, Text, useApp } from "ink";
+import { useShikiHighlighter } from "@assistant-ui/react-ink-markdown";
+import { Box, render, Static, Text, useApp, useWindowSize } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import { useCallback, useEffect, useMemo, useRef } from "react";
@@ -8,10 +9,12 @@ import { useStore } from "zustand";
 
 import type { SkillSummary } from "./api.js";
 import { NodeBridge } from "./bridge.js";
+import type { CodeHighlighter } from "./code-block.js";
 import { buildSlashItems, filterSlash, parseSkill, runShellCommand, type SlashItem } from "./commands.js";
 import { loadHistory, saveHistory } from "./history.js";
 import { StatusHud } from "./hud.js";
 import { useShellInput } from "./input.js";
+import type { QueuedMessage } from "./queue.js";
 import {
   buildLlmConfigInput,
   fieldValue,
@@ -25,7 +28,7 @@ import {
   setupFields,
 } from "./setup.js";
 import { type AppStore, createAppStore } from "./store.js";
-import { ACCENT, BORDER, ERROR, INFO, MUTED, WARNING } from "./theme.js";
+import { ACCENT, BORDER, ERROR, INFO, MUTED } from "./theme.js";
 import { TranscriptEntryView } from "./transcript.js";
 import { splitTranscript, type TranscriptEntry, type TranscriptViewMode } from "./transcript-state.js";
 
@@ -67,19 +70,26 @@ function hasTurnBefore(items: readonly { kind: string }[], index: number): boole
 }
 
 function HeroPanel() {
+  const { columns } = useWindowSize();
+  const compact = columns < 60;
+
   return (
     <Box flexDirection="column" marginBottom={1} paddingTop={1}>
       <Box gap={1} marginBottom={1}>
         <Text color={ACCENT}>Agent-Smith</Text>
         <Text color={MUTED}>v{SHELL_VERSION}</Text>
       </Box>
-      {SMITH_LOGO.map((line, index) => (
-        <Box key={line}>
-          <Text color={ACCENT}>{line}</Text>
-          <Text>{"   "}</Text>
-          <Text color={ACCENT}>{GHOST_BUDDY[index]}</Text>
-        </Box>
-      ))}
+      {compact ? (
+        <Text color={INFO}>Terminal view is compact. Type `/help` for commands.</Text>
+      ) : (
+        SMITH_LOGO.map((line, index) => (
+          <Box key={line}>
+            <Text color={ACCENT}>{line}</Text>
+            <Text>{"   "}</Text>
+            <Text color={ACCENT}>{GHOST_BUDDY[index]}</Text>
+          </Box>
+        ))
+      )}
       <Text> </Text>
       <Text color={INFO}>Type `/` for commands · Ctrl+C/Esc cancels a running task · `/help` for all</Text>
     </Box>
@@ -194,9 +204,11 @@ function ShellContent({
   hasPriorTurn,
   viewMode,
   welcomeNotice,
+  highlighter,
 }: Pick<AppStore, "mode" | "panel" | "viewMode" | "welcomeNotice"> & {
   active: TranscriptEntry[];
   hasPriorTurn: boolean;
+  highlighter?: CodeHighlighter;
 }) {
   if (mode === "boot") {
     return (
@@ -222,6 +234,7 @@ function ShellContent({
           entry={entry}
           showDivider={entry.kind === "turn" && (hasPriorTurn || hasTurnBefore(active, index))}
           viewMode={viewMode}
+          highlighter={highlighter}
         />
       ))}
     </>
@@ -233,6 +246,7 @@ type ShellFooterProps = {
   busy: boolean;
   statusLine: string;
   pendingSkill: SkillSummary | null;
+  queuedMessages: QueuedMessage[];
   inputValue: string;
   activeSetupField: ReturnType<typeof setupFieldAt>;
   slashMenuOpen: boolean;
@@ -263,7 +277,7 @@ function ShellFooter(props: ShellFooterProps) {
 
   return (
     <>
-      <Text color={props.busy ? WARNING : MUTED}>{props.statusLine}</Text>
+      {!props.busy ? <Text color={MUTED}>{props.statusLine}</Text> : null}
       {props.pendingSkill ? (
         <Box marginBottom={1}>
           <Text color={ACCENT}>Skill </Text>
@@ -273,6 +287,7 @@ function ShellFooter(props: ShellFooterProps) {
           <Text color={MUTED}> armed — Esc to clear</Text>
         </Box>
       ) : null}
+      <QueuePreview items={props.queuedMessages} />
       <Box borderColor={props.busy ? ACCENT : BORDER} borderStyle="round" paddingX={1}>
         <Text color={ACCENT}>{"❯ "}</Text>
         <TextInput
@@ -310,6 +325,51 @@ function completeSlashSelection(input: string, slashMenuOpen: boolean, items: Sl
   return true;
 }
 
+function QueuePreview({ items }: { items: QueuedMessage[] }) {
+  if (items.length === 0) return null;
+
+  return (
+    <Box flexDirection="column" marginBottom={1} paddingX={1}>
+      <Box>
+        <Text color={MUTED}>• </Text>
+        <Text color={INFO}>Queued follow-up inputs</Text>
+      </Box>
+      {items.map((item) => (
+        <Box key={item.id}>
+          <Text color={MUTED}>{"  ↳ "}</Text>
+          <Text color={MUTED}>{truncate(item.text, 120)}</Text>
+        </Box>
+      ))}
+      <Text color={MUTED}>{"    shift + ← edit last queued message"}</Text>
+    </Box>
+  );
+}
+
+function rememberSubmittedInput(input: string): void {
+  const state = getState();
+  state.pushHistory(input);
+  saveHistory(getState().inputHistory);
+  state.set({ inputValue: "" });
+}
+
+async function submitWhileBusy(
+  input: string,
+  payload: string,
+  skill: SkillSummary | null,
+  slashMenuOpen: boolean,
+  slashItems: SlashItem[],
+  slashIndex: number,
+): Promise<void> {
+  if (input.startsWith("/")) {
+    completeSlashSelection(input, slashMenuOpen, slashItems, slashIndex);
+    return;
+  }
+  if (!bridge.enqueueMessage(payload, skill?.name)) return;
+
+  rememberSubmittedInput(input);
+  if (skill) getState().set({ pendingSkill: null });
+}
+
 async function submitChat(
   value: string,
   busy: boolean,
@@ -321,13 +381,18 @@ async function submitChat(
   exit: () => void,
 ): Promise<void> {
   const input = value.trim();
-  if (!input || busy) return;
+  if (!input) return;
 
-  const state = getState();
-  state.pushHistory(input);
-  saveHistory(getState().inputHistory);
-  state.set({ inputValue: "" });
   const explicitSkill = parseSkill(input, skills);
+  const skill = explicitSkill?.skill ?? pendingSkill;
+  const payload = explicitSkill?.prompt || input;
+
+  if (busy) {
+    await submitWhileBusy(input, payload, skill, slashMenuOpen, slashItems, slashIndex);
+    return;
+  }
+
+  rememberSubmittedInput(input);
   if (explicitSkill && !explicitSkill.prompt) {
     armSkill(explicitSkill.skill);
     return;
@@ -338,9 +403,9 @@ async function submitChat(
     return;
   }
 
-  const skill = explicitSkill?.skill ?? pendingSkill;
-  if (skill) state.set({ pendingSkill: null });
-  await bridge.sendMessage(explicitSkill?.prompt || input, skill?.name);
+  if (skill) getState().set({ pendingSkill: null });
+  const accepted = await bridge.sendMessage(payload, skill?.name);
+  if (!accepted) getState().set({ inputValue: input });
 }
 
 async function submitSetup(
@@ -391,6 +456,7 @@ async function submitSetup(
 function SmithApp() {
   const { exit } = useApp();
   const suppressRef = useRef<string | null>(null);
+  const highlighter = useShikiHighlighter({ theme: "github-dark" });
 
   const mode = useS((state) => state.mode);
   const panel = useS((state) => state.panel);
@@ -398,6 +464,7 @@ function SmithApp() {
   const inputValue = useS((state) => state.inputValue);
   const statusLine = useS((state) => state.statusLine);
   const pendingSkill = useS((state) => state.pendingSkill);
+  const queuedMessages = useS((state) => state.queuedMessages);
   const viewMode = useS((state) => state.viewMode);
   const transcript = useS((state) => state.transcript);
   const transcriptEpoch = useS((state) => state.transcriptEpoch);
@@ -482,7 +549,12 @@ function SmithApp() {
             {item.kind === "hero" ? (
               <HeroPanel />
             ) : (
-              <TranscriptEntryView entry={item} showDivider={hasTurnBefore(staticItems, index)} viewMode={viewMode} />
+              <TranscriptEntryView
+                entry={item}
+                showDivider={hasTurnBefore(staticItems, index)}
+                viewMode={viewMode}
+                highlighter={highlighter}
+              />
             )}
           </Box>
         )}
@@ -495,6 +567,7 @@ function SmithApp() {
           hasPriorTurn={hasPriorTurn}
           viewMode={viewMode}
           welcomeNotice={welcomeNotice}
+          highlighter={highlighter}
         />
       </Box>
       <Box flexDirection="column" paddingBottom={1} paddingX={2}>
@@ -509,6 +582,7 @@ function SmithApp() {
           onInputChange={handleInputChange}
           onSetupSubmit={handleSetupSubmit}
           pendingSkill={pendingSkill}
+          queuedMessages={queuedMessages}
           slashIndex={slashIndex}
           slashItems={slashItems}
           slashMenuOpen={slashMenuOpen}
@@ -523,7 +597,7 @@ function SmithApp() {
   );
 }
 
-const app = render(<SmithApp />);
+const app = render(<SmithApp />, { exitOnCtrlC: false });
 void app.waitUntilExit().then(
   () => process.exit(0),
   () => process.exit(1),

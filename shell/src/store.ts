@@ -8,11 +8,13 @@ import { applyToolActivity, createToolActivity, type ToolActivity } from "./acti
 import type { AgentProfile, LlmConfig, Session, SkillSummary, StreamEvent, TokenUsage } from "./api.js";
 import { createEmptyConversation } from "./conversation.js";
 import { HISTORY_LIMIT } from "./history.js";
+import type { QueuedMessage } from "./queue.js";
 import {
   applyStreamEvent,
   closeLatestTurn,
   createSystemEntry,
   createTurnEntry,
+  limitTranscript,
   type TranscriptEntry,
   type TranscriptViewMode,
 } from "./transcript-state.js";
@@ -52,6 +54,7 @@ export type AppState = {
   tokenUsage: TokenUsage;
   viewMode: TranscriptViewMode;
   pendingSkill: SkillSummary | null;
+  queuedMessages: QueuedMessage[];
   busy: boolean;
   inputValue: string;
   inputHistory: string[];
@@ -83,6 +86,8 @@ export type AppActions = {
 };
 
 export type AppStore = AppState & AppActions;
+
+export const TRANSCRIPT_LIMIT = 200;
 
 type HydrateOptions = {
   agent: AgentProfile;
@@ -125,6 +130,7 @@ export function createAppStore(initialHistory: string[] = []) {
     tokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
     viewMode: "compact",
     pendingSkill: null,
+    queuedMessages: [],
     busy: false,
     inputValue: "",
     inputHistory: initialHistory,
@@ -159,10 +165,10 @@ export function createAppStore(initialHistory: string[] = []) {
         historyIndex: -1,
       })),
     pushSystemLine: (text, tone = "info") =>
-      set((s) => ({ transcript: [...s.transcript, createSystemEntry(text, tone)] })),
+      set((s) => ({ transcript: limitTranscript([...s.transcript, createSystemEntry(text, tone)], TRANSCRIPT_LIMIT) })),
     pushTurn: (userText) =>
       set((s) => ({
-        transcript: [...s.transcript, createTurnEntry(userText)],
+        transcript: limitTranscript([...s.transcript, createTurnEntry(userText)], TRANSCRIPT_LIMIT),
         turnCount: s.turnCount + 1,
       })),
     applyEvent: (event) =>

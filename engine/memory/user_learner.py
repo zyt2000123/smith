@@ -10,9 +10,6 @@ from ._files import atomic_write_text
 # Confidence threshold: must see a pattern N times before writing it
 _CONFIDENCE_THRESHOLD = 3
 
-# Placeholder that marks a field as learnable
-_PLACEHOLDER = "{{to_be_learned}}"
-
 # --- Language detection ---
 
 _ZH_RE = re.compile(r"[一-鿿]")
@@ -99,27 +96,16 @@ def _detect_code_style(text: str) -> str | None:
     return None
 
 
-# --- Field mapping ---
-# Maps learner keys to context.md field labels.
-# Only interaction preferences — project/identity info belongs in durable.md.
-_FIELD_MAP = {
-    "language": "Preferred Language",
-    "verbosity": "Communication Style",
-    "tech_level": "Technical Level",
-    "code_style": "Code Style",
-}
-
-
 class UserPreferenceLearner:
-    """Observe conversation patterns and auto-fill context.md preferences.
+    """Observe conversation patterns and emit evidence for the memory compiler.
 
     Uses simple heuristics (regex/keyword detection), not LLM calls.
-    Tracks a confidence counter in .learner_state.json — only writes
-    a preference to context.md after seeing it ``_CONFIDENCE_THRESHOLD`` times.
+    Tracks a confidence counter in .learner_state.json and emits a signal only
+    after seeing it ``_CONFIDENCE_THRESHOLD`` times. It never writes context.md
+    directly; the Compiler and Reviewer own that file.
     """
 
     def __init__(self, agent_dir: Path) -> None:
-        self._context_path = agent_dir / "context.md"
         self._state_path = agent_dir / ".learner_state.json"
 
     # --- public API ---
@@ -127,7 +113,8 @@ class UserPreferenceLearner:
     async def observe(self, user_message: str, _agent_reply: str) -> list[str]:
         """Analyze a conversation turn and extract learnable preferences.
 
-        Returns list of observations made (for logging).
+        Returns signals ready to persist. Call :meth:`acknowledge` only after
+        the memory event has been written, so a failed write is retried later.
         """
         observations: list[str] = []
         state = self._load_state()
@@ -148,21 +135,35 @@ class UserPreferenceLearner:
             key_counters = counters.setdefault(key, {})
             key_counters[value] = key_counters.get(value, 0) + 1
 
-            written_map = state.setdefault("written", {})
+            emitted_map = state.get("emitted")
+            if not isinstance(emitted_map, dict):
+                legacy = state.get("written", {})
+                emitted_map = dict(legacy) if isinstance(legacy, dict) else {}
+                state["emitted"] = emitted_map
             if (
                 key_counters[value] >= _CONFIDENCE_THRESHOLD
-                and written_map.get(key) != value
+                and emitted_map.get(key) != value
             ):
-                # Reached confidence — write to context.md. Using >= (not ==)
-                # so a write that fails at the exact threshold (e.g. context.md
-                # not created yet) is retried instead of being lost forever.
-                written = self._write_preference(key, value)
-                if written:
-                    observations.append(f"{key}={value}")
-                    written_map[key] = value
+                observations.append(f"{key}={value}")
 
         self._save_state(state)
         return observations
+
+    def acknowledge(self, observations: list[str]) -> None:
+        """Mark signals as emitted after their evidence event is persisted."""
+        if not observations:
+            return
+        state = self._load_state()
+        emitted = state.get("emitted")
+        if not isinstance(emitted, dict):
+            legacy = state.get("written", {})
+            emitted = dict(legacy) if isinstance(legacy, dict) else {}
+            state["emitted"] = emitted
+        for observation in observations:
+            key, separator, value = observation.partition("=")
+            if separator and key in {"language", "verbosity", "tech_level", "code_style"}:
+                emitted[key] = value
+        self._save_state(state)
 
     # --- state persistence ---
 
@@ -179,55 +180,3 @@ class UserPreferenceLearner:
             self._state_path,
             json.dumps(state, ensure_ascii=False, indent=2) + "\n",
         )
-
-    # --- context.md writing ---
-
-    def _write_preference(self, key: str, value: str) -> bool:
-        """Write a learned preference into context.md.
-
-        Only replaces ``{{to_be_learned}}`` placeholders or appends to
-        the Preferences section. Never deletes user-written content.
-
-        Returns True if something was actually written.
-        """
-        if not self._context_path.is_file():
-            return False
-
-        content = self._context_path.read_text(encoding="utf-8")
-
-        # Determine which field label to target
-        field_label = _FIELD_MAP.get(key)
-        if field_label is None:
-            return False
-
-        # Try to replace the placeholder on the matching line
-        marker = f"- {field_label}: {_PLACEHOLDER}"
-        if marker in content:
-            content = content.replace(marker, f"- {field_label}: {value}", 1)
-            atomic_write_text(self._context_path, content)
-            return True
-
-        # If the field already has a value (not placeholder), check if we
-        # should append (for code_style accumulation) or skip
-        field_line_re = re.compile(
-            rf"^- {re.escape(field_label)}: (.+)$", re.MULTILINE,
-        )
-        match = field_line_re.search(content)
-        if match:
-            existing = match.group(1).strip()
-            if existing == _PLACEHOLDER:
-                # Shouldn't happen (caught above), but handle anyway
-                new_line = f"- {field_label}: {value}"
-                content = content.replace(match.group(0), new_line, 1)
-                atomic_write_text(self._context_path, content)
-                return True
-            # Already has a real value — don't overwrite user content
-            return False
-
-        # Field not found at all — append to Preferences section if it exists
-        if "# Interaction Preferences" in content or "# Preferences" in content or "# 偏好" in content:
-            content = content.rstrip() + f"\n- {field_label}: {value}\n"
-            atomic_write_text(self._context_path, content)
-            return True
-
-        return False

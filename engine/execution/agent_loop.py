@@ -12,6 +12,7 @@ Responsibilities:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import AsyncGenerator, NamedTuple
 from pathlib import Path
@@ -55,6 +56,7 @@ from .task_router import route_task
 __all__ = ("_react_event_loop", "_react_loop", "_react_stream_loop")
 
 logger = logging.getLogger(__name__)
+_RUNTIME_LEARNING_TIMEOUT_SECONDS = 30.0
 
 # Design intent: some tools (memory_ops, search_knowledge, skill_load,
 # skill_manage) are "infrastructure" tools that should be available to the
@@ -352,14 +354,19 @@ async def prepare_runtime(
     if identity.enabled_skills is not None:
         services.skill_registry.restrict_to(identity.enabled_skills)
 
+    from engine.memory.compile import assemble_memory
     from engine.memory.store import search_relevant_memories
     retrieved = await search_relevant_memories(state_dir, request.message)
+    memory_text = assemble_memory(
+        state_dir / "memory",
+        include_durable=False,
+    )
     assembler = PromptAssembler()
     wd = Path(request.working_dir) if request.working_dir else Path.cwd()
     system_prompt = assembler.assemble(
         runtime.profile_dir, services.tool_registry, services.skill_registry,
         _runtime_prompt_context(runtime, identity), retrieved_memory=retrieved,
-        working_dir=wd,
+        working_dir=wd, memory_text=memory_text,
     )
     if identity.prompt:
         system_prompt += "\n\n---\n\n" + identity.prompt
@@ -442,8 +449,13 @@ def _ensure_memory_lifecycle_hooks(services: RuntimeServices) -> None:
 
     if services.hooks is None:
         services.hooks = HookManager()
+    maintenance_llm = services.background_llm or services.llm
     services.hooks.register(MemoryLifecycleHooks(
-        MemoryMaintenanceService(services.llm, reviewer=services.gate_llm)
+        MemoryMaintenanceService(
+            maintenance_llm,
+            reviewer=services.gate_llm,
+            defer_maintenance=not services.owns_llm_clients,
+        )
     ))
     setattr(services, "_memory_lifecycle_hooks_registered", True)
 
@@ -495,6 +507,16 @@ async def _persist_runtime_learning(
 ) -> bool:
     """Persist memory and preferences. Returns False if any write failed."""
     ok = True
+    learning_signals: list[str] = []
+    learner = None
+    try:
+        from engine.memory.user_learner import UserPreferenceLearner
+        learner = UserPreferenceLearner(state_dir)
+        learning_signals = await learner.observe(user_message, reply_text)
+    except Exception:
+        ok = False
+        logger.warning("failed to extract user-preference signals", exc_info=True)
+
     _ensure_memory_lifecycle_hooks(services)
     try:
         from engine.hook import HookType
@@ -502,19 +524,18 @@ async def _persist_runtime_learning(
         results = await services.hooks.apply(
             "memory_after_turn_completed",
             HookType.PARALLEL,
-            args=(state_dir, user_message, reply_text, had_tools),
+            args=(state_dir, user_message, reply_text, had_tools, learning_signals),
         )
-        ok = all(result is not False for result in results)
+        ok = ok and all(result is not False for result in results)
     except Exception:
         ok = False
         logger.warning("failed to persist conversation memory", exc_info=True)
-    try:
-        from engine.memory.user_learner import UserPreferenceLearner
-        learner = UserPreferenceLearner(state_dir)
-        await learner.observe(user_message, reply_text)
-    except Exception:
-        ok = False
-        logger.warning("failed to learn user preferences", exc_info=True)
+    if ok and learner is not None and learning_signals:
+        try:
+            learner.acknowledge(learning_signals)
+        except Exception:
+            ok = False
+            logger.warning("failed to acknowledge user-preference signals", exc_info=True)
     return ok
 
 
@@ -669,8 +690,18 @@ async def _run_events_with_runtime(
     finally:
         if drained and terminal_status == "completed" and state_dir is not None:
             try:
-                memory_persist_failed = not await _persist_runtime_learning(
-                    state_dir, request.message, "".join(full_text), had_tools, services,
+                memory_persist_failed = not await asyncio.wait_for(
+                    _persist_runtime_learning(
+                        state_dir, request.message, "".join(full_text), had_tools, services,
+                    ),
+                    timeout=_RUNTIME_LEARNING_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                memory_persist_failed = True
+                logger.warning(
+                    "runtime learning finalization timed out after %.1fs (run=%s)",
+                    _RUNTIME_LEARNING_TIMEOUT_SECONDS,
+                    run_id,
                 )
             except Exception:
                 memory_persist_failed = True

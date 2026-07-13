@@ -1,9 +1,14 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createTimeoutSignal } from "./api.js";
+
 const DEFAULT_SERVER_URL = "http://127.0.0.1:8140";
+const SERVER_PROBE_TIMEOUT_MS = 3_000;
+const SERVER_STARTUP_TIMEOUT_MS = 30_000;
 const REQUIRED_PATHS = [
   "/api/config/llm",
   "/api/agent",
@@ -59,8 +64,15 @@ function registerCleanup(): void {
 }
 
 export function resolveRepoRoot(): string {
+  const configuredRoot = process.env.SMITH_REPO_ROOT?.trim();
+  if (configuredRoot) return path.resolve(configuredRoot);
+
   const distDir = path.dirname(fileURLToPath(import.meta.url));
-  return path.resolve(distDir, "..", "..");
+  const packageRoot = path.resolve(distDir, "..", "..");
+  if (existsSync(path.join(packageRoot, "server"))) return packageRoot;
+
+  const currentRoot = path.resolve(process.cwd());
+  return existsSync(path.join(currentRoot, "server")) ? currentRoot : packageRoot;
 }
 
 function serverTarget(): ServerTarget {
@@ -75,16 +87,20 @@ function serverTarget(): ServerTarget {
 }
 
 async function isHealthy(baseUrl: string): Promise<boolean> {
+  const timeout = createTimeoutSignal(SERVER_PROBE_TIMEOUT_MS);
   try {
-    return (await fetch(`${baseUrl}/api/health`)).ok;
+    return (await fetch(`${baseUrl}/api/health`, { signal: timeout.signal })).ok;
   } catch {
     return false;
+  } finally {
+    timeout.dispose();
   }
 }
 
 async function compatibilityIssue(baseUrl: string): Promise<string | null> {
+  const timeout = createTimeoutSignal(SERVER_PROBE_TIMEOUT_MS);
   try {
-    const response = await fetch(`${baseUrl}/openapi.json`);
+    const response = await fetch(`${baseUrl}/openapi.json`, { signal: timeout.signal });
     if (!response.ok) return `openapi responded with HTTP ${response.status}`;
 
     const payload = (await response.json()) as { paths?: Record<string, unknown> };
@@ -94,6 +110,8 @@ async function compatibilityIssue(baseUrl: string): Promise<string | null> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return `could not inspect OpenAPI schema: ${message}`;
+  } finally {
+    timeout.dispose();
   }
 }
 
@@ -107,6 +125,11 @@ async function inspectExistingServer(
   if (!issue) return { healthy: true, connection: { baseUrl: target.baseUrl, started: false } };
   if (target.envOverride) throw new Error(`Configured SMITH_SERVER_URL points to an incompatible server: ${issue}`);
   return { healthy: true, connection: null };
+}
+
+async function isCompatibleServer(baseUrl: string): Promise<boolean> {
+  if (!(await isHealthy(baseUrl))) return false;
+  return !(await compatibilityIssue(baseUrl));
 }
 
 async function canListenOnPort(port: number): Promise<boolean> {
@@ -136,8 +159,15 @@ async function launchUrl(target: ServerTarget, existingServerWasHealthy: boolean
 
 function launchLocalServer(baseUrl: string): LaunchedServer {
   const port = new URL(baseUrl).port;
+  const serverDir = path.join(resolveRepoRoot(), "server");
+  if (!existsSync(path.join(serverDir, "app", "main.py"))) {
+    throw new Error(
+      `Local server source was not found at ${serverDir}. Set SMITH_SERVER_URL to a running server or SMITH_REPO_ROOT to the Agent-Smith checkout.`,
+    );
+  }
+
   const child = spawn("uv", ["run", "uvicorn", "app.main:app", "--port", port], {
-    cwd: path.join(resolveRepoRoot(), "server"),
+    cwd: serverDir,
     stdio: "ignore",
     env: { ...process.env, PYTHONUNBUFFERED: "1" },
   });
@@ -156,18 +186,17 @@ async function waitForCompatibleServer(
   launch: LaunchedServer,
   priorServerWasHealthy: boolean,
 ): Promise<ServerConnection> {
+  const startedAt = Date.now();
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    if (await isHealthy(baseUrl)) {
-      const issue = await compatibilityIssue(baseUrl);
-      if (!issue) {
-        return {
-          baseUrl,
-          started: true,
-          note: priorServerWasHealthy
-            ? `Found an older Smith server; started an isolated shell server on ${baseUrl}.`
-            : undefined,
-        };
-      }
+    if (Date.now() - startedAt >= SERVER_STARTUP_TIMEOUT_MS) break;
+    if (await isCompatibleServer(baseUrl)) {
+      return {
+        baseUrl,
+        started: true,
+        note: priorServerWasHealthy
+          ? `Found an older Smith server; started an isolated shell server on ${baseUrl}.`
+          : undefined,
+      };
     }
 
     if (launch.child.exitCode !== null) {

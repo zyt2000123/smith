@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyToolActivity, createToolActivity } from "./activity.js";
+import { applyToolActivity, createToolActivity, TOOL_ACTIVITY_CALL_LIMIT } from "./activity.js";
 
 test("preflight is tracked separately from successful tools", () => {
   const started = applyToolActivity(createToolActivity(), {
@@ -44,4 +44,23 @@ test("a duplicate result does not inflate HUD counters", () => {
   const twice = applyToolActivity(once, result);
 
   assert.deepEqual(twice.successes, { read_file: 1 });
+});
+
+test("tool call history is bounded while settled counters remain available", () => {
+  let activity = createToolActivity();
+  for (let index = 0; index < TOOL_ACTIVITY_CALL_LIMIT + 20; index += 1) {
+    const id = `tool-${index}`;
+    activity = applyToolActivity(activity, { type: "tool_call", id, name: "read_file", hint: "" });
+    activity = applyToolActivity(activity, {
+      type: "tool_result",
+      id,
+      error: false,
+      blocked: false,
+      preflight: false,
+      summary: "ok",
+    });
+  }
+
+  assert.ok(Object.keys(activity.calls).length <= TOOL_ACTIVITY_CALL_LIMIT);
+  assert.equal(activity.successes.read_file, TOOL_ACTIVITY_CALL_LIMIT + 20);
 });
