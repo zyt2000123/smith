@@ -13,3 +13,10 @@ packages = ["common"]
 
 [tool.setuptools.package-dir]
 common = "."
+
+[tool.setuptools.data-files]
+"agent_smith_common/builtin_skills/edit-article" = ["../agents/skills/edit-article/SKILL.md"]
+"agent_smith_common/builtin_skills/grill-me" = ["../agents/skills/grill-me/SKILL.md"]
+"agent_smith_common/builtin_skills/research" = ["../agents/skills/research/SKILL.md"]
+"agent_smith_common/builtin_skills/teach" = ["../agents/skills/teach/SKILL.md"]
+"agent_smith_common/builtin_skills/writing-great-skills" = ["../agents/skills/writing-great-skills/SKILL.md"]

@@ -2,7 +2,7 @@
 import asyncio
 from pathlib import Path
 
-from engine.execution.skill_chain import GATE_REGISTRY, SkillChain, load_gate_content
+from engine.execution.skill_chain import GATE_REGISTRY, load_gate_content
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,23 +52,6 @@ def test_contract_alignment_fails_without_verdict():
     assert result.verdict == "fail"
 
 
-def test_feature_pipeline_wiring_is_loaded_from_yaml():
-    chain = SkillChain.load_pipelines(ROOT / "agents" / "pipelines")["feature"]
-    names = [n.skill_name for n in chain.nodes]
-    assert names == [
-        "understand", "full-stack-product", "planning", "architecture", "testing-strategy",
-        "contract-alignment", "change-validation", "code-review",
-    ]
-    assert chain.backtrack_map["contract-alignment"] == "planning"
-
-
-def test_bugfix_pipeline_wiring_is_loaded_from_yaml():
-    chain = SkillChain.load_pipelines(ROOT / "agents" / "pipelines")["bugfix"]
-    names = [n.skill_name for n in chain.nodes]
-    assert names == [
-        "understand", "sde-debug", "planning", "testing-strategy",
-        "contract-alignment", "change-validation", "code-review",
-    ]
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -5,7 +5,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-from common.config import AGENT_DIR, BUILTIN_IDENTITIES_DIR, PATHS, SAFETY_RULES_PATH
+from common.config import AGENT_DIR, BUILTIN_IDENTITIES_DIR, BUILTIN_SKILLS_DIR, PATHS, SAFETY_RULES_PATH
 from engine.execution.skill_chain import SkillChain, load_gate_content
 from engine.identity_catalog import IdentityCatalog, load_identity_catalog
 from engine.execution.runtime import RuntimeContext, RuntimeServices
@@ -90,7 +90,8 @@ def load_runtime_identity_catalog(*, force: bool = False) -> IdentityCatalog:
     load_gate_content(PATHS.project_root / "agents")
     pipelines = SkillChain.load_pipelines(PATHS.project_root / "agents" / "pipelines")
     skill_registry = SkillRegistry()
-    skill_registry.load_builtin(PATHS.project_root / "agents" / "skills")
+    PATHS.ensure_base_dirs()
+    skill_registry.load_builtin(BUILTIN_SKILLS_DIR)
     skill_registry.load_agent_skills(AGENT_DIR / "skills")
     catalog.validate_assets(
         pipelines.keys(),

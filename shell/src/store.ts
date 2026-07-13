@@ -58,6 +58,7 @@ export type AppState = {
   pendingSkill: SkillSummary | null;
   queuedMessages: QueuedMessage[];
   busy: boolean;
+  runStartedAt: number | null;
   inputValue: string;
   inputHistory: string[];
   historyIndex: number;
@@ -135,6 +136,7 @@ export function createAppStore(initialHistory: string[] = []) {
     pendingSkill: null,
     queuedMessages: [],
     busy: false,
+    runStartedAt: null,
     inputValue: "",
     inputHistory: initialHistory,
     historyIndex: -1,

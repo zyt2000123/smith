@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services.config_service import ConfigService  # noqa: E402
 from common import database  # noqa: E402
-from common.paths import AppPaths  # noqa: E402
+from common.paths import BUILTIN_SKILL_NAMES, AppPaths  # noqa: E402
 from common.yaml_utils import YamlConfigError, load_yaml, save_yaml  # noqa: E402
 
 
@@ -40,6 +40,17 @@ def test_app_paths_honors_explicit_project_root(monkeypatch, tmp_path: Path) -> 
     monkeypatch.setenv("AGENT_SMITH_PROJECT_ROOT", str(project_root))
 
     assert AppPaths.defaults().project_root == project_root.resolve()
+
+
+def test_app_paths_installs_shipped_skills_separately_from_user_skills(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    paths = AppPaths(data_dir=tmp_path / "data", project_root=project_root)
+
+    paths.ensure_base_dirs()
+
+    assert paths.builtin_skills_dir == paths.data_dir / "builtin" / "skills"
+    assert sorted(child.name for child in paths.builtin_skills_dir.iterdir() if child.is_dir()) == list(BUILTIN_SKILL_NAMES)
+    assert not (paths.agent_dir / "skills").exists()
 
 
 def test_yaml_requires_a_mapping_and_preserves_private_atomic_file(tmp_path: Path) -> None:

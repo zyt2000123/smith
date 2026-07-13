@@ -181,7 +181,7 @@ export class NodeBridge {
 
     controller.abort();
     this.s.closeTurn();
-    this.s.set({ busy: false, statusLine: "Cancelled." });
+    this.s.set({ busy: false, runStartedAt: null, statusLine: "Cancelled." });
     return true;
   }
 
@@ -326,7 +326,7 @@ export class NodeBridge {
   private startRequest(): AbortController {
     const controller = new AbortController();
     this.activeRequest = controller;
-    this.s.set({ busy: true, panel: "chat", statusLine: "Processing…" });
+    this.s.set({ busy: true, runStartedAt: Date.now(), panel: "chat", statusLine: "Processing…" });
     return controller;
   }
 
@@ -341,7 +341,7 @@ export class NodeBridge {
       });
       return;
     }
-    this.s.set({ busy: false });
+    this.s.set({ busy: false, runStartedAt: null });
   }
 
   private takeQueuedMessage(): QueuedMessage | null {

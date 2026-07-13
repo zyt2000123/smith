@@ -64,6 +64,23 @@ def test_git_branch_request_uses_direct_git_route_instead_of_feature_pipeline(tm
     assert decision.pipeline_id is None
 
 
+def test_smith_identity_routes_git_branch_requests_directly() -> None:
+    identities_dir = Path(__file__).resolve().parents[2] / "agents" / "identities"
+    decision = route_task("请创建一个 git 分支", IdentityCatalog.load(identities_dir))
+
+    assert decision.route_id == "git"
+    assert decision.pipeline_id is None
+
+
+def test_smith_identity_routes_work_directly_without_removed_skill_pipelines() -> None:
+    identities_dir = Path(__file__).resolve().parents[2] / "agents" / "identities"
+    catalog = IdentityCatalog.load(identities_dir)
+
+    assert route_task("修复登录报错", catalog).pipeline_id is None
+    assert route_task("新增导出功能", catalog).pipeline_id is None
+    assert route_task("重构用户模块", catalog).pipeline_id is None
+
+
 def test_eval_sensitive_positive():
     assert detect_eval_sensitive("跑一下 benchmark 看看分数")
     assert detect_eval_sensitive("让所有测试通过就行")

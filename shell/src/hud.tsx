@@ -250,7 +250,6 @@ function buildHeaderParts(options: {
   sessionId?: string;
   turnCount: number;
   viewMode: TranscriptViewMode;
-  turnTokenUsage: TokenUsage;
   tokenUsage: TokenUsage;
 }): HudPart[] {
   const parts: HudPart[] = [
@@ -274,13 +273,6 @@ function buildHeaderParts(options: {
     [{ text: options.viewMode, color: MUTED }],
   );
 
-  if (options.turnTokenUsage.total_tokens > 0) {
-    parts.push([
-      { text: "turn tok ", color: MUTED },
-      { text: formatTokenCount(options.turnTokenUsage.total_tokens), color: WARNING },
-    ]);
-  }
-
   if (options.tokenUsage.total_tokens > 0) {
     parts.push([
       { text: "session tok ", color: MUTED },
@@ -298,6 +290,8 @@ export const StatusHud = memo(function StatusHud(options: {
   sessionId?: string;
   turnCount: number;
   viewMode: TranscriptViewMode;
+  busy: boolean;
+  runStartedAt: number | null;
   turnTokenUsage: TokenUsage;
   tokenUsage: TokenUsage;
   toolActivity: ToolActivity;
@@ -313,6 +307,9 @@ export const StatusHud = memo(function StatusHud(options: {
       {withUniqueKeys(headerLines, lineKey).map(({ item: line, key }) => (
         <HudLine key={`header-${key}`} parts={line} />
       ))}
+      {options.busy && options.runStartedAt !== null ? (
+        <RunProgress startedAt={options.runStartedAt} tokenUsage={options.turnTokenUsage} />
+      ) : null}
       {withUniqueKeys(activityLines, lineKey).map(({ item: line, key }) => (
         <HudLine key={`activity-${key}`} parts={line} separator=" | " />
       ))}
@@ -324,4 +321,36 @@ function formatTokenCount(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
   return String(value);
+}
+
+export function formatElapsed(startedAt: number | null, now = Date.now()): string {
+  if (startedAt === null) return "0s";
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1_000));
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
+}
+
+function RunProgress({ startedAt, tokenUsage }: { startedAt: number | null; tokenUsage: TokenUsage }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  return (
+    <Box>
+      <Text color={WARNING}>● </Text>
+      <Text color={MUTED}>working </Text>
+      <Text color={MUTED}>({formatElapsed(startedAt, now)}</Text>
+      {tokenUsage.total_tokens > 0 ? (
+        <>
+          <Text color={MUTED}> · ↓ </Text>
+          <Text color={WARNING}>{formatTokenCount(tokenUsage.total_tokens)} tokens</Text>
+        </>
+      ) : null}
+      <Text color={MUTED}>)</Text>
+    </Box>
+  );
 }
