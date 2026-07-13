@@ -126,15 +126,12 @@ export function parseSkill(raw: string, skills: SkillSummary[]): { skill: SkillS
   return skill ? { skill, prompt: match[2]?.trim() || "" } : null;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function openConfig(context: CommandContext): void {
   const state = context.getState();
   const draft = createSetupDraft(state.config);
   state.set({
     mode: "setup",
+    setupFlow: "advanced",
     setupIndex: 0,
     setupDraft: draft,
     inputValue: draft.provider,

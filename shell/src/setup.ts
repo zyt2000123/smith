@@ -1,5 +1,5 @@
 import type { LlmConfig, LlmConfigInput, LlmRouteInput, LlmTimeoutProfileInput, LlmUsage } from "./api.js";
-import type { SetupDraft } from "./store.js";
+import type { SetupDraft, SetupFlow } from "./store.js";
 
 export const PROVIDER_PRESETS = {
   openai: { base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
@@ -9,12 +9,15 @@ export const PROVIDER_PRESETS = {
 const LLM_USAGES = ["interactive", "gate", "background"] as const satisfies readonly LlmUsage[];
 const TIMEOUT_FIELDS = ["connect", "read", "stream_read", "write", "pool"] as const;
 
+export const INITIAL_SETUP_FIELDS = ["provider", "base_url", "api_key", "model", "review_model", "save"] as const;
+
 export const SETUP_FIELDS = [
   "provider",
   "base_url",
-  "model",
-  "max_output_tokens",
   "api_key",
+  "model",
+  "review_model",
+  "max_output_tokens",
   "routes",
   "interactive_api_key",
   "gate_api_key",
@@ -30,9 +33,10 @@ type JsonRecord = Record<string, unknown>;
 const SETUP_FIELD_LABELS: Record<SetupField, string> = {
   provider: "provider",
   base_url: "base URL",
-  model: "primary model",
+  model: "model",
+  review_model: "review model (optional)",
   max_output_tokens: "max output tokens (blank=keep, -=provider default)",
-  api_key: "primary API key",
+  api_key: "API key",
   routes: "route overrides (JSON)",
   interactive_api_key: "interactive route API key",
   gate_api_key: "gate route API key",
@@ -88,6 +92,7 @@ export function createSetupDraft(config: LlmConfig | null): SetupDraft {
     provider: config?.provider || "openai",
     base_url: config?.base_url || "",
     model: config?.model || "",
+    review_model: config?.routes?.gate?.model || "",
     max_output_tokens: config?.max_output_tokens?.toString() ?? "",
     api_key: "",
     routes: jsonForRouteOverrides(config),
@@ -119,13 +124,18 @@ export function setProvider(draft: SetupDraft, value: string): SetupDraft | null
   };
 }
 
-export function setupFieldAt(index: number): SetupField {
-  return SETUP_FIELDS[index] ?? "provider";
+export function setupFields(flow: SetupFlow): readonly SetupField[] {
+  return flow === "initial" ? INITIAL_SETUP_FIELDS : SETUP_FIELDS;
 }
 
-export function nextSetupIndex(index: number, direction: 1 | -1, wrap: boolean): number {
-  if (wrap) return (index + direction + SETUP_FIELDS.length) % SETUP_FIELDS.length;
-  return Math.min(Math.max(index + direction, 0), SETUP_FIELDS.length - 1);
+export function setupFieldAt(index: number, flow: SetupFlow = "advanced"): SetupField {
+  return setupFields(flow)[index] ?? "provider";
+}
+
+export function nextSetupIndex(index: number, direction: 1 | -1, wrap: boolean, flow: SetupFlow = "advanced"): number {
+  const fields = setupFields(flow);
+  if (wrap) return (index + direction + fields.length) % fields.length;
+  return Math.min(Math.max(index + direction, 0), fields.length - 1);
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -256,7 +266,7 @@ function secretPatch(value: string): string | null | undefined {
   return trimmed === "-" ? null : trimmed;
 }
 
-function routeForSecret(routes: Partial<Record<LlmUsage, LlmRouteInput | null>>, usage: LlmUsage): LlmRouteInput {
+function routeForUsage(routes: Partial<Record<LlmUsage, LlmRouteInput | null>>, usage: LlmUsage): LlmRouteInput {
   const existing = routes[usage];
   if (existing && typeof existing === "object") return existing;
   const route: LlmRouteInput = {};
@@ -271,7 +281,13 @@ export function buildLlmConfigInput(draft: SetupDraft): LlmConfigInput {
     const apiKey = secretPatch(draft[field]);
     if (apiKey === undefined) continue;
     routes ??= {};
-    routeForSecret(routes, usage).api_key = apiKey;
+    routeForUsage(routes, usage).api_key = apiKey;
+  }
+
+  const reviewModel = draft.review_model.trim();
+  if (reviewModel) {
+    routes ??= {};
+    routeForUsage(routes, "gate").model = reviewModel;
   }
 
   const input: LlmConfigInput = {

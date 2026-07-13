@@ -19,13 +19,15 @@ import {
 
 export type Panel = "welcome" | "chat" | "sessions" | "skills";
 export type Mode = "boot" | "setup" | "chat";
+export type SetupFlow = "initial" | "advanced";
 
 export type SetupDraft = {
   provider: string;
   base_url: string;
-  model: string;
-  max_output_tokens: string;
   api_key: string;
+  model: string;
+  review_model: string;
+  max_output_tokens: string;
   routes: string;
   interactive_api_key: string;
   gate_api_key: string;
@@ -56,6 +58,7 @@ export type AppState = {
   historyIndex: number;
   statusLine: string;
   setupDraft: SetupDraft;
+  setupFlow: SetupFlow;
   setupIndex: number;
   slashIndex: number;
   welcomeNotice: { text: string; tone: "info" | "error" } | null;
@@ -130,15 +133,17 @@ export function createAppStore(initialHistory: string[] = []) {
     setupDraft: {
       provider: "openai",
       base_url: "https://api.openai.com/v1",
-      model: "gpt-4.1-mini",
-      max_output_tokens: "",
       api_key: "",
+      model: "gpt-4.1-mini",
+      review_model: "",
+      max_output_tokens: "",
       routes: "",
       interactive_api_key: "",
       gate_api_key: "",
       background_api_key: "",
       timeout_profiles: "",
     },
+    setupFlow: "initial",
     setupIndex: 0,
     slashIndex: 0,
     welcomeNotice: null,

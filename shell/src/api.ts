@@ -1,3 +1,5 @@
+import { localAuthHeaders } from "./auth.js";
+
 export type LlmUsage = "interactive" | "gate" | "background";
 export type LlmTimeoutField = "connect" | "read" | "stream_read" | "write" | "pool";
 
@@ -101,11 +103,13 @@ function buildUrl(baseUrl: string, pathname: string): string {
 }
 
 async function request<T>(baseUrl: string, pathname: string, options: RequestOptions = {}): Promise<T> {
+  const authHeaders = await localAuthHeaders();
   const response = await fetch(buildUrl(baseUrl, pathname), {
     method: options.method ?? "GET",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
+      ...authHeaders,
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
@@ -337,11 +341,13 @@ export async function* streamMessage(
   content: string,
   options: StreamMessageOptions = {},
 ): AsyncGenerator<StreamEvent, void, void> {
+  const authHeaders = await localAuthHeaders();
   const response = await fetch(buildUrl(baseUrl, `/api/agent/sessions/${sessionId}/messages/stream`), {
     method: "POST",
     headers: {
       Accept: "text/event-stream",
       "Content-Type": "application/json",
+      ...authHeaders,
     },
     signal: options.signal,
     body: JSON.stringify({

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { LlmConfig } from "./api.js";
-import { buildLlmConfigInput, createSetupDraft } from "./setup.js";
+import { buildLlmConfigInput, createSetupDraft, INITIAL_SETUP_FIELDS } from "./setup.js";
 import type { SetupDraft } from "./store.js";
 
 function draft(overrides: Partial<SetupDraft> = {}): SetupDraft {
@@ -10,6 +10,7 @@ function draft(overrides: Partial<SetupDraft> = {}): SetupDraft {
     provider: "openai",
     base_url: "https://api.openai.com/v1",
     model: "gpt-4.1-mini",
+    review_model: "",
     max_output_tokens: "",
     api_key: "",
     routes: "",
@@ -20,6 +21,10 @@ function draft(overrides: Partial<SetupDraft> = {}): SetupDraft {
     ...overrides,
   };
 }
+
+test("initial setup only asks for the five essential model fields", () => {
+  assert.deepEqual([...INITIAL_SETUP_FIELDS], ["provider", "base_url", "api_key", "model", "review_model", "save"]);
+});
 
 test("setup draft exposes route and timeout config without exposing stored secrets", () => {
   const config: LlmConfig = {
@@ -44,14 +49,22 @@ test("setup draft exposes route and timeout config without exposing stored secre
   });
   assert.equal(result.max_output_tokens, "2048");
   assert.equal(result.routes.includes("api_key"), false);
+  assert.equal(result.review_model, "cheap-gate-model");
   assert.deepEqual(JSON.parse(result.timeout_profiles), { gate: { read: 45, stream_read: 50 } });
+});
+
+test("setup maps the optional review model to the gate route", () => {
+  const result = buildLlmConfigInput(draft({ review_model: "review-model" }));
+
+  assert.deepEqual(result.routes, { gate: { model: "review-model" } });
 });
 
 test("setup builds complete route and timeout patches while keeping route keys masked", () => {
   const result = buildLlmConfigInput(
     draft({
       max_output_tokens: "2048",
-      routes: '{"gate":{"model":"cheap-gate-model","max_output_tokens":512,"timeout_profile":"gate"},"background":{"base_url":null,"max_output_tokens":null}}',
+      routes:
+        '{"gate":{"model":"cheap-gate-model","max_output_tokens":512,"timeout_profile":"gate"},"background":{"base_url":null,"max_output_tokens":null}}',
       gate_api_key: "gate-secret",
       background_api_key: "-",
       timeout_profiles: '{"gate":{"read":45,"stream_read":50},"background":{"read":null}}',
