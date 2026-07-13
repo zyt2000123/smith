@@ -10,6 +10,7 @@ export type EmptyConversation = {
   transcript: TranscriptEntry[];
   turnCount: number;
   toolActivity: ToolActivity;
+  turnTokenUsage: TokenUsage;
   tokenUsage: TokenUsage;
   pendingSkill: SkillSummary | null;
   queuedMessages: QueuedMessage[];
@@ -24,6 +25,7 @@ export function createEmptyConversation(panel: ConversationPanel, statusLine: st
     transcript: [],
     turnCount: 0,
     toolActivity: createToolActivity(),
+    turnTokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
     tokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
     pendingSkill: null,
     queuedMessages: [],

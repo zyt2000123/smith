@@ -51,11 +51,14 @@ export type AppState = {
   transcriptEpoch: number;
   turnCount: number;
   toolActivity: ToolActivity;
+  /** Token usage accumulated across the current user message and its agent work. */
+  turnTokenUsage: TokenUsage;
   tokenUsage: TokenUsage;
   viewMode: TranscriptViewMode;
   pendingSkill: SkillSummary | null;
   queuedMessages: QueuedMessage[];
   busy: boolean;
+  runStartedAt: number | null;
   inputValue: string;
   inputHistory: string[];
   historyIndex: number;
@@ -127,11 +130,13 @@ export function createAppStore(initialHistory: string[] = []) {
     transcriptEpoch: 0,
     turnCount: 0,
     toolActivity: createToolActivity(),
+    turnTokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
     tokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
     viewMode: "compact",
     pendingSkill: null,
     queuedMessages: [],
     busy: false,
+    runStartedAt: null,
     inputValue: "",
     inputHistory: initialHistory,
     historyIndex: -1,
@@ -170,12 +175,18 @@ export function createAppStore(initialHistory: string[] = []) {
       set((s) => ({
         transcript: limitTranscript([...s.transcript, createTurnEntry(userText)], TRANSCRIPT_LIMIT),
         turnCount: s.turnCount + 1,
+        turnTokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
       })),
     applyEvent: (event) =>
       set((s) =>
         event.type === "token_usage"
           ? {
               toolActivity: applyToolActivity(s.toolActivity, event),
+              turnTokenUsage: {
+                input_tokens: s.turnTokenUsage.input_tokens + event.input_tokens,
+                output_tokens: s.turnTokenUsage.output_tokens + event.output_tokens,
+                total_tokens: s.turnTokenUsage.total_tokens + event.total_tokens,
+              },
               tokenUsage: {
                 input_tokens: s.tokenUsage.input_tokens + event.input_tokens,
                 output_tokens: s.tokenUsage.output_tokens + event.output_tokens,

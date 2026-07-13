@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
+import shutil
+import sysconfig
 
 PROJECT_ROOT_ENV = "AGENT_SMITH_PROJECT_ROOT"
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
+BUILTIN_SKILL_NAMES = (
+    "edit-article",
+    "grill-me",
+    "research",
+    "teach",
+    "writing-great-skills",
+)
 
 
 def _default_project_root() -> Path:
@@ -62,6 +72,14 @@ class AppPaths:
 
     @property
     def builtin_skills_dir(self) -> Path:
+        return self.data_dir / "builtin" / "skills"
+
+    @property
+    def bundled_skills_dir(self) -> Path:
+        """Skill assets shipped with Smith, with a source-tree fallback for development."""
+        installed = Path(sysconfig.get_path("data")) / "agent_smith_common" / "builtin_skills"
+        if installed.is_dir():
+            return installed
         return self.project_root / "agents" / "skills"
 
     @property
@@ -80,3 +98,31 @@ class AppPaths:
         _ensure_private_dir(self.data_dir)
         _ensure_private_dir(self.agent_dir)
         _ensure_private_dir(self.sqlite_path.parent)
+        self._install_builtin_skills()
+
+    def _install_builtin_skills(self) -> None:
+        """Materialize Smith-owned skills outside the user-editable skill directory.
+
+        ``agent/skills`` remains reserved for user-installed skills.  Keeping
+        shipped skills under ``builtin/skills`` lets an installed Smith retain
+        its default capabilities without treating them as user customizations.
+        """
+        source = self.bundled_skills_dir
+        if not source.is_dir():
+            return
+
+        target = self.builtin_skills_dir
+        _ensure_private_dir(target.parent)
+        _ensure_private_dir(target)
+        manifest = target / ".manifest.json"
+
+        for name in BUILTIN_SKILL_NAMES:
+            skill_file = source / name / "SKILL.md"
+            if skill_file.is_file():
+                shutil.copytree(skill_file.parent, target / name, dirs_exist_ok=True)
+
+        for child in target.iterdir():
+            if child.is_dir() and child.name not in BUILTIN_SKILL_NAMES:
+                shutil.rmtree(child)
+        manifest.write_text(json.dumps({"skills": BUILTIN_SKILL_NAMES}), encoding="utf-8")
+        manifest.chmod(PRIVATE_FILE_MODE)

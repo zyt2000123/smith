@@ -5,7 +5,7 @@ from fastapi import HTTPException
 from engine.skill.registry import SkillRegistry
 
 from ..schemas.skill import SkillSummaryOut
-from common.config import AGENT_DIR, PATHS
+from common.config import AGENT_DIR, BUILTIN_SKILLS_DIR, PATHS
 from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
 
 
@@ -57,8 +57,8 @@ class SkillService:
     @staticmethod
     def _load_registry() -> SkillRegistry:
         registry = SkillRegistry()
-        # PATHS.project_root honors AGENT_SMITH_PROJECT_ROOT, matching engine_runtime.
-        registry.load_builtin(PATHS.project_root / "agents" / "skills")
+        PATHS.ensure_base_dirs()
+        registry.load_builtin(BUILTIN_SKILLS_DIR)
 
         agent_skills_dir = AGENT_DIR / "skills"
         if agent_skills_dir.is_dir():

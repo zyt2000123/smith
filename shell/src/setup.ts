@@ -276,32 +276,18 @@ function routeForUsage(routes: Partial<Record<LlmUsage, LlmRouteInput | null>>, 
 
 /** Build the API patch while keeping all secret fields out of the JSON editor. */
 export function buildLlmConfigInput(draft: SetupDraft): LlmConfigInput {
-  let routes = parseRoutes(draft.routes);
-  for (const [usage, field] of ROUTE_SECRET_FIELDS) {
-    const apiKey = secretPatch(draft[field]);
-    if (apiKey === undefined) continue;
-    routes ??= {};
-    routeForUsage(routes, usage).api_key = apiKey;
-  }
-
   const reviewModel = draft.review_model.trim();
-  if (reviewModel) {
-    routes ??= {};
-    routeForUsage(routes, "gate").model = reviewModel;
-  }
 
   const input: LlmConfigInput = {
     provider: draft.provider.trim(),
     base_url: draft.base_url.trim(),
     model: draft.model.trim(),
+    // The terminal exposes only the five essential fields. Saving it removes
+    // legacy advanced route and timeout overrides.
+    routes: reviewModel ? { gate: { model: reviewModel } } : {},
+    timeout_profiles: {},
   };
-  const maxOutputTokens = parseMaxOutputTokens(draft.max_output_tokens);
-  if (maxOutputTokens !== undefined) input.max_output_tokens = maxOutputTokens;
   const primaryApiKey = secretPatch(draft.api_key);
   if (primaryApiKey !== undefined) input.api_key = primaryApiKey;
-  if (routes !== undefined) input.routes = routes;
-
-  const timeoutProfiles = parseTimeoutProfiles(draft.timeout_profiles);
-  if (timeoutProfiles !== undefined) input.timeout_profiles = timeoutProfiles;
   return input;
 }

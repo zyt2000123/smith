@@ -347,7 +347,10 @@ async def prepare_runtime(
     if services.tool_guard is not None:
         services.tool_guard.bind_definitions(services.tool_registry.definitions())
 
-    services.skill_registry.load_builtin(runtime.agents_dir / "skills")
+    from common.config import BUILTIN_SKILLS_DIR, PATHS
+
+    PATHS.ensure_base_dirs()
+    services.skill_registry.load_builtin(BUILTIN_SKILLS_DIR)
     profile_skills = runtime.profile_dir / "skills"
     if profile_skills.is_dir():
         services.skill_registry.load_agent_skills(profile_skills)
