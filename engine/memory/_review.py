@@ -110,17 +110,39 @@ async def _review_draft(
         {"role": "user", "content": _REVIEW_PROMPT.format(source=_truncate_source(source, 4000), draft=draft)},
     ])
     text = resp.text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*\n?", "", text)
-        text = re.sub(r"\n?```\s*$", "", text)
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        parsed = None
+    parsed = _parse_review_json(text)
     if not isinstance(parsed, dict):
         logger.warning("reviewer returned unparseable response, treating as fail: %s", text[:200])
         return {"pass": False, "hard_fail": [], "soft_fail": ["unparseable reviewer response"], "feedback": "retry"}
     return parsed
+
+
+def _parse_review_json(text: str) -> object:
+    """Parse a reviewer object even when a reasoning model wraps the JSON.
+
+    The reviewer contract asks for JSON-only output, but some gateways still
+    add a short preamble or Markdown fences. We only accept the first complete
+    JSON object and leave all semantic checks to the review loop below.
+    """
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*\n?", "", candidate)
+        candidate = re.sub(r"\n?```\s*$", "", candidate)
+
+    try:
+        return json.loads(candidate)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", candidate):
+        try:
+            parsed, _ = decoder.raw_decode(candidate[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def _as_list(value: object) -> list:

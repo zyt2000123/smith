@@ -16,6 +16,7 @@ from typing import ClassVar
 from engine.llm.port import LLMPort
 
 logger = logging.getLogger(__name__)
+_MEMORY_MAINTENANCE_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -75,12 +76,18 @@ class MemoryMaintenanceService:
         try:
             from engine.memory.compile import run_compilation
 
-            await run_compilation(
-                memory_dir,
-                self.llm,
-                reviewer=self.reviewer,
-                raise_on_error=True,
+            result = await asyncio.wait_for(
+                run_compilation(
+                    memory_dir,
+                    self.llm,
+                    reviewer=self.reviewer,
+                    raise_on_error=True,
+                    allow_partial_progress=True,
+                ),
+                timeout=_MEMORY_MAINTENANCE_TIMEOUT_SECONDS,
             )
+            if result.get("recent") and not result.get("durable"):
+                logger.info("recent memory compiled; durable memory remains pending review")
             return True
         except Exception:
             logger.warning("conversation-memory compilation failed", exc_info=True)
