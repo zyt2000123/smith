@@ -15,6 +15,8 @@ class ProviderAdapter(Protocol):
 
     provider: str
     capabilities: ProviderCapabilities
+    context_window: int
+    context_window_declared: bool
 
     async def complete(self, request: LLMRequest) -> ChatResponse: ...
 

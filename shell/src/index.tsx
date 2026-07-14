@@ -4,16 +4,18 @@ import { useShikiHighlighter } from "@assistant-ui/react-ink-markdown";
 import { Box, render, Static, Text, useApp, useWindowSize } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "zustand";
 
-import type { SkillSummary } from "./api.js";
+import type { PendingApproval, SkillSummary } from "./api.js";
+import { approvalDetails, approvalReason, approvalSummary, approvalTitle } from "./approval.js";
 import { NodeBridge } from "./bridge.js";
 import type { CodeHighlighter } from "./code-block.js";
 import { buildSlashItems, filterSlash, parseSkill, runShellCommand, type SlashItem } from "./commands.js";
 import { loadHistory, saveHistory } from "./history.js";
-import { StatusHud } from "./hud.js";
+import { RunProgress, StatusHud } from "./hud.js";
 import { useShellInput } from "./input.js";
+import { getVisibleList, SKILLS_PANEL_VISIBLE_ITEMS, SLASH_MENU_VISIBLE_ITEMS } from "./list-navigation.js";
 import type { QueuedMessage } from "./queue.js";
 import {
   buildLlmConfigInput,
@@ -28,11 +30,13 @@ import {
   setupFields,
 } from "./setup.js";
 import { type AppStore, createAppStore } from "./store.js";
-import { ACCENT, BORDER, ERROR, INFO, MUTED } from "./theme.js";
+import { ACCENT, BORDER, ERROR, INFO, MUTED, WARNING } from "./theme.js";
+import { TokenStatsPanel } from "./token-panel.js";
 import { TranscriptEntryView } from "./transcript.js";
 import { splitTranscript, type TranscriptEntry, type TranscriptViewMode } from "./transcript-state.js";
 
 const SHELL_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
+const PROJECT_CWD = path.resolve(process.env.SMITH_PROJECT_CWD?.trim() || process.cwd());
 
 const SMITH_LOGO = [
   "███████╗███╗   ███╗██╗████████╗██╗  ██╗",
@@ -91,7 +95,7 @@ function HeroPanel() {
         ))
       )}
       <Text> </Text>
-      <Text color={INFO}>Type `/` for commands · Ctrl+C/Esc cancels a running task · `/help` for all</Text>
+      <Text color={INFO}>Type `/` for commands · Enter confirms · Esc goes back · `/help` for all</Text>
     </Box>
   );
 }
@@ -150,18 +154,53 @@ function SessionsPanel() {
 
 function SkillsPanel() {
   const skills = useS((state) => state.skills);
+  const selectedIndex = useS((state) => state.skillsIndex);
+  const visible = getVisibleList(skills, selectedIndex, SKILLS_PANEL_VISIBLE_ITEMS);
   return (
     <Box flexDirection="column">
       <Text color={ACCENT}>Skills</Text>
       {skills.length === 0 ? (
         <Text color={MUTED}>No skills.</Text>
       ) : (
-        skills.slice(0, 12).map((skill) => (
-          <Box key={skill.name} flexDirection="column" marginBottom={1}>
-            <Text color={INFO}>
-              {skill.name} <Text color={MUTED}>[{skill.source}]</Text>
+        <>
+          {visible.startIndex > 0 ? <Text color={MUTED}>↑ more skills</Text> : null}
+          {visible.items.map((skill, offset) => {
+            const index = visible.startIndex + offset;
+            return (
+              <Box key={skill.name} flexDirection="column" marginBottom={1}>
+                <Text color={index === selectedIndex ? ACCENT : INFO}>
+                  {index === selectedIndex ? ">" : " "} {skill.name} <Text color={MUTED}>[{skill.source}]</Text>
+                </Text>
+                <Text color={MUTED}>{skill.description || ""}</Text>
+              </Box>
+            );
+          })}
+          {visible.startIndex + visible.items.length < skills.length ? <Text color={MUTED}>↓ more skills</Text> : null}
+        </>
+      )}
+    </Box>
+  );
+}
+
+function McpPanel() {
+  const servers = useS((state) => state.mcpServers);
+  return (
+    <Box flexDirection="column">
+      <Text color={ACCENT}>MCP servers</Text>
+      {servers.length === 0 ? (
+        <Text color={MUTED}>No MCP servers configured.</Text>
+      ) : (
+        servers.map((server) => (
+          <Box key={server.name} flexDirection="column" marginBottom={1}>
+            <Text color={server.status === "connected" ? INFO : ERROR}>
+              {server.status === "connected" ? "●" : "○"} {server.name} [{server.type}] · {server.tools.length} tool(s)
             </Text>
-            <Text color={MUTED}>{skill.description || ""}</Text>
+            {server.error ? <Text color={ERROR}>{truncate(server.error, 100)}</Text> : null}
+            {server.tools.slice(0, 8).map((tool) => (
+              <Text key={tool.name} color={MUTED}>
+                {`  ${tool.name} — ${truncate(tool.description || "No description", 90)}`}
+              </Text>
+            ))}
           </Box>
         ))
       )}
@@ -170,6 +209,7 @@ function SkillsPanel() {
 }
 
 function SlashMenu({ items, selectedIndex }: { items: SlashItem[]; selectedIndex: number }) {
+  const visible = getVisibleList(items, selectedIndex, SLASH_MENU_VISIBLE_ITEMS);
   let category = "";
   return (
     <Box flexDirection="column" marginBottom={1} marginTop={1}>
@@ -177,21 +217,26 @@ function SlashMenu({ items, selectedIndex }: { items: SlashItem[]; selectedIndex
       {items.length === 0 ? (
         <Text color={MUTED}>No matches.</Text>
       ) : (
-        items.map((item, index) => {
-          const showCategory = item.category !== category;
-          category = item.category;
-          return (
-            <Box key={item.id} flexDirection="column" marginTop={showCategory ? 1 : 0}>
-              {showCategory ? <Text color={MUTED}>{item.category}</Text> : null}
-              <Box>
-                <Text color={index === selectedIndex ? ACCENT : INFO}>
-                  {index === selectedIndex ? ">" : " "} {item.command}
-                </Text>
-                <Text color={MUTED}>{`  ${truncate(item.description, 60)}`}</Text>
+        <>
+          {visible.startIndex > 0 ? <Text color={MUTED}>↑ more</Text> : null}
+          {visible.items.map((item, offset) => {
+            const index = visible.startIndex + offset;
+            const showCategory = item.category !== category;
+            category = item.category;
+            return (
+              <Box key={item.id} flexDirection="column" marginTop={showCategory ? 1 : 0}>
+                {showCategory ? <Text color={MUTED}>{item.category}</Text> : null}
+                <Box>
+                  <Text color={index === selectedIndex ? ACCENT : INFO}>
+                    {index === selectedIndex ? ">" : " "} {item.command}
+                  </Text>
+                  <Text color={MUTED}>{`  ${truncate(item.description, 60)}`}</Text>
+                </Box>
               </Box>
-            </Box>
-          );
-        })
+            );
+          })}
+          {visible.startIndex + visible.items.length < items.length ? <Text color={MUTED}>↓ more</Text> : null}
+        </>
       )}
     </Box>
   );
@@ -205,7 +250,9 @@ function ShellContent({
   viewMode,
   welcomeNotice,
   highlighter,
-}: Pick<AppStore, "mode" | "panel" | "viewMode" | "welcomeNotice"> & {
+  tokenStats,
+  tokenTab,
+}: Pick<AppStore, "mode" | "panel" | "viewMode" | "welcomeNotice" | "tokenStats" | "tokenTab"> & {
   active: TranscriptEntry[];
   hasPriorTurn: boolean;
   highlighter?: CodeHighlighter;
@@ -227,16 +274,20 @@ function ShellContent({
     <>
       {welcomeNotice ? <Text color={welcomeNotice.tone === "error" ? ERROR : MUTED}>{welcomeNotice.text}</Text> : null}
       {panel === "skills" ? <SkillsPanel /> : null}
+      {panel === "mcp" ? <McpPanel /> : null}
       {panel === "sessions" ? <SessionsPanel /> : null}
-      {active.map((entry, index) => (
-        <TranscriptEntryView
-          key={entry.id}
-          entry={entry}
-          showDivider={entry.kind === "turn" && (hasPriorTurn || hasTurnBefore(active, index))}
-          viewMode={viewMode}
-          highlighter={highlighter}
-        />
-      ))}
+      {panel === "tokens" ? <TokenStatsPanel stats={tokenStats} selectedTab={tokenTab} /> : null}
+      {panel === "tokens"
+        ? null
+        : active.map((entry, index) => (
+            <TranscriptEntryView
+              key={entry.id}
+              entry={entry}
+              showDivider={entry.kind === "turn" && (hasPriorTurn || hasTurnBefore(active, index))}
+              viewMode={viewMode}
+              highlighter={highlighter}
+            />
+          ))}
     </>
   );
 }
@@ -244,7 +295,11 @@ function ShellContent({
 type ShellFooterProps = {
   mode: AppStore["mode"];
   busy: boolean;
+  compressing: boolean;
   statusLine: string;
+  pendingApproval: PendingApproval | null;
+  approvalIndex: number;
+  approvalResolving: boolean;
   pendingSkill: SkillSummary | null;
   queuedMessages: QueuedMessage[];
   inputValue: string;
@@ -254,10 +309,12 @@ type ShellFooterProps = {
   slashIndex: number;
   viewMode: TranscriptViewMode;
   config: AppStore["config"];
+  selectedModelProfile: AppStore["selectedModelProfile"];
   currentSession: AppStore["currentSession"];
   runStartedAt: AppStore["runStartedAt"];
   turnTokenUsage: AppStore["turnTokenUsage"];
   tokenUsage: AppStore["tokenUsage"];
+  contextUsage: AppStore["contextUsage"];
   turnCount: number;
   toolActivity: AppStore["toolActivity"];
   onInputChange: (value: string) => void;
@@ -265,51 +322,160 @@ type ShellFooterProps = {
   onSetupSubmit: (value: string) => void;
 };
 
-function ShellFooter(props: ShellFooterProps) {
-  if (props.mode === "boot") return null;
+const COMPRESSION_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 
-  const placeholder =
-    props.mode === "setup"
-      ? props.activeSetupField === "save"
-        ? "Enter to save"
-        : `Edit ${setupFieldLabel(props.activeSetupField)}`
-      : props.pendingSkill
-        ? `Ask Smith to run ${props.pendingSkill.name}…`
-        : "Tell Smith what to do…";
+function CompressionIndicator() {
+  const [spinnerIndex, setSpinnerIndex] = useState(0);
+  const [textBright, setTextBright] = useState(true);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setSpinnerIndex((current) => (current + 1) % COMPRESSION_SPINNER_FRAMES.length);
+    }, 90);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => setTextBright((current) => !current), 360);
+    return () => clearInterval(timer);
+  }, []);
 
   return (
-    <>
-      {!props.busy ? <Text color={MUTED}>{props.statusLine}</Text> : null}
-      {props.pendingSkill ? (
-        <Box marginBottom={1}>
-          <Text color={ACCENT}>Skill </Text>
-          <Text color={ACCENT} bold>
-            {props.pendingSkill.name}
-          </Text>
-          <Text color={MUTED}> armed — Esc to clear</Text>
+    <Box>
+      <Text color={WARNING} dimColor={!textBright}>
+        Automatically compressing context
+      </Text>
+      <Text color={WARNING}> {COMPRESSION_SPINNER_FRAMES[spinnerIndex]}</Text>
+    </Box>
+  );
+}
+
+function ApprovalPrompt({
+  approval,
+  selectedIndex,
+  resolving,
+}: {
+  approval: PendingApproval;
+  selectedIndex: number;
+  resolving: boolean;
+}) {
+  const details = approvalDetails(approval);
+  const options = ["Allow once", "Deny"];
+
+  return (
+    <Box borderColor={WARNING} borderStyle="round" flexDirection="column" marginBottom={1} paddingX={1}>
+      <Text color={WARNING} bold>
+        Approval required
+      </Text>
+      <Text color={INFO} bold>
+        {approvalTitle(approval)}
+      </Text>
+      <Text color={INFO}>{approvalSummary(approval)}</Text>
+      {details.map((detail) => (
+        <Box key={detail.label}>
+          <Text color={MUTED}>{detail.label}: </Text>
+          <Text color={INFO}>{detail.value}</Text>
+        </Box>
+      ))}
+      {approvalReason(approval) ? (
+        <Box>
+          <Text color={MUTED}>Reason: </Text>
+          <Text color={INFO}>{approvalReason(approval)}</Text>
         </Box>
       ) : null}
-      <QueuePreview items={props.queuedMessages} />
+      <Box flexDirection="column" marginTop={1}>
+        {options.map((option, index) => (
+          <Text key={option} color={selectedIndex === index ? ACCENT : INFO} bold={selectedIndex === index}>
+            {selectedIndex === index ? "❯ " : "  "}
+            {option}
+          </Text>
+        ))}
+      </Box>
+      <Text color={MUTED}>{resolving ? "Submitting decision…" : "↑/↓ select · Enter confirm · Esc cancel"}</Text>
+    </Box>
+  );
+}
+
+function footerPlaceholder(props: ShellFooterProps): string {
+  if (props.mode === "setup") {
+    return props.activeSetupField === "save" ? "Enter to save" : `Edit ${setupFieldLabel(props.activeSetupField)}`;
+  }
+  return props.pendingSkill ? `Ask Smith to run ${props.pendingSkill.name}…` : "Tell Smith what to do…";
+}
+
+function FooterStatus({
+  compressing,
+  busy,
+  statusLine,
+}: Pick<ShellFooterProps, "compressing" | "busy" | "statusLine">) {
+  if (compressing) return <CompressionIndicator />;
+  if (!busy) return <Text color={MUTED}>{statusLine}</Text>;
+  return null;
+}
+
+function SkillIndicator({ skill }: { skill: SkillSummary | null }) {
+  if (!skill) return null;
+  return (
+    <Box marginBottom={1}>
+      <Text color={ACCENT}>Skill </Text>
+      <Text color={ACCENT} bold>
+        {skill.name}
+      </Text>
+      <Text color={MUTED}> armed — Esc to clear</Text>
+    </Box>
+  );
+}
+
+function FooterInput(props: ShellFooterProps) {
+  if (props.pendingApproval) {
+    return (
+      <ApprovalPrompt
+        approval={props.pendingApproval}
+        selectedIndex={props.approvalIndex}
+        resolving={props.approvalResolving}
+      />
+    );
+  }
+
+  const placeholder = footerPlaceholder(props);
+  return (
+    <>
       <Box borderColor={props.busy ? ACCENT : BORDER} borderStyle="round" paddingX={1}>
         <Text color={ACCENT}>{"❯ "}</Text>
         <TextInput
           value={props.inputValue}
           placeholder={placeholder}
+          focus={!props.compressing}
+          showCursor={!props.compressing}
           mask={props.mode === "setup" && isApiKeySetupField(props.activeSetupField) ? "•" : undefined}
           onChange={props.onInputChange}
           onSubmit={props.mode === "setup" ? props.onSetupSubmit : props.onChatSubmit}
         />
       </Box>
       {props.slashMenuOpen ? <SlashMenu items={props.slashItems} selectedIndex={props.slashIndex} /> : null}
+    </>
+  );
+}
+
+function ShellFooter(props: ShellFooterProps) {
+  if (props.mode === "boot") return null;
+
+  return (
+    <>
+      <FooterStatus compressing={props.compressing} busy={props.busy} statusLine={props.statusLine} />
+      <SkillIndicator skill={props.pendingSkill} />
+      <QueuePreview items={props.queuedMessages} />
+      {props.busy && props.runStartedAt !== null ? (
+        <RunProgress startedAt={props.runStartedAt} tokenUsage={props.turnTokenUsage} />
+      ) : null}
+      <FooterInput {...props} />
       <StatusHud
-        model={props.config?.model || "-"}
-        projectName={path.basename(process.cwd())}
-        cwd={process.cwd()}
+        model={props.selectedModelProfile || props.config?.model || "-"}
+        projectName={path.basename(PROJECT_CWD)}
+        cwd={PROJECT_CWD}
         sessionId={props.currentSession?.id}
-        busy={props.busy}
-        runStartedAt={props.runStartedAt}
-        turnTokenUsage={props.turnTokenUsage}
         tokenUsage={props.tokenUsage}
+        contextUsage={props.contextUsage}
         toolActivity={props.toolActivity}
         turnCount={props.turnCount}
         viewMode={props.viewMode}
@@ -366,6 +532,11 @@ async function submitWhileBusy(
   slashIndex: number,
 ): Promise<void> {
   if (input.startsWith("/")) {
+    if (input === "/approve" || input === "/deny") {
+      await runShellCommand(input, { bridge, exit: () => {}, getState });
+      rememberSubmittedInput(input);
+      return;
+    }
     completeSlashSelection(input, slashMenuOpen, slashItems, slashIndex);
     return;
   }
@@ -445,7 +616,7 @@ async function submitSetup(
       ? setProvider(state.setupDraft, value)
       : setSetupField(state.setupDraft, activeField, value);
   if (!draft) {
-    state.set({ statusLine: "Must be openai or anthropic." });
+    state.set({ statusLine: "Must be openai, anthropic, or gemini." });
     return;
   }
 
@@ -466,6 +637,7 @@ function SmithApp() {
   const mode = useS((state) => state.mode);
   const panel = useS((state) => state.panel);
   const busy = useS((state) => state.busy);
+  const compressing = useS((state) => state.compressing);
   const inputValue = useS((state) => state.inputValue);
   const statusLine = useS((state) => state.statusLine);
   const pendingSkill = useS((state) => state.pendingSkill);
@@ -477,14 +649,22 @@ function SmithApp() {
   const toolActivity = useS((state) => state.toolActivity);
   const turnTokenUsage = useS((state) => state.turnTokenUsage);
   const tokenUsage = useS((state) => state.tokenUsage);
+  const contextUsage = useS((state) => state.contextUsage);
+  const tokenStats = useS((state) => state.tokenStats);
+  const tokenTab = useS((state) => state.tokenTab);
   const runStartedAt = useS((state) => state.runStartedAt);
+  const pendingApproval = useS((state) => state.pendingApproval);
+  const approvalIndex = useS((state) => state.approvalIndex);
+  const approvalResolving = useS((state) => state.approvalResolving);
   const skills = useS((state) => state.skills);
   const config = useS((state) => state.config);
   const currentSession = useS((state) => state.currentSession);
+  const selectedModelProfile = useS((state) => state.selectedModelProfile);
   const welcomeNotice = useS((state) => state.welcomeNotice);
   const setupIndex = useS((state) => state.setupIndex);
   const setupFlow = useS((state) => state.setupFlow);
   const slashIndex = useS((state) => state.slashIndex);
+  const skillsIndex = useS((state) => state.skillsIndex);
 
   const activeSetupField = setupFieldAt(setupIndex, setupFlow);
   const slashItems = useMemo(() => filterSlash(buildSlashItems(skills), inputValue), [inputValue, skills]);
@@ -500,6 +680,9 @@ function SmithApp() {
   useEffect(() => {
     if (slashIndex >= slashItems.length) getState().set({ slashIndex: 0 });
   }, [slashIndex, slashItems.length]);
+  useEffect(() => {
+    if (skillsIndex >= skills.length) getState().set({ skillsIndex: 0 });
+  }, [skills.length, skillsIndex]);
 
   const handleInputChange = useCallback(
     (value: string) => {
@@ -535,10 +718,13 @@ function SmithApp() {
     mode,
     setupFlow,
     busy,
+    compressing,
     viewMode,
     slashMenuOpen,
     slashItems,
     slashIndex,
+    skills,
+    skillsIndex,
     panel,
     pendingSkill,
     configConfigured: Boolean(config?.configured),
@@ -550,22 +736,24 @@ function SmithApp() {
 
   return (
     <Box flexDirection="column">
-      <Static key={`transcript-${transcriptEpoch}`} items={staticItems}>
-        {(item, index) => (
-          <Box key={item.id} flexDirection="column" paddingX={2}>
-            {item.kind === "hero" ? (
-              <HeroPanel />
-            ) : (
-              <TranscriptEntryView
-                entry={item}
-                showDivider={hasTurnBefore(staticItems, index)}
-                viewMode={viewMode}
-                highlighter={highlighter}
-              />
-            )}
-          </Box>
-        )}
-      </Static>
+      {panel !== "tokens" ? (
+        <Static key={`transcript-${transcriptEpoch}`} items={staticItems}>
+          {(item, index) => (
+            <Box key={item.id} flexDirection="column" paddingX={2}>
+              {item.kind === "hero" ? (
+                <HeroPanel />
+              ) : (
+                <TranscriptEntryView
+                  entry={item}
+                  showDivider={hasTurnBefore(staticItems, index)}
+                  viewMode={viewMode}
+                  highlighter={highlighter}
+                />
+              )}
+            </Box>
+          )}
+        </Static>
+      ) : null}
       <Box flexDirection="column" paddingX={2}>
         <ShellContent
           mode={mode}
@@ -575,33 +763,43 @@ function SmithApp() {
           viewMode={viewMode}
           welcomeNotice={welcomeNotice}
           highlighter={highlighter}
+          tokenStats={tokenStats}
+          tokenTab={tokenTab}
         />
       </Box>
-      <Box flexDirection="column" paddingBottom={1} paddingX={2}>
-        <ShellFooter
-          activeSetupField={activeSetupField}
-          busy={busy}
-          config={config}
-          currentSession={currentSession}
-          inputValue={inputValue}
-          mode={mode}
-          onChatSubmit={handleChatSubmit}
-          onInputChange={handleInputChange}
-          onSetupSubmit={handleSetupSubmit}
-          pendingSkill={pendingSkill}
-          queuedMessages={queuedMessages}
-          slashIndex={slashIndex}
-          slashItems={slashItems}
-          slashMenuOpen={slashMenuOpen}
-          statusLine={statusLine}
-          runStartedAt={runStartedAt}
-          turnTokenUsage={turnTokenUsage}
-          tokenUsage={tokenUsage}
-          toolActivity={toolActivity}
-          turnCount={turnCount}
-          viewMode={viewMode}
-        />
-      </Box>
+      {panel !== "tokens" ? (
+        <Box flexDirection="column" paddingBottom={1} paddingX={2}>
+          <ShellFooter
+            activeSetupField={activeSetupField}
+            approvalIndex={approvalIndex}
+            approvalResolving={approvalResolving}
+            busy={busy}
+            compressing={compressing}
+            config={config}
+            currentSession={currentSession}
+            selectedModelProfile={selectedModelProfile}
+            inputValue={inputValue}
+            mode={mode}
+            onChatSubmit={handleChatSubmit}
+            onInputChange={handleInputChange}
+            onSetupSubmit={handleSetupSubmit}
+            pendingApproval={pendingApproval}
+            pendingSkill={pendingSkill}
+            queuedMessages={queuedMessages}
+            slashIndex={slashIndex}
+            slashItems={slashItems}
+            slashMenuOpen={slashMenuOpen}
+            statusLine={statusLine}
+            runStartedAt={runStartedAt}
+            turnTokenUsage={turnTokenUsage}
+            tokenUsage={tokenUsage}
+            contextUsage={contextUsage}
+            toolActivity={toolActivity}
+            turnCount={turnCount}
+            viewMode={viewMode}
+          />
+        </Box>
+      ) : null}
     </Box>
   );
 }

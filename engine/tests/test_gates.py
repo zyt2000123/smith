@@ -1,7 +1,9 @@
 """UnderstandingGate / ContractAlignmentGate 单测 + 技能链接线检查。"""
 import asyncio
+import sys
 from pathlib import Path
 
+from engine.execution.gate import GateResult, LLMGate
 from engine.execution.skill_chain import GATE_REGISTRY, load_gate_content
 
 
@@ -50,6 +52,34 @@ def test_contract_alignment_fails_without_verdict():
     output = "我看了一下实现方案，感觉整体还行，没有什么大问题。"
     result = _check(_gate("contract_alignment"), output, {"planning_output": "1. xxx"})
     assert result.verdict == "fail"
+
+
+def test_llm_gate_fails_closed_when_llm_is_unavailable():
+    class PassingGate:
+        async def check(self, output, context):
+            return GateResult("pass", "heuristic pass")
+
+    result = asyncio.run(LLMGate(PassingGate(), "check {output}").check("output", {}))
+
+    assert result.verdict == "fail"
+    assert "unavailable" in result.reason
+
+
+def test_llm_gate_fails_closed_when_llm_verification_errors():
+    class PassingGate:
+        async def check(self, output, context):
+            return GateResult("pass", "heuristic pass")
+
+    class BrokenLLM:
+        async def chat(self, messages):
+            raise RuntimeError("provider down")
+
+    gate = LLMGate(PassingGate(), "check {output}")
+    gate.set_llm(BrokenLLM())
+    result = asyncio.run(gate.check("output", {}))
+
+    assert result.verdict == "fail"
+    assert result.reason == "LLM verification failed"
 
 
 if __name__ == "__main__":

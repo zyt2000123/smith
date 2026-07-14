@@ -4,17 +4,30 @@ from pydantic import BaseModel, Field
 class SessionCreate(BaseModel):
     title: str = "新对话"
     identity_id: str | None = None
+    model_profile: str | None = None
 
 
 class SessionOut(BaseModel):
     id: str
     agent_id: str
     identity_id: str | None = None
+    model_profile: str | None = None
     title: str
     created_at: str
     last_message_preview: str | None = None
     last_message_at: str | None = None
     message_count: int = 0
+
+
+class SessionModelUpdate(BaseModel):
+    model_profile: str | None = None
+
+
+class ContextCompressionOut(BaseModel):
+    session_id: str
+    summary: str
+    message_count: int
+    context_summary_cutoff: int
 
 
 class MessageCreate(BaseModel):

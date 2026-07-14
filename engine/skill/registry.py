@@ -22,6 +22,7 @@ class SkillRegistry:
     def __init__(self) -> None:
         self._skills: dict[str, SkillBody] = {}
         self._builtin_names: set[str] = set()
+        self._agent_names: set[str] = set()
         self._agent_skills_dir: Path | None = None
 
     def load_builtin(self, skills_dir: Path) -> None:
@@ -33,6 +34,8 @@ class SkillRegistry:
             if skill_file.is_file():
                 skill = _parse_or_skip(skill_file)
                 if skill is None:
+                    continue
+                if skill.meta.name in self._agent_names:
                     continue
                 self._skills[skill.meta.name] = skill
                 self._builtin_names.add(skill.meta.name)
@@ -48,6 +51,8 @@ class SkillRegistry:
                 skill = _parse_or_skip(skill_file)
                 if skill is None:
                     continue
+                self._agent_names.add(skill.meta.name)
+                self._builtin_names.discard(skill.meta.name)
                 self._skills[skill.meta.name] = skill
 
     def get(self, name: str) -> SkillBody | None:
@@ -79,6 +84,7 @@ class SkillRegistry:
             if name in allowed
         }
         self._builtin_names.intersection_update(allowed)
+        self._agent_names.intersection_update(allowed)
 
     def list_summaries(self) -> list[dict]:
         return [

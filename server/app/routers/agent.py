@@ -9,10 +9,19 @@ from ..schemas.auto_task import (
     AutoTaskRunOut,
     AutoTaskUpdate,
 )
-from ..schemas.session import MessageCreate, MessageOut, SessionCreate, SessionOut
-from ..schemas.run import RunStateOut
+from ..schemas.session import (
+    ContextCompressionOut,
+    MessageCreate,
+    MessageOut,
+    SessionCreate,
+    SessionModelUpdate,
+    SessionOut,
+)
+from ..schemas.run import ApprovalDecision, RunStateOut
 from ..schemas.skill import SkillSummaryOut
+from ..schemas.mcp import McpServerOut
 from ..schemas.task import TaskCreate, TaskOut
+from ..schemas.token_stats import TokenStatsOut
 from ..services.agent_service import AgentService
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
@@ -54,7 +63,32 @@ async def create_session(
     body: SessionCreate,
     svc: AgentService = Depends(get_agent_service),
 ):
-    return await svc.create_session(body.title, body.identity_id)
+    return await svc.create_session(body.title, body.identity_id, body.model_profile)
+
+
+@router.patch("/sessions/{session_id}/model", response_model=SessionOut)
+async def update_session_model(
+    session_id: str,
+    body: SessionModelUpdate,
+    svc: AgentService = Depends(get_agent_service),
+):
+    return await svc.update_session_model(session_id, body.model_profile)
+
+
+@router.post("/sessions/{session_id}/compress", response_model=ContextCompressionOut)
+async def compress_session(
+    session_id: str,
+    svc: AgentService = Depends(get_agent_service),
+):
+    return await svc.compress_session(session_id)
+
+
+@router.delete("/sessions/{session_id}", status_code=204)
+async def delete_session(
+    session_id: str,
+    svc: AgentService = Depends(get_agent_service),
+):
+    await svc.delete_session(session_id)
 
 
 @router.get("/identities")
@@ -112,6 +146,11 @@ async def list_skills(svc: AgentService = Depends(get_agent_service)):
     return await svc.list_skills()
 
 
+@router.get("/mcp", response_model=list[McpServerOut])
+async def list_mcp_servers(svc: AgentService = Depends(get_agent_service)):
+    return await svc.list_mcp_servers()
+
+
 @router.get("/files")
 async def list_files(svc: AgentService = Depends(get_agent_service)):
     return await svc.list_files()
@@ -139,12 +178,29 @@ async def get_stats(svc: AgentService = Depends(get_agent_service)):
     return await svc.get_stats()
 
 
+@router.get("/token-stats", response_model=TokenStatsOut)
+async def get_token_stats(
+    year: int | None = Query(default=None, ge=2000, le=2100),
+    svc: AgentService = Depends(get_agent_service),
+):
+    return await svc.get_token_stats(year)
+
+
 @router.get("/runs/{run_id}", response_model=RunStateOut)
 async def get_run(
     run_id: str,
     svc: AgentService = Depends(get_agent_service),
 ):
     return await svc.get_run(run_id)
+
+
+@router.post("/runs/{run_id}/approval", response_model=RunStateOut)
+async def resolve_run_approval(
+    run_id: str,
+    body: ApprovalDecision,
+    svc: AgentService = Depends(get_agent_service),
+):
+    return await svc.resolve_run_approval(run_id, body)
 
 
 @router.get("/tasks", response_model=list[TaskOut])

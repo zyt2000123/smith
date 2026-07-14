@@ -28,7 +28,7 @@ from engine.skill.executor import execute_skill_events
 from engine.skill.registry import SkillRegistry
 from engine.tool.registry import ToolRegistry
 from .backtrack import FailureLoopGuard
-from .events import EventType, ExecutionEvent
+from .events import EventType, ExecutionEvent, raw_text_delta
 from .pipeline import run_pipeline
 from .pipeline_context import (
     CTX_AGENT_ID,
@@ -42,18 +42,31 @@ from .pipeline_context import (
 )
 from .react_loop import (
     IncompleteAgentRunError,
-    react_event_loop as _react_event_loop,
-    react_loop as _react_loop,
-    react_stream_loop as _react_stream_loop,
+    react_event_loop,
 )
 from .run_state import RunStateError, RunStateStore, RunStatus
 from .run_stream import AgentRunStream
 from .runtime import EngineRequest, EngineResult, RuntimeContext, RuntimeServices
 from .skill_chain import SkillChain, load_gate_content
+from .tool_ledger import ToolExecutionLedger
+from .trace import TraceStore
 from engine.safety.eval_guard import EVAL_SENSITIVE_GUIDANCE, detect_eval_sensitive
+from engine.safety.approval import APPROVAL_BROKER, use_approval_context
 from .task_router import route_task
 
-__all__ = ("_react_event_loop", "_react_loop", "_react_stream_loop")
+# ReAct loop implementations belong to react_loop.py and are intentionally
+# not re-exported from this orchestration module.
+__all__ = (
+    "prepare_runtime",
+    "run_agent_stream",
+    "run_stream_with_runtime",
+    "resume_stream_with_runtime",
+    "reply_with_runtime",
+    "reply_events_with_runtime",
+    "reply_stream_with_runtime",
+    "run_memory_idle_tick",
+    "run_memory_daily_tick",
+)
 
 logger = logging.getLogger(__name__)
 _RUNTIME_LEARNING_TIMEOUT_SECONDS = 30.0
@@ -116,7 +129,7 @@ async def run_agent_stream(
     yield ExecutionEvent(EventType.ROUTE_DECIDED, route.to_event_data())
 
     if route.pipeline_id is None or skill_chain is None:
-        async for event in _react_event_loop(llm, base_messages, tool_registry, tool_guard, max_react_iters):
+        async for event in react_event_loop(llm, base_messages, tool_registry, tool_guard, max_react_iters):
             yield event
         yield ExecutionEvent(EventType.DONE, {})
         return
@@ -179,7 +192,7 @@ async def _run_forced_skill_stream(
     async for event in execute_skill_events(
         skill, llm, tool_registry, messages, context,
         max_react_iters, tool_guard=tool_guard,
-        react_event_loop_fn=_react_event_loop,
+        react_event_loop_fn=react_event_loop,
     ):
         if event.type == EventType.TEXT_DELTA:
             output_parts.append(str(event.data.get("text", "")))
@@ -415,19 +428,27 @@ def _resolve_pipeline(
 
     # 门禁/条件实现是内容层资产：解析 pipeline YAML 前必须先注册，
     # 否则 from_yaml 的 gate key 查找会对合法内容报 unknown gate。
-    load_gate_content(runtime.agents_dir)
+    gate_content = load_gate_content(runtime.agents_dir)
 
     # 1. User-defined pipeline in profile
     profile_pipelines = runtime.profile_dir / "pipelines"
     if profile_pipelines.is_dir():
-        user_chains = SkillChain.load_pipelines(profile_pipelines)
+        user_chains = SkillChain.load_pipelines(
+            profile_pipelines,
+            gate_registry=gate_content.gates,
+            condition_registry=gate_content.conditions,
+        )
         if route.pipeline_id in user_chains:
             return user_chains[route.pipeline_id]
 
     # 2. Built-in pipelines from agents/pipelines/
     builtin_pipelines = runtime.agents_dir / "pipelines"
     if builtin_pipelines.is_dir():
-        builtin_chains = SkillChain.load_pipelines(builtin_pipelines)
+        builtin_chains = SkillChain.load_pipelines(
+            builtin_pipelines,
+            gate_registry=gate_content.gates,
+            condition_registry=gate_content.conditions,
+        )
         if route.pipeline_id in builtin_chains:
             return builtin_chains[route.pipeline_id]
 
@@ -442,25 +463,40 @@ def _resolve_pipeline(
 
 
 def _ensure_memory_lifecycle_hooks(services: RuntimeServices) -> None:
-    if getattr(services, "_memory_lifecycle_hooks_registered", False):
+    maintenance_llm = services.background_llm or services.llm
+    if services.hooks is None:
+        from engine.hook import HookManager
+
+        services.hooks = HookManager()
+    hook_key = (
+        id(maintenance_llm),
+        id(services.gate_llm),
+        services.owns_llm_clients,
+        id(services.hooks),
+    )
+    if (
+        services._memory_lifecycle_hook is not None
+        and services._memory_lifecycle_hook_key == hook_key
+        and services.hooks.is_registered(services._memory_lifecycle_hook)
+    ):
         return
     from engine.execution.memory_maintenance import (
         MemoryLifecycleHooks,
         MemoryMaintenanceService,
     )
-    from engine.hook import HookManager
+    if services._memory_lifecycle_hook is not None:
+        services.hooks.unregister(services._memory_lifecycle_hook)
 
-    if services.hooks is None:
-        services.hooks = HookManager()
-    maintenance_llm = services.background_llm or services.llm
-    services.hooks.register(MemoryLifecycleHooks(
+    hook = MemoryLifecycleHooks(
         MemoryMaintenanceService(
             maintenance_llm,
             reviewer=services.gate_llm,
             defer_maintenance=not services.owns_llm_clients,
         )
-    ))
-    setattr(services, "_memory_lifecycle_hooks_registered", True)
+    )
+    services.hooks.register(hook)
+    services._memory_lifecycle_hook = hook
+    services._memory_lifecycle_hook_key = hook_key
 
 
 async def run_memory_idle_tick(memory_dir: Path, services: RuntimeServices) -> bool:
@@ -507,6 +543,9 @@ async def _persist_runtime_learning(
     reply_text: str,
     had_tools: bool,
     services: RuntimeServices,
+    *,
+    terminal_status: str = "completed",
+    terminal_reason: str | None = None,
 ) -> bool:
     """Persist memory and preferences. Returns False if any write failed."""
     ok = True
@@ -524,10 +563,18 @@ async def _persist_runtime_learning(
     try:
         from engine.hook import HookType
 
+        hook_name = {
+            "completed": "memory_after_turn_completed",
+            "incomplete": "memory_after_turn_incomplete",
+            "failed": "memory_after_turn_failed",
+        }.get(terminal_status, "memory_after_turn_failed")
+        hook_args = (state_dir, user_message, reply_text, had_tools, learning_signals)
+        if terminal_status != "completed":
+            hook_args += (terminal_reason,)
         results = await services.hooks.apply(
-            "memory_after_turn_completed",
+            hook_name,
             HookType.PARALLEL,
-            args=(state_dir, user_message, reply_text, had_tools, learning_signals),
+            args=hook_args,
         )
         ok = ok and all(result is not False for result in results)
     except Exception:
@@ -562,8 +609,19 @@ def _record_run_event(
     store: RunStateStore | None,
     run_id: str,
     event: ExecutionEvent,
+    trace_store: TraceStore | None = None,
 ) -> None:
     """Best-effort projection of engine events into durable run metadata."""
+    if trace_store is not None:
+        try:
+            trace_store.append(run_id, event)
+        except (OSError, ValueError):
+            logger.warning(
+                "failed to append run trace (run=%s, event=%s)",
+                run_id,
+                event.type.value,
+                exc_info=True,
+            )
     if store is None:
         return
     try:
@@ -591,6 +649,15 @@ def _record_run_event(
         elif event.type is EventType.TOOL_CALL_START:
             kwargs["current_tool"] = event.data.get("name")
         elif event.type is EventType.TOOL_CALL_RESULT:
+            if event.data.get("approval_required"):
+                store.request_approval(
+                    run_id,
+                    approval_id=str(event.data.get("approval_id") or ""),
+                    tool_name=str(event.data.get("tool") or "tool"),
+                    level=str(event.data.get("level") or "execute"),
+                    reason=str(event.data.get("reason") or "Approval required"),
+                )
+                return
             kwargs["clear_tool"] = True
         store.record_event(run_id, event_type, **kwargs)
     except (RunStateError, ValueError, TypeError):
@@ -617,9 +684,90 @@ def run_stream_with_runtime(
     except (RunStateError, OSError, ValueError):
         logger.warning("failed to initialize run state (run=%s)", run_id, exc_info=True)
         state_store = None
+    try:
+        trace_store: TraceStore | None = TraceStore(runtime.profile_dir)
+    except OSError:
+        logger.warning("failed to initialize run trace (run=%s)", run_id, exc_info=True)
+        trace_store = None
+    try:
+        ledger: ToolExecutionLedger | None = ToolExecutionLedger(runtime.profile_dir, run_id)
+    except Exception:
+        logger.warning("failed to initialize tool execution ledger (run=%s)", run_id, exc_info=True)
+        ledger = None
     return AgentRunStream(
         run_id,
-        _run_events_with_runtime(request, runtime, services, run_id, state_store),
+        _run_events_with_runtime(
+            request,
+            runtime,
+            services,
+            run_id,
+            state_store,
+            trace_store,
+            ledger,
+        ),
+    )
+
+
+def _failed_setup_stream(
+    run_id: str,
+    services: RuntimeServices,
+    reason: str,
+) -> AgentRunStream:
+    """Expose setup failures through the same terminal stream contract."""
+    async def events() -> AsyncGenerator[ExecutionEvent, None]:
+        try:
+            yield ExecutionEvent(EventType.RUN_STARTED, {"run_id": run_id})
+            yield ExecutionEvent(EventType.FAILED, {"reason": reason})
+            yield ExecutionEvent(EventType.DONE, {})
+            yield ExecutionEvent(
+                EventType.RUN_FINISHED,
+                {"run_id": run_id, "status": "failed", "reason": reason},
+            )
+        finally:
+            try:
+                await services.close()
+            except Exception:
+                logger.warning("failed to close services after setup failure", exc_info=True)
+
+    return AgentRunStream(run_id, events())
+
+
+def resume_stream_with_runtime(
+    request: EngineRequest,
+    runtime: RuntimeContext,
+    services: RuntimeServices,
+    run_id: str,
+) -> AgentRunStream:
+    """Resume a recoverable run using its persisted state and tool ledger.
+
+    The caller must provide the same session history in ``request.history``.
+    Completed side-effecting calls are replayed by the run's ledger; calls
+    whose prior side effect is uncertain remain blocked until an operator
+    resolves them.
+    """
+    try:
+        state_store = RunStateStore(runtime.profile_dir)
+        ledger = ToolExecutionLedger(runtime.profile_dir, run_id)
+        state_store.resume(run_id)
+    except Exception:
+        logger.warning("failed to resume run (run=%s)", run_id, exc_info=True)
+        return _failed_setup_stream(run_id, services, "resume_setup_failed")
+    try:
+        trace_store: TraceStore | None = TraceStore(runtime.profile_dir)
+    except OSError:
+        logger.warning("failed to initialize resumed run trace (run=%s)", run_id, exc_info=True)
+        trace_store = None
+    return AgentRunStream(
+        run_id,
+        _run_events_with_runtime(
+            request,
+            runtime,
+            services,
+            run_id,
+            state_store,
+            trace_store,
+            ledger,
+        ),
     )
 
 
@@ -629,6 +777,8 @@ async def _run_events_with_runtime(
     services: RuntimeServices,
     run_id: str,
     state_store: RunStateStore | None = None,
+    trace_store: TraceStore | None = None,
+    ledger: ToolExecutionLedger | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Produce one complete run, including persistence and cleanup."""
     full_text: list[str] = []
@@ -639,14 +789,25 @@ async def _run_events_with_runtime(
     state_dir: Path | None = None
     memory_persist_failed = False
 
-    run_started = ExecutionEvent(EventType.RUN_STARTED, {"run_id": run_id})
-    _record_run_event(state_store, run_id, run_started)
+    if ledger is not None:
+        services.tool_registry.bind_execution_ledger(ledger)
+
+    run_started = ExecutionEvent(
+        EventType.RUN_STARTED,
+        {
+            "run_id": run_id,
+            "project_path": request.working_dir or "",
+        },
+    )
+    _record_run_event(state_store, run_id, run_started, trace_store)
     yield run_started
     try:
         s = await prepare_runtime(request, runtime, services)
         state_dir = s.state_dir
         guard = FailureLoopGuard()
-        with use_fact_gate(_fact_gate_for_request(request, runtime, services)):
+        with use_fact_gate(_fact_gate_for_request(request, runtime, services)), use_approval_context(
+            APPROVAL_BROKER, run_id
+        ):
             async for event in run_agent_stream(
                 services.llm, s.system_prompt,
                 _merge_context(request.message, request.context),
@@ -671,7 +832,7 @@ async def _run_events_with_runtime(
                     terminal_reason = "blocked"
                 elif _has_memory_worthy_activity(event):
                     had_tools = True
-                _record_run_event(state_store, run_id, event)
+                _record_run_event(state_store, run_id, event, trace_store)
                 yield event
         drained = True
     except Exception as exc:
@@ -681,21 +842,27 @@ async def _run_events_with_runtime(
         failure_text = ExecutionEvent(EventType.TEXT_DELTA, {
             "text": f"⚠️ 执行失败：{type(exc).__name__}（详情见服务端日志）",
         })
-        _record_run_event(state_store, run_id, failure_text)
+        _record_run_event(state_store, run_id, failure_text, trace_store)
         yield failure_text
         failure_event = ExecutionEvent(EventType.FAILED, {"reason": terminal_reason})
-        _record_run_event(state_store, run_id, failure_event)
+        _record_run_event(state_store, run_id, failure_event, trace_store)
         yield failure_event
         done_event = ExecutionEvent(EventType.DONE, {})
-        _record_run_event(state_store, run_id, done_event)
+        _record_run_event(state_store, run_id, done_event, trace_store)
         yield done_event
         drained = True
     finally:
-        if drained and terminal_status == "completed" and state_dir is not None:
+        if (
+            drained
+            and state_dir is not None
+            and terminal_status in {"completed", "incomplete", "failed"}
+        ):
             try:
                 memory_persist_failed = not await asyncio.wait_for(
                     _persist_runtime_learning(
                         state_dir, request.message, "".join(full_text), had_tools, services,
+                        terminal_status=terminal_status,
+                        terminal_reason=terminal_reason,
                     ),
                     timeout=_RUNTIME_LEARNING_TIMEOUT_SECONDS,
                 )
@@ -723,6 +890,9 @@ async def _run_events_with_runtime(
             await services.close()
         except Exception:
             logger.warning("failed to close engine runtime services", exc_info=True)
+        if ledger is not None:
+            services.tool_registry.bind_execution_ledger(None)
+        APPROVAL_BROKER.cancel_run(run_id)
 
     if drained:
         terminal_data: dict[str, object] = {"run_id": run_id, "status": terminal_status}
@@ -733,7 +903,7 @@ async def _run_events_with_runtime(
             # 让前端有机会提示"本轮未写入长期记忆"。
             terminal_data["memory_persist_failed"] = True
         finished_event = ExecutionEvent(EventType.RUN_FINISHED, terminal_data)
-        _record_run_event(state_store, run_id, finished_event)
+        _record_run_event(state_store, run_id, finished_event, trace_store)
         yield finished_event
 
 
@@ -750,26 +920,20 @@ async def reply_with_runtime(
     """Run one engine request using the same complete stream lifecycle as SSE."""
     full_text: list[str] = []
     had_tools = False
-    incomplete_reason: str | None = None
-    failed_reason: str | None = None
 
     stream = run_stream_with_runtime(request, runtime, services)
     async for event in stream.stream_events():
         if event.type == EventType.TEXT_DELTA:
             full_text.append(str(event.data.get("text", "")))
-        elif event.type == EventType.INCOMPLETE:
-            incomplete_reason = str(event.data.get("reason", "agent_incomplete"))
-        elif event.type == EventType.FAILED:
-            failed_reason = str(event.data.get("reason", "agent_failed"))
         elif _has_memory_worthy_activity(event):
             had_tools = True
 
     if not stream.is_complete:
         raise RuntimeError("Agent run ended before a terminal state was emitted.")
-    if stream.status == "failed" or failed_reason:
-        raise RuntimeError(failed_reason or stream.reason or "agent_failed")
-    if stream.status == "incomplete" or incomplete_reason:
-        raise IncompleteAgentRunError(incomplete_reason or stream.reason or "agent_incomplete")
+    if stream.status == "failed":
+        raise RuntimeError(stream.reason or "agent_failed")
+    if stream.status == "incomplete":
+        raise IncompleteAgentRunError(stream.reason or "agent_incomplete")
 
     return EngineResult(text="".join(full_text), had_tools=had_tools)
 
@@ -793,18 +957,10 @@ async def reply_stream_with_runtime(
     """Text-only stream adapter."""
     saw_raw_text = False
     async for event in reply_events_with_runtime(request, runtime, services):
-        if event.type == EventType.RAW_RESPONSE_EVENT:
-            raw_type = event.data.get("type")
-            raw_data = event.data.get("data")
-            if (
-                raw_type == "response.output_text.delta"
-                and not event.data.get("provision_id")
-                and isinstance(raw_data, dict)
-            ):
-                text = raw_data.get("delta")
-                if isinstance(text, str) and text:
-                    saw_raw_text = True
-                    yield text
+        text = raw_text_delta(event, include_provisional=False)
+        if text is not None:
+            saw_raw_text = True
+            yield text
         elif event.type == EventType.TEXT_DELTA:
             if not event.data.get("already_streamed") or not saw_raw_text:
                 yield event.data.get("text", "")

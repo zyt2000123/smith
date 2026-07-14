@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,9 +11,10 @@ from engine.execution.agent_loop import (
     prepare_runtime,
     reply_events_with_runtime,
     reply_with_runtime,
+    resume_stream_with_runtime,
     run_stream_with_runtime,
 )
-from engine.execution.events import EventType
+from engine.execution.events import EventType, ExecutionEvent, raw_text_delta
 from engine.execution.run_state import RunStateStore, RunStatus
 from engine.execution.runtime import EngineRequest, RuntimeContext, RuntimeServices
 from engine.identity_catalog import IdentityCatalog
@@ -263,6 +265,109 @@ def test_run_stream_persists_queued_and_terminal_run_state(tmp_path: Path) -> No
     assert run_id
     assert status is RunStatus.COMPLETED
     assert event_seq > 1
+
+
+def test_resume_setup_failure_is_exposed_as_terminal_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, services, llm = _runtime(tmp_path)
+
+    def fail_store(_profile_dir: Path):
+        raise OSError("runs directory unavailable")
+
+    monkeypatch.setattr(agent_loop_module, "RunStateStore", fail_store)
+
+    async def collect():
+        stream = resume_stream_with_runtime(
+            EngineRequest(message="resume"), runtime, services, "missing-run"
+        )
+        return stream, [event async for event in stream.stream_events()]
+
+    stream, events = asyncio.run(collect())
+
+    assert events[-1].type is EventType.RUN_FINISHED
+    assert events[-1].data == {
+        "run_id": "missing-run",
+        "status": "failed",
+        "reason": "resume_setup_failed",
+    }
+    assert stream.is_complete is True
+    assert stream.status == "failed"
+    assert llm.closed is True
+
+
+def test_incomplete_run_persists_learning_with_partial_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, services, _ = _runtime(tmp_path)
+    identity = runtime.identity_catalog.get("smith")  # type: ignore[union-attr]
+    setup = SimpleNamespace(
+        system_prompt="system",
+        identity=identity,
+        route=SimpleNamespace(identity_id="smith", route_id="direct", pipeline_id=None),
+        chain=None,
+        state_dir=runtime.profile_dir,
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_prepare_runtime(*_args, **_kwargs):
+        return setup
+
+    async def fake_run_agent_stream(*_args, **_kwargs):
+        yield ExecutionEvent(EventType.TOOL_CALL_START, {"name": "search"})
+        yield ExecutionEvent(EventType.TEXT_DELTA, {"text": "partial result"})
+        yield ExecutionEvent(EventType.INCOMPLETE, {"reason": "model_output_limit"})
+
+    async def fake_persist(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(agent_loop_module, "prepare_runtime", fake_prepare_runtime)
+    monkeypatch.setattr(agent_loop_module, "run_agent_stream", fake_run_agent_stream)
+    monkeypatch.setattr(agent_loop_module, "_persist_runtime_learning", fake_persist)
+
+    async def collect():
+        stream = run_stream_with_runtime(EngineRequest(message="continue"), runtime, services)
+        return [event async for event in stream.stream_events()]
+
+    events = asyncio.run(collect())
+
+    assert captured == {
+        "terminal_status": "incomplete",
+        "terminal_reason": "model_output_limit",
+    }
+    assert events[-1].data["status"] == "incomplete"
+
+
+def test_raw_text_delta_uses_normalized_provider_event_contract() -> None:
+    event = ExecutionEvent(
+        EventType.RAW_RESPONSE_EVENT,
+        {
+            "type": "response.output_text.delta",
+            "data": {"delta": "hello"},
+        },
+    )
+    provisional = ExecutionEvent(
+        EventType.RAW_RESPONSE_EVENT,
+        {
+            "type": "response.output_text.delta",
+            "provision_id": "draft-1",
+            "data": {"delta": "draft"},
+        },
+    )
+
+    assert raw_text_delta(event, include_provisional=False) == "hello"
+    assert raw_text_delta(provisional, include_provisional=False) is None
+    assert raw_text_delta(provisional) == "draft"
+
+
+def test_agent_loop_public_exports_exclude_react_implementation_aliases() -> None:
+    assert "run_stream_with_runtime" in agent_loop_module.__all__
+    assert "_react_event_loop" not in agent_loop_module.__all__
+    assert "_react_loop" not in agent_loop_module.__all__
+    assert "_react_stream_loop" not in agent_loop_module.__all__
 
 
 def test_run_stream_bounds_post_run_learning_finalization(

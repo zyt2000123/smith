@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, AsyncGenerator
 from uuid import uuid4
 
 from .backtrack import FailureLoopGuard, FailureSignature
-from .events import EventType, ExecutionEvent
+from .events import EventType, ExecutionEvent, raw_text_delta
 from .gate import Gate, GateResult, LLMGate
 from .pipeline_context import (
     CTX_AGENT_ID,
@@ -312,15 +312,12 @@ async def _collect_node_events(
             parts.append(str(event.data.get("text", "")))
             continue
         elif event.type == EventType.RAW_RESPONSE_EVENT:
-            raw_type = event.data.get("type")
-            raw_data = event.data.get("data")
-            if raw_type == "response.output_text.delta" and isinstance(raw_data, dict):
-                delta = raw_data.get("delta")
-                if isinstance(delta, str) and delta:
-                    was_provisional = True
-                    yield ExecutionEvent(EventType.PROVISIONAL_TEXT_DELTA, {
-                        "text": delta, "provision_id": provision_id,
-                    })
+            delta = raw_text_delta(event)
+            if delta is not None:
+                was_provisional = True
+                yield ExecutionEvent(EventType.PROVISIONAL_TEXT_DELTA, {
+                    "text": delta, "provision_id": provision_id,
+                })
             continue
         elif event.type == EventType.INCOMPLETE:
             incomplete_reason = str(event.data.get("reason", "agent_incomplete"))

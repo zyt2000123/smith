@@ -49,6 +49,18 @@ def test_valid_pipeline_still_loads(tmp_path: Path) -> None:
     assert chain.nodes[1].condition is not None
 
 
+def test_malformed_pipeline_step_fails_loudly(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "steps:\n"
+        "  - skill: understand\n"
+        "  - skill: 42\n",
+    )
+
+    with pytest.raises(ValueError, match=r"steps\[1\].*skill"):
+        SkillChain.from_yaml(path)
+
+
 def test_gate_defaults_to_rubric_when_omitted(tmp_path: Path) -> None:
     path = _write(tmp_path, "steps:\n  - skill: understand\n")
     chain = SkillChain.from_yaml(path)
@@ -111,6 +123,52 @@ def test_custom_domain_gate_extends_registry_without_engine_change(tmp_path: Pat
     chain = SkillChain.from_yaml(path)
     assert chain is not None
     assert chain.nodes[0].skill_name == "contract-review"
+
+
+def test_gate_content_registries_are_scoped_per_agents_directory(tmp_path: Path) -> None:
+    def write_gate(root: Path, class_name: str) -> None:
+        gates_dir = root / "gates"
+        gates_dir.mkdir(parents=True)
+        (gates_dir / "gates.py").write_text(
+            "from engine.execution.gate import GateResult\n"
+            f"class {class_name}:\n"
+            "    async def check(self, output, context):\n"
+            "        return GateResult('pass', 'ok')\n"
+            f"GATES = {{'shared': {class_name}}}\n",
+            encoding="utf-8",
+        )
+
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    write_gate(first_root, "FirstGate")
+    write_gate(second_root, "SecondGate")
+
+    first = load_gate_content(first_root)
+    second = load_gate_content(second_root)
+
+    first_path = _write(
+        first_root,
+        "base_gate: shared\nsteps:\n  - skill: one\n    gate: shared\n",
+    )
+    second_path = _write(
+        second_root,
+        "base_gate: shared\nsteps:\n  - skill: two\n    gate: shared\n",
+    )
+    first_chain = SkillChain.from_yaml(
+        first_path,
+        gate_registry=first.gates,
+        condition_registry=first.conditions,
+    )
+    second_chain = SkillChain.from_yaml(
+        second_path,
+        gate_registry=second.gates,
+        condition_registry=second.conditions,
+    )
+
+    assert type(first_chain.nodes[0].gate).__name__ == "FirstGate"
+    assert type(second_chain.nodes[0].gate).__name__ == "SecondGate"
+    assert type(first_chain.base_gates[0]).__name__ == "FirstGate"
+    assert type(second_chain.base_gates[0]).__name__ == "SecondGate"
 
 
 def test_duplicate_gate_key_across_files_raises(tmp_path: Path) -> None:

@@ -40,6 +40,17 @@ class HookManager:
             )
         )
 
+    def unregister(self, handler: Any) -> None:
+        """Remove one previously registered handler, if present."""
+        try:
+            self._handlers.remove(handler)
+        except ValueError:
+            pass
+
+    def is_registered(self, handler: Any) -> bool:
+        """Return whether a handler is currently registered."""
+        return handler in self._handlers
+
     def _get_handlers(self, hook: str) -> list[Callable]:
         return [
             fn

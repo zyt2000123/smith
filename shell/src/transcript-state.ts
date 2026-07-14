@@ -19,6 +19,7 @@ export type SystemEntry = {
   kind: "system";
   text: string;
   tone: SystemTone;
+  approvalId?: string;
 };
 
 export type ThinkingBlock = {
@@ -141,6 +142,10 @@ export function createSystemEntry(text: string, tone: SystemTone = "info"): Syst
   };
 }
 
+export function removeApprovalNotice(entries: TranscriptEntry[], approvalId: string): TranscriptEntry[] {
+  return entries.filter((entry) => entry.kind !== "system" || entry.approvalId !== approvalId);
+}
+
 export function createTurnEntry(userText: string): TurnEntry {
   return {
     id: createId(),
@@ -162,10 +167,35 @@ export function closeLatestTurn(entries: TranscriptEntry[]): TranscriptEntry[] {
   }));
 }
 
+function approvalArgumentsSummary(arguments_: Record<string, unknown>): string {
+  const entries = Object.entries(arguments_);
+  if (entries.length === 0) return "";
+  const text = entries
+    .map(([key, value]) => `${key}=${typeof value === "string" ? value : (JSON.stringify(value) ?? String(value))}`)
+    .join(", ");
+  const safeText = Array.from(text, (character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || code === 127 ? " " : character;
+  }).join("");
+  return ` Details: ${safeText.slice(0, 500)}.`;
+}
+
 export function applyStreamEvent(entries: TranscriptEntry[], event: StreamEvent): TranscriptEntry[] {
   switch (event.type) {
     case "run_started":
       return entries;
+
+    case "approval_required":
+      return [
+        ...entries,
+        {
+          ...createSystemEntry(
+            `Approval required for ${event.tool} (${event.level}). ${event.reason}${approvalArgumentsSummary(event.arguments)} Use /approve or /deny.`,
+            "info",
+          ),
+          approvalId: event.approvalId,
+        },
+      ];
 
     case "provisional_text_delta":
       if (!event.provisionId || !event.text) return entries;
@@ -381,6 +411,10 @@ export function applyStreamEvent(entries: TranscriptEntry[], event: StreamEvent)
       });
 
     case "token_usage":
+      return entries;
+
+    case "context_usage":
+    case "compression":
       return entries;
 
     case "done":

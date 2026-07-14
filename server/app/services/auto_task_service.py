@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 
@@ -16,6 +16,8 @@ from .engine_runtime import build_engine_runtime, load_runtime_identity_catalog
 from ..utils.cron import next_cron_time, next_interval_time
 
 log = logging.getLogger(__name__)
+_RETRY_BASE_DELAY_SECONDS = 60
+_MAX_RETRY_DELAY_SECONDS = 900
 
 
 class AutoTaskService:
@@ -143,6 +145,7 @@ class AutoTaskService:
             )
 
             await self.repo.finish_task(task_id, "idle", next_run)
+            await self.repo.update(task_id, {"retry_count": 0})
             finished = await self.repo.finish_run(run["id"], "completed", reply_text)
             if finished is None:
                 raise HTTPException(500, "Failed to record auto task run")
@@ -150,7 +153,21 @@ class AutoTaskService:
 
         except Exception as exc:
             log.exception("Auto task %s failed", task_id)
-            await self.repo.finish_task(task_id, "failed", next_run)
+            is_scheduled = task.get("trigger_type") != "manual"
+            retry_count = int(task.get("retry_count") or 0) + 1 if is_scheduled else 0
+            max_retries = max(0, int(task.get("max_retries", 2) or 0))
+            retry_at = next_run
+            retry_status = "failed"
+            if is_scheduled and retry_count <= max_retries:
+                retry_status = "idle"
+                retry_at = self._retry_next_run(retry_count)
+            await self.repo.finish_task(task_id, retry_status, retry_at)
+            # Keep the counter only across the immediate retry chain. Once the
+            # chain is exhausted, the next normal schedule starts fresh.
+            await self.repo.update(
+                task_id,
+                {"retry_count": retry_count if retry_status == "idle" else 0},
+            )
             finished = await self.repo.finish_run(
                 run["id"], "failed", "", error=str(exc)
             )
@@ -192,3 +209,11 @@ class AutoTaskService:
         except (ValueError, TypeError, OverflowError):
             return None
         return None
+
+    @staticmethod
+    def _retry_next_run(attempt: int) -> str:
+        delay = min(
+            _RETRY_BASE_DELAY_SECONDS * (2 ** max(0, attempt - 1)),
+            _MAX_RETRY_DELAY_SECONDS,
+        )
+        return (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()

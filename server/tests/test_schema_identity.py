@@ -32,5 +32,8 @@ CREATE TABLE sessions (
         async with db.execute("PRAGMA table_info(sessions)") as cursor:
             columns = {row[1] for row in await cursor.fetchall()}
         assert "identity_id" in columns
+        assert "model_profile" in columns
+        assert "context_summary" in columns
+        assert "context_summary_cutoff" in columns
     finally:
         await db.close()

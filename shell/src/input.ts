@@ -4,18 +4,28 @@ import type { MutableRefObject } from "react";
 import type { SkillSummary } from "./api.js";
 import type { NodeBridge } from "./bridge.js";
 import type { SlashItem } from "./commands.js";
+import {
+  type ListNavigation,
+  moveListIndex,
+  SKILLS_PANEL_VISIBLE_ITEMS,
+  SLASH_MENU_VISIBLE_ITEMS,
+} from "./list-navigation.js";
 import { fieldValue, isEditableSetupField, nextSetupIndex, setSetupField, setupFieldAt } from "./setup.js";
 import type { AppStore, Mode, Panel } from "./store.js";
+import { TOKEN_TABS } from "./token-stats.js";
 import type { TranscriptViewMode } from "./transcript-state.js";
 
 export type ShellInputOptions = {
   mode: Mode;
   setupFlow: AppStore["setupFlow"];
   busy: boolean;
+  compressing: boolean;
   viewMode: TranscriptViewMode;
   slashMenuOpen: boolean;
   slashItems: SlashItem[];
   slashIndex: number;
+  skills: SkillSummary[];
+  skillsIndex: number;
   panel: Panel;
   pendingSkill: SkillSummary | null;
   configConfigured: boolean;
@@ -76,7 +86,17 @@ function handleViewToggle(input: string, key: Key, options: ShellInputOptions): 
   return true;
 }
 
-function handleSlashNavigation(key: Key, options: ShellInputOptions): boolean {
+function navigationFromKey(key: Key): ListNavigation | null {
+  if (key.upArrow) return "up";
+  if (key.downArrow) return "down";
+  if (key.pageUp) return "pageUp";
+  if (key.pageDown) return "pageDown";
+  if (key.home) return "home";
+  if (key.end) return "end";
+  return null;
+}
+
+export function handleSlashNavigation(key: Key, options: ShellInputOptions): boolean {
   if (!options.slashMenuOpen || options.slashItems.length === 0) return false;
 
   const state = options.getState();
@@ -85,30 +105,96 @@ function handleSlashNavigation(key: Key, options: ShellInputOptions): boolean {
     if (selected) state.set({ inputValue: selected.command });
     return true;
   }
-  if (key.downArrow) {
-    state.set({ slashIndex: (options.slashIndex + 1) % options.slashItems.length });
-    return true;
-  }
-  if (key.upArrow) {
-    state.set({ slashIndex: (options.slashIndex - 1 + options.slashItems.length) % options.slashItems.length });
+  const navigation = navigationFromKey(key);
+  if (navigation) {
+    state.set({
+      slashIndex: moveListIndex(options.slashIndex, options.slashItems.length, navigation, SLASH_MENU_VISIBLE_ITEMS),
+    });
     return true;
   }
   return false;
 }
 
+export function handleSkillsNavigation(key: Key, options: ShellInputOptions): boolean {
+  if (options.slashMenuOpen || options.panel !== "skills" || options.skills.length === 0) return false;
+
+  const navigation = navigationFromKey(key);
+  if (!navigation) return false;
+
+  options.getState().set({
+    skillsIndex: moveListIndex(options.skillsIndex, options.skills.length, navigation, SKILLS_PANEL_VISIBLE_ITEMS),
+  });
+  return true;
+}
+
+export function handleSkillsSelection(key: Key, options: ShellInputOptions): boolean {
+  if (!key.return || options.slashMenuOpen || options.panel !== "skills" || options.skills.length === 0) return false;
+
+  const state = options.getState();
+  if (state.inputValue.trim()) return false;
+
+  const selected = options.skills[options.skillsIndex];
+  if (!selected) return false;
+
+  state.set({
+    panel: "chat",
+    inputValue: "",
+    pendingSkill: selected,
+    statusLine: `Skill ${selected.name} armed.`,
+  });
+  return true;
+}
+
+function handleTokenNavigation(key: Key, options: ShellInputOptions): boolean {
+  if (options.panel !== "tokens" || options.slashMenuOpen) return false;
+  if (!key.leftArrow && !key.rightArrow) return false;
+
+  const state = options.getState();
+  const current = TOKEN_TABS.indexOf(state.tokenTab);
+  const direction = key.leftArrow ? -1 : 1;
+  const next = (current + direction + TOKEN_TABS.length) % TOKEN_TABS.length;
+  state.set({ tokenTab: TOKEN_TABS[next] });
+  return true;
+}
+
+export function handleApprovalInput(key: Key, options: ShellInputOptions): boolean {
+  const state = options.getState();
+  if (!state.pendingApproval) return false;
+
+  if (key.upArrow || key.leftArrow || key.downArrow || key.rightArrow) {
+    if (state.approvalResolving) return true;
+    const direction = key.upArrow || key.leftArrow ? -1 : 1;
+    state.set({ approvalIndex: (state.approvalIndex + direction + 2) % 2 });
+    return true;
+  }
+
+  if (key.escape) {
+    if (!state.approvalResolving) options.bridge.cancelRequest();
+    return true;
+  }
+  if (!key.return) return false;
+  if (!state.approvalResolving) void options.bridge.resolveApproval(state.approvalIndex === 0);
+  return true;
+}
+
 export function handleEscape(key: Key, options: ShellInputOptions): boolean {
   if (!key.escape) return false;
 
+  const state = options.getState();
+  if (options.slashMenuOpen) {
+    state.set({ inputValue: "", slashIndex: 0 });
+    return true;
+  }
+  if (options.panel !== "chat") {
+    state.set({ panel: "chat", inputValue: "", statusLine: "Back." });
+    return true;
+  }
+  if (options.pendingSkill || state.inputValue) {
+    state.set({ pendingSkill: null, inputValue: "", statusLine: "Cleared." });
+    return true;
+  }
   if (options.bridge.removeLatestQueuedMessage()) return true;
   if (options.busy && options.bridge.cancelRequest()) return true;
-  if (options.slashMenuOpen) {
-    options.getState().set({ inputValue: "", slashIndex: 0 });
-    return true;
-  }
-  if (options.pendingSkill) {
-    options.getState().set({ pendingSkill: null, statusLine: "Cleared." });
-    return true;
-  }
   return false;
 }
 
@@ -148,20 +234,25 @@ function handleHistoryNavigation(key: Key, options: ShellInputOptions): boolean 
 function cyclePanel(key: Key, options: ShellInputOptions): void {
   if (!key.tab || options.slashMenuOpen) return;
 
-  const panels: Panel[] = ["welcome", "sessions", "skills", "chat"];
+  const panels: Panel[] = ["welcome", "sessions", "skills", "mcp", "tokens", "chat"];
   const index = panels.indexOf(options.panel);
   options.getState().set({ panel: panels[(index + 1) % panels.length] });
 }
 
 function routeInput(input: string, key: Key, options: ShellInputOptions): void {
   if (handleCtrlC(input, key, options)) return;
+  if (options.compressing) return;
   if (options.mode === "setup") {
     handleSetupInput(key, options);
     return;
   }
+  if (handleApprovalInput(key, options)) return;
   if (handleViewToggle(input, key, options)) return;
   if (handleQueuedEdit(key, options)) return;
   if (handleSlashNavigation(key, options)) return;
+  if (handleSkillsSelection(key, options)) return;
+  if (handleSkillsNavigation(key, options)) return;
+  if (handleTokenNavigation(key, options)) return;
   if (handleEscape(key, options)) return;
   if (handleHistoryNavigation(key, options)) return;
   cyclePanel(key, options);

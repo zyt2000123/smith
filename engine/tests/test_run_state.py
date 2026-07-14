@@ -45,6 +45,53 @@ def test_run_state_rejects_skipping_running_state(tmp_path: Path) -> None:
         store.transition("run-1", RunStatus.COMPLETED)
 
 
+def test_run_state_can_resume_an_incomplete_run(tmp_path: Path) -> None:
+    store = RunStateStore(tmp_path)
+    store.create("run-1", agent_id="smith-id")
+    store.transition("run-1", RunStatus.RUNNING)
+    store.transition("run-1", RunStatus.INCOMPLETE, reason="budget")
+
+    resumed = store.resume("run-1")
+
+    assert resumed.status is RunStatus.RUNNING
+    assert resumed.reason == "resumed"
+    assert resumed.last_event_type == "run_resumed"
+
+
+def test_run_state_does_not_resume_completed_run(tmp_path: Path) -> None:
+    store = RunStateStore(tmp_path)
+    store.create("run-1", agent_id="smith-id")
+    store.transition("run-1", RunStatus.RUNNING)
+    store.transition("run-1", RunStatus.COMPLETED)
+
+    with pytest.raises(RunStateTransitionError):
+        store.resume("run-1")
+
+
+def test_run_state_waits_for_and_resolves_approval(tmp_path: Path) -> None:
+    store = RunStateStore(tmp_path)
+    store.create("run-1", agent_id="smith-id")
+    store.transition("run-1", RunStatus.RUNNING)
+
+    waiting = store.request_approval(
+        "run-1",
+        approval_id="approval-1",
+        tool_name="shell",
+        level="execute",
+        reason="Approval required for shell",
+    )
+
+    assert waiting.status is RunStatus.WAITING_APPROVAL
+    assert waiting.approval_id == "approval-1"
+    assert waiting.approval_tool == "shell"
+
+    resumed = store.resolve_approval("run-1", "approval-1", approved=True)
+
+    assert resumed.status is RunStatus.RUNNING
+    assert resumed.approval_id is None
+    assert resumed.reason == "approval_granted"
+
+
 def test_run_state_store_uses_private_atomic_files(tmp_path: Path) -> None:
     store = RunStateStore(tmp_path)
     store.create("run-1", agent_id="smith-id")

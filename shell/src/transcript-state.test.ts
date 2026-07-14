@@ -6,6 +6,7 @@ import {
   applyStreamEvent,
   createSystemEntry,
   createTurnEntry,
+  removeApprovalNotice,
   restoreTranscript,
   splitTranscript,
   type TranscriptEntry,
@@ -142,6 +143,32 @@ test("skill start/end events pair by name", () => {
 test("done closes the streaming turn", () => {
   const entries = applyStreamEvent(freshTurn(), { type: "done", status: "completed" });
   assert.equal(lastTurn(entries).streaming, false);
+});
+
+test("approval notice is removed after the decision while the turn remains", () => {
+  let entries = applyStreamEvent(freshTurn(), {
+    type: "approval_required",
+    runId: "run-1",
+    approvalId: "approval-1",
+    tool: "write_file",
+    level: "write",
+    reason: "Approval required",
+    arguments: { path: "notes.md" },
+  });
+
+  assert.equal(
+    entries.some((entry) => entry.kind === "system"),
+    true,
+  );
+  entries = removeApprovalNotice(entries, "approval-1");
+  assert.equal(
+    entries.some((entry) => entry.kind === "system"),
+    false,
+  );
+  assert.equal(
+    entries.some((entry) => entry.kind === "turn"),
+    true,
+  );
 });
 
 test("stream events without any turn are no-ops", () => {

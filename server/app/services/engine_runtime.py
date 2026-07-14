@@ -87,8 +87,12 @@ def load_runtime_identity_catalog(*, force: bool = False) -> IdentityCatalog:
     """Load the one catalog and validate its declared assets for every entry point."""
     catalog = load_identity_catalog(BUILTIN_IDENTITIES_DIR, force=force)
     # 门禁/条件内容必须先于 pipeline YAML 解析注册，否则合法 gate key 报 unknown。
-    load_gate_content(PATHS.project_root / "agents")
-    pipelines = SkillChain.load_pipelines(PATHS.project_root / "agents" / "pipelines")
+    gate_content = load_gate_content(PATHS.project_root / "agents")
+    pipelines = SkillChain.load_pipelines(
+        PATHS.project_root / "agents" / "pipelines",
+        gate_registry=gate_content.gates,
+        condition_registry=gate_content.conditions,
+    )
     skill_registry = SkillRegistry()
     PATHS.ensure_base_dirs()
     skill_registry.load_builtin(BUILTIN_SKILLS_DIR)
@@ -105,11 +109,15 @@ def build_engine_runtime(
     agent_name: str,
     *,
     session_id: str | None = None,
+    model_profile: str | None = None,
     llm_client_manager: LLMClientManager | None = None,
 ) -> tuple[RuntimeContext, RuntimeServices]:
     """Build the engine runtime for the FastAPI product layer."""
     manager = llm_client_manager or _llm_client_manager
-    interactive_config = resolve_llm_config(usage=LLMUsage.INTERACTIVE)
+    interactive_kwargs: dict[str, Any] = {"usage": LLMUsage.INTERACTIVE}
+    if model_profile:
+        interactive_kwargs["model_profile"] = model_profile
+    interactive_config = resolve_llm_config(**interactive_kwargs)
     gate_config = resolve_llm_config(usage=LLMUsage.GATE)
     background_config = resolve_llm_config(usage=LLMUsage.BACKGROUND)
     runtime = RuntimeContext(

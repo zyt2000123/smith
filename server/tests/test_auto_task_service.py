@@ -108,3 +108,81 @@ async def test_auto_task_pins_its_generated_session_to_the_resolved_identity(
     assert result.status == "completed"
     assert session_repo.created == [("smith-id", "[自动] 合同检查", "legal")]
     assert captured["request"].identity_id == "legal"
+
+
+@pytest.mark.asyncio
+async def test_failed_scheduled_auto_task_is_requeued_with_retry_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Catalog:
+        def resolve(self, message: str):
+            return SimpleNamespace(identity_id="smith")
+
+    async def fail_reply(request, runtime, services):
+        raise RuntimeError("temporary provider outage")
+
+    monkeypatch.setattr(auto_task_service_module, "load_runtime_identity_catalog", lambda: Catalog())
+    monkeypatch.setattr(auto_task_service_module, "build_engine_runtime", lambda *args, **kwargs: (object(), object()))
+    monkeypatch.setattr(auto_task_service_module, "engine_reply_with_runtime", fail_reply)
+
+    task_repo = FakeAutoTaskRepo()
+    service = AutoTaskService(task_repo, FakeProfileRepo(), FakeSessionRepo())
+    task = {
+        "id": "task-1",
+        "agent_id": "smith-id",
+        "title": "定时检查",
+        "instruction": "检查服务",
+        "trigger_type": "interval",
+        "trigger_config": "3600",
+        "run_count": 0,
+        "retry_count": 0,
+        "max_retries": 2,
+    }
+
+    result = await service.run_auto_task(task)
+
+    assert result.status == "failed"
+    assert any(update.get("retry_count") == 1 for update in task_repo.updates)
+    retry_update = next(update for update in task_repo.updates if "retry_count" in update)
+    assert retry_update["retry_count"] == 1
+    task_update = next(update for update in task_repo.updates if update.get("task_id") == "task-1")
+    assert task_update["status"] == "idle"
+    assert task_update["next_run_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_exhausted_retry_chain_resets_before_next_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_reply(request, runtime, services):
+        raise RuntimeError("persistent provider outage")
+
+    monkeypatch.setattr(
+        auto_task_service_module,
+        "load_runtime_identity_catalog",
+        lambda: SimpleNamespace(resolve=lambda message: SimpleNamespace(identity_id="smith")),
+    )
+    monkeypatch.setattr(
+        auto_task_service_module,
+        "build_engine_runtime",
+        lambda *args, **kwargs: (object(), object()),
+    )
+    monkeypatch.setattr(auto_task_service_module, "engine_reply_with_runtime", fail_reply)
+
+    task_repo = FakeAutoTaskRepo()
+    service = AutoTaskService(task_repo, FakeProfileRepo(), FakeSessionRepo())
+    task = {
+        "id": "task-1",
+        "agent_id": "smith-id",
+        "title": "定时检查",
+        "instruction": "检查服务",
+        "trigger_type": "interval",
+        "trigger_config": "3600",
+        "retry_count": 2,
+        "max_retries": 2,
+    }
+
+    result = await service.run_auto_task(task)
+
+    assert result.status == "failed"
+    assert {"retry_count": 0} in task_repo.updates

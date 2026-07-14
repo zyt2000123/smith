@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.routers.agent import get_agent_service, router
+
+
+def test_delete_session_route_delegates_to_agent_service() -> None:
+    calls: list[str] = []
+
+    class FakeAgentService:
+        async def delete_session(self, session_id: str) -> None:
+            calls.append(session_id)
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_agent_service] = lambda: FakeAgentService()
+
+    with TestClient(app) as client:
+        response = client.delete("/api/agent/sessions/session-1")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert calls == ["session-1"]
+
+
+def test_token_stats_route_returns_local_usage_dashboard_data() -> None:
+    class FakeAgentService:
+        async def get_token_stats(self, year: int | None = None) -> dict:
+            return {
+                "year": year or 2026,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+                "session_count": 1,
+                "active_days": 1,
+                "current_streak": 1,
+                "longest_streak": 1,
+                "favorite_model": "gpt-test",
+                "peak_hour": 10,
+                "daily": [],
+                "models": [],
+            }
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_agent_service] = lambda: FakeAgentService()
+
+    with TestClient(app) as client:
+        response = client.get("/api/agent/token-stats?year=2026")
+
+    assert response.status_code == 200
+    assert response.json()["total_tokens"] == 15
+    assert response.json()["year"] == 2026

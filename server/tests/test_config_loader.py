@@ -56,10 +56,12 @@ llm:
   api_key: primary-key
   base_url: https://primary.example/v1
   model: primary-model
+  context_window: 200000
   stream: true
   routes:
     gate:
       model: cheap-gate-model
+      context_window: 128000
     background:
       base_url: https://background.example/v1
       model: cheap-background-model
@@ -86,14 +88,17 @@ llm:
     )
 
     assert interactive["model"] == "primary-model"
+    assert interactive["context_window"] == 200000
     assert interactive["timeout"]["read"] == 90.0
     assert interactive["timeout"]["stream_read"] == 120.0
     assert gate["api_key"] == "primary-key"
     assert gate["model"] == "cheap-gate-model"
+    assert gate["context_window"] == 128000
     assert gate["timeout"]["read"] == 45.0
     assert gate["timeout"]["stream_read"] == 90.0
     assert background["base_url"] == "https://background.example/v1"
     assert background["model"] == "cheap-background-model"
+    assert background["context_window"] == 200000
     assert background["timeout"]["read"] == 250.0
     assert background["timeout"]["stream_read"] == 280.0
 
@@ -145,6 +150,35 @@ llm:
 
     with pytest.raises(YamlConfigError, match="positive number"):
         model_config.resolve_llm_config(usage=model_config.LLMUsage.GATE)
+
+
+def test_resolve_llm_config_selects_named_model_profile(tmp_path, monkeypatch) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "config.yaml").write_text(
+        """
+llm:
+  api_key: base-key
+  base_url: https://base.example/v1
+  model: base-model
+  models:
+    relay-fast:
+      provider: anthropic
+      api_key: relay-key
+      base_url: https://relay.example/v1
+      model: fast-model
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_config, "DATA_DIR", data_dir)
+    monkeypatch.setattr(model_config, "SMITH_PROFILE_DIR", tmp_path / "missing-smith")
+    monkeypatch.setattr(model_config, "AGENT_DIR", tmp_path / "missing-agent")
+
+    selected = model_config.resolve_llm_config(model_profile="relay-fast")
+
+    assert selected["provider"] == "anthropic"
+    assert selected["model"] == "fast-model"
+    assert selected["api_key"] == "relay-key"
 
 
 def test_build_engine_runtime_selects_interactive_gate_and_background_clients(monkeypatch) -> None:

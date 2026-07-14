@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Version-controlled skill storage for agent-installed skills.
 
 Each agent's skills live under the agent profile's skills dir (…/<id>/skills/).
@@ -13,6 +11,8 @@ Layout per skill:
 
 Only the last 10 versions are kept.
 """
+
+from __future__ import annotations
 
 import difflib
 from datetime import datetime, timezone

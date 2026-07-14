@@ -17,6 +17,7 @@ import httpx
 
 from ..contracts import (
     ChatResponse,
+    DEFAULT_CONTEXT_WINDOW,
     LLMProviderConfig,
     LLMRequest,
     LLMResponseError,
@@ -51,6 +52,8 @@ class AnthropicAdapter(HTTPAdapterMixin):
         self.base_url = config.base_url.rstrip("/")
         self.model = config.model
         self.timeouts = config.timeouts
+        self.context_window_declared = config.context_window is not None
+        self.context_window = config.context_window or DEFAULT_CONTEXT_WINDOW
         # Anthropic requires max_tokens; other adapters preserve their provider
         # defaults unless the shared configuration explicitly sets a limit.
         self.max_output_tokens = config.max_output_tokens or 4096

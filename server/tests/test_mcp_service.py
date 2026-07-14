@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from app.services import mcp_service as mcp_service_module
+from app.services.mcp_service import McpService
+
+
+@pytest.mark.asyncio
+async def test_mcp_service_discovers_standard_tools_and_keeps_input_schema_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    (agent_dir / "config.yaml").write_text(
+        """
+mcp_servers:
+  - name: demo
+    type: streamable_http
+    url: https://mcp.example/sse
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mcp_service_module, "AGENT_DIR", agent_dir)
+
+    class FakeTransport:
+        label = "demo"
+
+        async def connect(self):
+            pass
+
+        async def send_request(self, method, params):
+            return {}
+
+        async def send_notification(self, method, params):
+            pass
+
+        async def close(self):
+            pass
+
+    class FakeTool:
+        name = "search"
+        description = "Search documents"
+        input_schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+
+    class FakeClient:
+        def __init__(self, *, transport):
+            self.transport = transport
+
+        async def connect(self):
+            pass
+
+        async def list_tools(self):
+            return [FakeTool()]
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(mcp_service_module, "MCPClient", FakeClient)
+    monkeypatch.setattr(mcp_service_module, "mcp_transport_from_config", lambda config: FakeTransport())
+
+    result = await McpService().list_servers()
+
+    assert result[0].status == "connected"
+    assert result[0].tools[0].name == "search"
+    assert result[0].model_dump(by_alias=True)["tools"][0]["inputSchema"]["type"] == "object"

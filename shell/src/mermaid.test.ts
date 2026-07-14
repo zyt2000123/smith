@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import stringWidth from "string-width";
 
 import { renderMermaidDiagram, splitMarkdownBlocks, splitMermaidBlocks } from "./mermaid.js";
 
@@ -44,6 +45,91 @@ test("renders a basic Mermaid flowchart as terminal Unicode", () => {
     rendered?.split("\n").some((line) => line.endsWith(" ")),
     false,
   );
+});
+
+test("turns HTML line breaks in node labels into readable terminal text", () => {
+  const rendered = renderMermaidDiagram('flowchart TD\n  A["save_conversation_memory()<br/>提取证据 → recent.jsonl"]');
+
+  assert.ok(rendered);
+  assert.doesNotMatch(rendered, /<br\s*\/?\s*>/i);
+  assert.match(rendered, /save_conversation_memory\(\)/);
+  assert.match(rendered, /提取证据.*recent\.jsonl/);
+});
+
+test("keeps CJK node labels inside their terminal box", () => {
+  const rendered = renderMermaidDiagram("flowchart TD\n  A[完整生命周期] --> B[对话结束]");
+
+  assert.ok(rendered);
+  const lines = rendered.split("\n");
+  const border = lines.find((line) => line.startsWith("┌"));
+  const label = lines.find((line) => line.includes("完整生命周期"));
+
+  assert.ok(border);
+  assert.ok(label);
+  assert.equal(stringWidth(label), stringWidth(border));
+});
+
+test("preserves node identity when a CJK label is referenced more than once", () => {
+  const rendered = renderMermaidDiagram("flowchart TD\n  A[开始] --> B[中间]\n  B --> C[结束]");
+
+  assert.ok(rendered);
+  assert.equal(rendered.match(/中间/g)?.length, 1);
+});
+
+test("keeps CJK edge labels aligned with a horizontal branch", () => {
+  const rendered = renderMermaidDiagram("flowchart LR\n  A[开始] -->|是| B[结束]");
+
+  assert.ok(rendered);
+  const lines = rendered.split("\n");
+  const border = lines.find((line) => line.startsWith("┌"));
+  const label = lines.find((line) => line.includes("是"));
+
+  assert.ok(border);
+  assert.ok(label);
+  assert.ok(stringWidth(label) <= stringWidth(border));
+});
+
+test("moves long edge labels below the diagram and wraps them", () => {
+  const label =
+    "关键设计决策： Markdown 是唯一事实源， SQLite 索引是可丢弃的派生物。索引损坏时自动重建，不影响记忆本身。";
+  const rendered = renderMermaidDiagram(`flowchart LR
+  A[recent.jsonl] -->|${label}| B[agent/*.md]
+  B --> C[project/*.md]
+  C --> D[search.sqlite]`);
+
+  assert.ok(rendered);
+  assert.match(rendered, /↳ 关键设计决策： Markdown 是唯一事实源， SQLite 索引是可丢弃的派生物。索引损坏时/);
+  assert.match(rendered, /自动重建，不影响记忆本身。/);
+  assert.equal(
+    rendered.split("\n").some((line) => line.includes("recent.jsonl") && line.includes("关键设计决策")),
+    false,
+  );
+  assert.equal(
+    rendered.split("\n").every((line) => stringWidth(line) <= 80),
+    true,
+  );
+});
+
+test("keeps the full memory lifecycle diagram readable", () => {
+  const rendered = renderMermaidDiagram(`flowchart TD
+  A[完整生命周期] --> B[对话结束]
+  B --> C[save_conversation_memory()<br/>提取证据 → recent.jsonl]
+  C --> D{有学习信号或<br/>累计5个有效turn?}
+  D -->|是| E[Compiler 生成草稿<br/>(LLM)]
+  D -->|否| F{累计50个<br/>有效turn?}
+  E --> G[Reviewer 审核<br/>(gate_llm，最多3轮)]
+  G -->|通过| H[确定性代码校验<br/>结构 / 预算 / 安全]
+  H -->|通过| I[原子写入<br/>备份旧文件 → os.replace]
+  G -->|拒绝/超时| J[后续对话<br/>分层加载记忆]
+  F -->|是| K[Dream 整理<br/>清洗 / 合并 / 压缩]
+  F -->|否| J
+  K --> J`);
+
+  assert.ok(rendered);
+  assert.doesNotMatch(rendered, /<br\s*\/?\s*>/i);
+  for (const label of ["对话结束", "Compiler 生成草稿", "Dream 整理", "后续对话"]) {
+    assert.match(rendered, new RegExp(label));
+  }
 });
 
 test("returns null for an unsupported or invalid diagram", () => {

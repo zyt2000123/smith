@@ -24,7 +24,7 @@ from engine.memory.compile import (
     compile_recent,
     run_compilation,
 )
-from engine.memory.dream import DreamReport, run_dream
+from engine.memory.dream import run_dream
 from engine.memory.policy import MemoryPolicyError
 from engine.memory.search import SearchIndex
 from engine.memory.store import (
@@ -340,6 +340,22 @@ def test_save_conversation_memory_skips_toolless_turns(tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
     entries = [json.loads(line) for line in (memory_dir / "recent.jsonl").read_text(encoding="utf-8").splitlines()]
     assert entries[0]["task"] == "used a tool"
+
+
+def test_save_conversation_memory_preserves_incomplete_tool_work(tmp_path: Path) -> None:
+    asyncio.run(save_conversation_memory(
+        tmp_path,
+        "continue the implementation",
+        "started the implementation but the model reached its output limit",
+        had_tools=True,
+        turn_status="incomplete",
+        turn_reason="model_output_limit",
+    ))
+
+    entry = json.loads((tmp_path / "memory" / "recent.jsonl").read_text(encoding="utf-8"))
+    assert entry["kind"] == "partial_work"
+    assert entry["status"] == "incomplete"
+    assert entry["reason"] == "model_output_limit"
 
 
 def test_save_conversation_memory_preserves_normal_sized_content(tmp_path: Path) -> None:

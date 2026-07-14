@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from engine.llm.events import ProviderEventType
+
 
 class EventType(str, Enum):
     """All event types emitted during agent execution."""
@@ -29,6 +31,9 @@ class EventType(str, Enum):
     BACKTRACK = "backtrack"                 # 回溯到更早的节点
     BLOCKED = "blocked"                     # 执行阻塞，需要人工介入
     TOKEN_USAGE = "token_usage"             # LLM token 使用量
+    CONTEXT_USAGE = "context_usage"         # 当前请求加载到模型的上下文量
+    CONTEXT_COMPRESSION_START = "context_compression_start"  # 自动压缩开始
+    CONTEXT_COMPRESSION_END = "context_compression_end"      # 自动压缩完成
     PROVISIONAL_TEXT_DELTA = "provisional_text_delta"  # 技能链内未过门禁的草稿文本
     PROVISIONAL_COMMIT = "provisional_commit"        # 门禁通过，草稿转正
     PROVISIONAL_RETRACT = "provisional_retract"      # 门禁失败，撤回草稿
@@ -53,3 +58,28 @@ class ExecutionEvent:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for JSON transport."""
         return {"type": self.type.value, "data": self.data}
+
+
+def raw_text_delta(
+    event: ExecutionEvent,
+    *,
+    include_provisional: bool = True,
+) -> str | None:
+    """Extract normalized provider text from a raw execution event.
+
+    Provider adapters translate native payloads into ``ProviderEventType``
+    before the execution layer sees them. Consumers should use this helper
+    instead of duplicating the normalized event-name and payload checks.
+    """
+    event_type = getattr(event.type, "value", event.type)
+    if event_type != EventType.RAW_RESPONSE_EVENT.value:
+        return None
+    if not include_provisional and event.data.get("provision_id"):
+        return None
+    if event.data.get("type") != ProviderEventType.OUTPUT_TEXT_DELTA.value:
+        return None
+    raw_data = event.data.get("data")
+    if not isinstance(raw_data, dict):
+        return None
+    text = raw_data.get("delta")
+    return text if isinstance(text, str) and text else None

@@ -176,7 +176,7 @@ Box (flexDirection="column", paddingY=1)
 ╚════██║██║╚██╔╝██║██║   ██║   ██╔══██║    ██████
 ███████╗██║ ╚═╝ ██║██║   ██║   ██║  ██║   ╰╯╰╮╭╯╰╯
 
-Type `/` for commands · Ctrl+C/Esc cancels a running task · `/help` for all
+Type `/` for commands · `/help` for all
 ```
 
 ### `SetupPanel` 组件
@@ -700,18 +700,16 @@ export type SlashItem = {
 | 命令 | 说明 |
 |------|------|
 | `/help` | 显示命令帮助 |
-| `/exit` / `/quit` | 退出 Shell |
-| `/new` | 重置为新会话 |
+| `/exit` | 退出 Shell |
+| `/new` | 创建新会话，保留当前会话记录 |
 | `/config` | 打开 LLM 配置编辑 |
 | `/sessions` | 切换到会话列表面板 |
 | `/skills` | 切换到技能列表面板 |
 | `/plugins` | 切换到插件列表面板 |
-| `/clear` | 清空当前对话 |
+| `/clear` | 删除当前会话及消息，再创建新会话 |
 | `/compact` | 切换到紧凑视图 |
-| `/transcript` | 切换到详细视图 |
 | `/plugin <enable\|disable> <name>` | 启用/禁用插件 |
 | `/resume <id>` | 恢复指定会话 |
-| `/home` | 回到欢迎页 |
 
 ### `buildSlashItems()` 面板构建
 

@@ -290,18 +290,24 @@ class MCPClient:
     async def connect(self) -> None:
         """Connect to the MCP server and perform the initialize handshake."""
         await self._transport.connect()
-        result = await self._send("initialize", {
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {},
-            "clientInfo": CLIENT_INFO,
-        })
-        protocol_version = result.get("protocolVersion")
-        if not isinstance(protocol_version, str) or protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
-            await self.close()
-            raise RuntimeError(f"Unsupported MCP protocol version: {protocol_version!r}")
-        self.protocol_version = protocol_version
-        await self._notify("notifications/initialized", {})
-        log.info("MCP client connected to: %s", self._transport.label)
+        try:
+            result = await self._send("initialize", {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": CLIENT_INFO,
+            })
+            protocol_version = result.get("protocolVersion")
+            if not isinstance(protocol_version, str) or protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
+                raise RuntimeError(f"Unsupported MCP protocol version: {protocol_version!r}")
+            self.protocol_version = protocol_version
+            await self._notify("notifications/initialized", {})
+            log.info("MCP client connected to: %s", self._transport.label)
+        except BaseException:
+            try:
+                await self.close()
+            except BaseException:
+                log.warning("failed to close MCP transport after connect failure", exc_info=True)
+            raise
 
     async def list_tools(self) -> list[MCPTool]:
         """Discover available tools from the MCP server."""

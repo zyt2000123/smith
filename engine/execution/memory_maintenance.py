@@ -41,8 +41,11 @@ class MemoryMaintenanceService:
         reply_text: str,
         had_tools: bool,
         learning_signals: list[str] | None = None,
+        *,
+        turn_status: str = "completed",
+        turn_reason: str | None = None,
     ) -> bool:
-        """Persist a completed turn and run threshold-based maintenance."""
+        """Persist turn evidence and run threshold-based maintenance."""
         memory_dir = agent_dir / "memory"
         lock = self._lock_for(memory_dir)
         async with lock:
@@ -65,6 +68,8 @@ class MemoryMaintenanceService:
                     reply_text,
                     had_tools,
                     learning_signals=learning_signals,
+                    turn_status=turn_status,
+                    turn_reason=turn_reason,
                     compile_maintenance=compile_maintenance,
                     dream_maintenance=dream_maintenance,
                 )
@@ -212,6 +217,46 @@ class MemoryLifecycleHooks:
             reply_text,
             had_tools,
             learning_signals,
+        )
+
+    async def memory_after_turn_incomplete(
+        self,
+        agent_dir: Path,
+        user_message: str,
+        reply_text: str,
+        had_tools: bool,
+        learning_signals: list[str] | None = None,
+        reason: str | None = None,
+    ) -> bool:
+        """Persist partial work without promoting it to completed memory."""
+        return await self.maintenance.record_turn(
+            agent_dir,
+            user_message,
+            reply_text,
+            had_tools,
+            learning_signals,
+            turn_status="incomplete",
+            turn_reason=reason,
+        )
+
+    async def memory_after_turn_failed(
+        self,
+        agent_dir: Path,
+        user_message: str,
+        reply_text: str,
+        had_tools: bool,
+        learning_signals: list[str] | None = None,
+        reason: str | None = None,
+    ) -> bool:
+        """Persist partial work from a failed run with an explicit status."""
+        return await self.maintenance.record_turn(
+            agent_dir,
+            user_message,
+            reply_text,
+            had_tools,
+            learning_signals,
+            turn_status="failed",
+            turn_reason=reason,
         )
 
     async def memory_idle_tick(self, memory_dir: Path) -> bool:

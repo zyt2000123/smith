@@ -15,7 +15,9 @@ from engine.llm.contracts import UnsupportedProviderError
 _USAGES = frozenset(("interactive", "gate", "background"))
 _BASE_STRING_FIELDS = ("provider", "api_key", "base_url", "model")
 _ROUTE_STRING_FIELDS = _BASE_STRING_FIELDS
-_ROUTE_FIELDS = frozenset((*_ROUTE_STRING_FIELDS, "stream", "max_output_tokens", "timeout_profile"))
+_ROUTE_FIELDS = frozenset(
+    (*_ROUTE_STRING_FIELDS, "stream", "max_output_tokens", "context_window", "timeout_profile")
+)
 _TIMEOUT_FIELDS = frozenset(("connect", "read", "stream_read", "write", "pool"))
 _PUBLIC_ROUTE_FIELDS = (
     "provider",
@@ -23,6 +25,7 @@ _PUBLIC_ROUTE_FIELDS = (
     "model",
     "stream",
     "max_output_tokens",
+    "context_window",
     "timeout_profile",
 )
 
@@ -84,6 +87,10 @@ class ConfigService:
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             self._invalid(f"{label} must be a positive integer")
 
+    def _validate_context_window(self, value: object, label: str) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            self._invalid(f"{label} must be a positive integer")
+
     def _validate_route(self, route: Mapping[str, Any], label: str) -> None:
         unknown = set(route) - _ROUTE_FIELDS
         if unknown:
@@ -93,6 +100,8 @@ class ConfigService:
             self._invalid(f"{label}.stream must be a boolean")
         if "max_output_tokens" in route:
             self._validate_max_output_tokens(route["max_output_tokens"], f"{label}.max_output_tokens")
+        if "context_window" in route:
+            self._validate_context_window(route["context_window"], f"{label}.context_window")
         if "timeout_profile" in route:
             self._validate_usage(route["timeout_profile"], f"{label}.timeout_profile")
 
@@ -115,6 +124,16 @@ class ConfigService:
             self._invalid("llm.stream must be a boolean")
         if "max_output_tokens" in llm:
             self._validate_max_output_tokens(llm["max_output_tokens"], "llm.max_output_tokens")
+        if "context_window" in llm:
+            self._validate_context_window(llm["context_window"], "llm.context_window")
+
+        models = self._mapping(llm.get("models"), "llm.models")
+        for name, profile in models.items():
+            if not isinstance(name, str) or not name.strip():
+                self._invalid("llm.models keys must be non-empty strings")
+            if not isinstance(profile, dict):
+                self._invalid(f"llm.models.{name} must be a mapping")
+            self._validate_route(profile, f"llm.models.{name}")
 
         routes = self._mapping(llm.get("routes"), "llm.routes")
         for usage, route in routes.items():
@@ -156,10 +175,21 @@ class ConfigService:
             public[usage] = public_route
         return public
 
+    def _public_models(self, models: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+        public: dict[str, dict[str, Any]] = {}
+        for name, profile in models.items():
+            if not isinstance(profile, dict):
+                continue
+            public_profile = {field: profile[field] for field in _PUBLIC_ROUTE_FIELDS if field in profile}
+            public_profile["has_api_key"] = bool(profile.get("api_key"))
+            public[name] = public_profile
+        return public
+
     def get_llm_config(self) -> dict[str, Any]:
         cfg = self._load_config()
         llm = self._mapping(cfg.get("llm"), "llm configuration")
         routes = self._mapping(llm.get("routes"), "llm.routes")
+        models = self._mapping(llm.get("models"), "llm.models")
         timeout_profiles = self._mapping(llm.get("timeout_profiles"), "llm.timeout_profiles")
         interactive = self._mapping(routes.get("interactive"), "llm.routes.interactive")
 
@@ -177,7 +207,9 @@ class ConfigService:
             "model": self._string_or_empty(llm.get("model")),
             "base_url": self._string_or_empty(llm.get("base_url")),
             "max_output_tokens": llm.get("max_output_tokens"),
+            "context_window": llm.get("context_window"),
             "routes": self._public_routes(routes),
+            "models": self._public_models(models),
             "timeout_profiles": {usage: dict(profile) for usage, profile in timeout_profiles.items()},
         }
 
@@ -224,6 +256,13 @@ class ConfigService:
             else:
                 self._validate_max_output_tokens(max_output_tokens, f"{label}.max_output_tokens")
                 route["max_output_tokens"] = max_output_tokens
+        if "context_window" in patch:
+            context_window = patch["context_window"]
+            if context_window is None:
+                route.pop("context_window", None)
+            else:
+                self._validate_context_window(context_window, f"{label}.context_window")
+                route["context_window"] = context_window
         if "timeout_profile" in patch:
             profile = patch["timeout_profile"]
             if profile is None:
@@ -261,6 +300,38 @@ class ConfigService:
             llm["routes"] = routes
         else:
             llm.pop("routes", None)
+
+    def _apply_models_patch(self, llm: dict[str, Any], value: object) -> None:
+        if value is None:
+            llm.pop("models", None)
+            return
+        if not isinstance(value, dict):
+            self._invalid("models must be a mapping")
+        if not value:
+            llm.pop("models", None)
+            return
+
+        existing = self._mapping(llm.get("models"), "llm.models")
+        models = {name: dict(profile) for name, profile in existing.items()}
+        for name, profile_patch in value.items():
+            if not isinstance(name, str) or not name.strip():
+                self._invalid("models keys must be non-empty strings")
+            if profile_patch is None:
+                models.pop(name, None)
+                continue
+            if not isinstance(profile_patch, dict):
+                self._invalid(f"models.{name} must be a mapping or null")
+            profile = models.get(name, {})
+            self._apply_route_patch(profile, profile_patch, f"models.{name}")
+            if profile:
+                models[name] = profile
+            else:
+                models.pop(name, None)
+
+        if models:
+            llm["models"] = models
+        else:
+            llm.pop("models", None)
 
     def _apply_timeout_profiles_patch(self, llm: dict[str, Any], value: object) -> None:
         if value is None:
@@ -333,8 +404,17 @@ class ConfigService:
             else:
                 self._validate_max_output_tokens(max_output_tokens, "llm.max_output_tokens")
                 llm["max_output_tokens"] = max_output_tokens
+        if "context_window" in updates:
+            context_window = updates["context_window"]
+            if context_window is None:
+                llm.pop("context_window", None)
+            else:
+                self._validate_context_window(context_window, "llm.context_window")
+                llm["context_window"] = context_window
         if "routes" in updates:
             self._apply_routes_patch(llm, updates["routes"])
+        if "models" in updates:
+            self._apply_models_patch(llm, updates["models"])
         if "timeout_profiles" in updates:
             self._apply_timeout_profiles_patch(llm, updates["timeout_profiles"])
 

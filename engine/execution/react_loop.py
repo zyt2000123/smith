@@ -28,11 +28,24 @@ from engine.react_budget import (
     budget_exhausted_message,
     looks_like_incomplete_final_after_tool,
 )
+from engine.safety.approval import (
+    ApprovalRequest,
+    build_approval_presentation,
+    current_approval_context,
+    summarize_arguments,
+)
 from engine.safety.tool_policy import ToolPolicy
 from engine.safety.fact_gate import FactGate, current_fact_gate
 from engine.tool.interface import ToolCall
 
-from .compression import compress, needs_compaction
+from .compression import (
+    CONTEXT_DISPLAY_WINDOW,
+    compress,
+    compaction_policy_for_llm,
+    estimate_tokens,
+    needs_compaction,
+    prune_tool_outputs,
+)
 from .events import EventType, ExecutionEvent
 
 if TYPE_CHECKING:
@@ -224,6 +237,47 @@ def _usage_event_data(usage: dict | None) -> dict | None:
     }
 
 
+def _conversation_token_count(conversation: list[dict]) -> int:
+    return sum(
+        estimate_tokens(message["content"])
+        for message in conversation
+        if isinstance(message.get("content"), str)
+    )
+
+
+def _context_usage_event(
+    conversation: list[dict],
+    *,
+    input_tokens: int | None = None,
+) -> ExecutionEvent:
+    """Report the current model input size, with an estimate fallback."""
+    estimated = not isinstance(input_tokens, int) or input_tokens <= 0
+    context_tokens = input_tokens if not estimated else _conversation_token_count(conversation)
+    context_percent = round(
+        min(context_tokens, CONTEXT_DISPLAY_WINDOW) / CONTEXT_DISPLAY_WINDOW * 100
+    )
+    return ExecutionEvent(EventType.CONTEXT_USAGE, {
+        "context_tokens": context_tokens,
+        "context_window": CONTEXT_DISPLAY_WINDOW,
+        "context_percent": context_percent,
+        "estimated": estimated,
+    })
+
+
+def _will_compact(conversation: list[dict], llm: object | None) -> bool:
+    """Predict whether ``compress`` will call the summarizing LLM."""
+    if llm is None:
+        return False
+    preview = [dict(message) for message in conversation]
+    prune_tool_outputs(preview)
+    context_limit, trigger_ratio = compaction_policy_for_llm(llm)
+    return needs_compaction(
+        preview,
+        context_limit=context_limit,
+        trigger_ratio=trigger_ratio,
+    )
+
+
 def _should_repair_incomplete_final(
     text: str,
     *,
@@ -350,9 +404,25 @@ async def react_event_loop(
     ineffective_compacts = 0
 
     while productive_iters < max_iters:
-        conversation = await compress(conversation, compact_llm)
+        compression_started = _will_compact(conversation, compact_llm)
+        if compression_started:
+            yield ExecutionEvent(EventType.CONTEXT_COMPRESSION_START)
+        try:
+            conversation = await compress(conversation, compact_llm)
+        except Exception:
+            if compression_started:
+                yield ExecutionEvent(EventType.CONTEXT_COMPRESSION_END)
+            raise
+        if compression_started:
+            yield ExecutionEvent(EventType.CONTEXT_COMPRESSION_END)
+        yield _context_usage_event(conversation)
         if compact_llm is not None:
-            if needs_compaction(conversation):
+            context_limit, trigger_ratio = compaction_policy_for_llm(compact_llm)
+            if needs_compaction(
+                conversation,
+                context_limit=context_limit,
+                trigger_ratio=trigger_ratio,
+            ):
                 # compact 失败或摘要仍超限：连续两次无效后熔断 LLM 压缩，
                 # 避免每轮迭代重放一次注定失败的摘要调用；prune 和硬截断继续生效。
                 ineffective_compacts += 1
@@ -427,6 +497,10 @@ async def react_event_loop(
         usage = _usage_event_data(response.usage)
         if usage:
             yield ExecutionEvent(EventType.TOKEN_USAGE, usage)
+        yield _context_usage_event(
+            conversation,
+            input_tokens=usage.get("input_tokens") if usage else None,
+        )
 
         thought = (response.reasoning or (response.text if response.has_tool_calls else "")).strip()
         if thought:
@@ -570,13 +644,18 @@ async def react_event_loop(
         round_had_failure = False
         round_had_preflight = False
         for tc in response.tool_calls:
-            call = ToolCall(id=tc.id, name=tc.name, arguments=tc.arguments)
+            call = ToolCall(
+                id=tc.id,
+                name=tc.name,
+                arguments=tc.arguments,
+                idempotency_key=tc.id,
+            )
             yield ExecutionEvent(EventType.TOOL_CALL_START, {"name": tc.name, "id": tc.id, "arguments": tc.arguments})
 
             decision = policy.evaluate(call)
             if not decision.allowed:
-                conversation.append({"role": "tool", "tool_call_id": call.id, "content": decision.observation})
                 if decision.challenged:
+                    conversation.append({"role": "tool", "tool_call_id": call.id, "content": decision.observation})
                     yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
                         "id": tc.id,
                         "error": False,
@@ -587,21 +666,100 @@ async def react_event_loop(
                     })
                     round_had_preflight = True
                     continue
-                yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
-                    "id": tc.id,
-                    "error": False,
-                    "blocked": True,
-                    "preflight": False,
-                    "reason": decision.reason,
-                    "level": decision.level.value,
-                    "needs_confirmation": decision.needs_confirmation,
-                })
-                round_had_failure = True
-                consecutive_errors += 1
-                if consecutive_errors >= 3:
-                    conversation.append({"role": "system", "content": TOOL_FAILURE_HINT})
-                    consecutive_errors = 0
-                continue
+                if decision.approval_required:
+                    approval_context = current_approval_context()
+                    if approval_context is not None:
+                        broker, run_id = approval_context
+                        arguments_summary = summarize_arguments(call.arguments)
+                        definition = tool_registry.definitions().get(call.name)
+                        presentation = build_approval_presentation(
+                            call.name,
+                            decision.level.value,
+                            decision.reason,
+                            arguments_summary,
+                            tool_description=definition.description if definition else "",
+                        )
+                        approval_request = broker.open(
+                            ApprovalRequest(
+                                approval_id=uuid4().hex,
+                                run_id=run_id,
+                                tool_name=call.name,
+                                level=decision.level.value,
+                                reason=decision.reason,
+                                arguments_summary=arguments_summary,
+                                presentation=presentation,
+                            )
+                        )
+                        yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
+                            "id": tc.id,
+                            "error": False,
+                            "blocked": True,
+                            "preflight": False,
+                            "reason": approval_request.reason,
+                            "level": approval_request.level,
+                            "needs_confirmation": True,
+                            "approval_required": True,
+                            "approval_id": approval_request.approval_id,
+                            "tool": approval_request.tool_name,
+                            "arguments": approval_request.arguments_summary,
+                            "presentation": presentation.to_dict(),
+                        })
+                        approved = await broker.wait(approval_request)
+                        if approved:
+                            # The hard guard already passed. Continue with the
+                            # exact suspended call instead of asking the model
+                            # to recreate it and risking a duplicate side effect.
+                            pass
+                        else:
+                            denial = "User denied approval"
+                            conversation.append({
+                                "role": "tool",
+                                "tool_call_id": call.id,
+                                "content": f"[BLOCKED] {denial}",
+                            })
+                            yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
+                                "id": tc.id,
+                                "error": False,
+                                "blocked": True,
+                                "preflight": False,
+                                "reason": denial,
+                                "level": decision.level.value,
+                                "needs_confirmation": False,
+                            })
+                            round_had_failure = True
+                            consecutive_errors += 1
+                            continue
+                    else:
+                        conversation.append({"role": "tool", "tool_call_id": call.id, "content": decision.observation})
+                        yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
+                            "id": tc.id,
+                            "error": False,
+                            "blocked": True,
+                            "preflight": False,
+                            "reason": "Approval broker unavailable",
+                            "level": decision.level.value,
+                            "needs_confirmation": True,
+                        })
+                        round_had_failure = True
+                        consecutive_errors += 1
+                        continue
+                else:
+                    conversation.append({"role": "tool", "tool_call_id": call.id, "content": decision.observation})
+                    yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
+                        "id": tc.id,
+                        "error": False,
+                        "blocked": True,
+                        "preflight": False,
+                        "reason": decision.reason,
+                        "level": decision.level.value,
+                        "needs_confirmation": decision.needs_confirmation,
+                    })
+                    round_had_failure = True
+                    consecutive_errors += 1
+                    if consecutive_errors >= 3:
+                        conversation.append({"role": "system", "content": TOOL_FAILURE_HINT})
+                        consecutive_errors = 0
+                    continue
 
             result = await tool_registry.execute(call)
             conversation.append({"role": "tool", "tool_call_id": result.call_id, "content": result.content})
@@ -611,6 +769,11 @@ async def react_event_loop(
                 "blocked": False,
                 "preflight": False,
                 "content": result.content[:200],
+                "error_kind": result.error_kind,
+                "retryable": result.retryable,
+                "timed_out": result.timed_out,
+                "side_effect_status": result.side_effect_status,
+                "metadata": result.metadata,
             })
             if result.is_error:
                 round_had_failure = True

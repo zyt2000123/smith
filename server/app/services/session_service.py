@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
+from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import HTTPException
@@ -11,13 +13,18 @@ from engine.execution.agent_loop import (
     run_stream_with_runtime as engine_run_stream_with_runtime,
     reply_with_runtime as engine_reply_with_runtime,
 )
+from engine.execution.events import raw_text_delta
+from engine.execution.compression import CONTEXT_DISPLAY_WINDOW, compact_history
 from engine.execution.runtime import EngineRequest
 from engine.identity_catalog import IdentityCatalog, IdentityCatalogError
+from engine.llm.model_config import resolve_llm_config
+from common.yaml_utils import YamlConfigError
 
-from ..schemas.session import SessionOut, MessageOut
+from ..schemas.session import ContextCompressionOut, SessionOut, MessageOut
 from ..infrastructure.repositories.session_repo import SessionRepo
 from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
 from .engine_runtime import build_engine_runtime
+from .token_stats_service import TokenStatsService
 
 # Recent messages passed to the engine as short-term conversational context
 _HISTORY_LIMIT = 10
@@ -32,10 +39,12 @@ class SessionService:
         agent_profile_repo: AgentProfileRepo,
         *,
         identity_catalog: IdentityCatalog | None = None,
+        token_stats_service: TokenStatsService | None = None,
     ) -> None:
         self.session_repo = session_repo
         self.agent_profile_repo = agent_profile_repo
         self.identity_catalog = identity_catalog
+        self.token_stats_service = token_stats_service
 
     async def list_sessions(self, agent_id: str) -> list[SessionOut]:
         rows = await self.session_repo.list_by_agent(agent_id)
@@ -59,14 +68,30 @@ class SessionService:
         agent_id: str,
         title: str,
         identity_id: str | None = None,
+        model_profile: str | None = None,
     ) -> SessionOut:
         profile = await self.agent_profile_repo.get(agent_id)
         if profile is None:
             raise HTTPException(404, "Agent profile not found")
         if identity_id is not None:
             self._validate_identity(identity_id)
-        row = await self.session_repo.create(agent_id, title or "新对话", identity_id)
+        self._validate_model_profile(model_profile)
+        row = await self.session_repo.create(
+            agent_id,
+            title or "新对话",
+            identity_id,
+            model_profile,
+        )
         return SessionOut(**row)
+
+    @staticmethod
+    def _validate_model_profile(model_profile: str | None) -> None:
+        if model_profile is None:
+            return
+        try:
+            resolve_llm_config(model_profile=model_profile)
+        except YamlConfigError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     async def _resolve_session_identity(
         self,
@@ -117,11 +142,94 @@ class SessionService:
 
     async def _recent_history(self, session_id: str) -> list[dict]:
         """Last N messages as {"role","content"} dicts for engine short-term context."""
-        rows = await self.session_repo.get_recent_messages(session_id, _HISTORY_LIMIT)
-        return [
+        context_reader = getattr(self.session_repo, "get_context", None)
+        context = await context_reader(session_id) if context_reader is not None else {}
+        summary = context.get("context_summary") if isinstance(context, dict) else ""
+        cutoff = context.get("context_summary_cutoff", 0) if isinstance(context, dict) else 0
+        if summary:
+            history = [{"role": "user", "content": f"[Session context summary]\n{summary}"}]
+            if isinstance(cutoff, int) and cutoff > 0:
+                rows = await self.session_repo.get_messages(session_id, offset=cutoff)
+                rows = rows[-_HISTORY_LIMIT:]
+            else:
+                rows = await self.session_repo.get_recent_messages(session_id, _HISTORY_LIMIT)
+        else:
+            history = []
+            rows = await self.session_repo.get_recent_messages(session_id, _HISTORY_LIMIT)
+        return history + [
             {"role": r["role"], "content": r["content"]}
             for r in rows
         ]
+
+    async def _build_runtime(self, agent_id: str, profile_name: str, session_id: str):
+        session = await self.session_repo.get_owned(session_id, agent_id)
+        model_profile = session.get("model_profile") if session else None
+        kwargs = {"session_id": session_id}
+        if model_profile:
+            kwargs["model_profile"] = model_profile
+        return build_engine_runtime(agent_id, profile_name, **kwargs)
+
+    async def update_model_profile(
+        self,
+        agent_id: str,
+        session_id: str,
+        model_profile: str | None,
+    ) -> SessionOut:
+        self._validate_model_profile(model_profile)
+        row = await self.session_repo.update_model_profile(session_id, agent_id, model_profile)
+        if row is None:
+            raise HTTPException(404, "Session not found")
+        return SessionOut(**row)
+
+    async def delete_session(self, agent_id: str, session_id: str) -> None:
+        deleted = await self.session_repo.delete_owned(session_id, agent_id)
+        if not deleted:
+            raise HTTPException(404, "Session not found")
+
+    async def compress_session(self, agent_id: str, session_id: str) -> ContextCompressionOut:
+        session = await self.session_repo.get_owned(session_id, agent_id)
+        if session is None:
+            raise HTTPException(404, "Session not found")
+
+        rows = await self.session_repo.get_messages(session_id)
+        if not rows:
+            raise HTTPException(400, "Cannot compress an empty session")
+
+        profile = await self.agent_profile_repo.get(agent_id)
+        profile_name = profile["name"] if profile else "Agent"
+        _runtime, services = await self._build_runtime(agent_id, profile_name, session_id)
+        try:
+            compacted = await compact_history(
+                [{"role": row["role"], "content": row["content"]} for row in rows],
+                services.llm,
+            )
+        finally:
+            close = getattr(services, "close", None)
+            if close is not None:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+
+        summary_prefix = "[Previous conversation summary]\n"
+        summary_messages = [
+            item for item in compacted
+            if item.get("role") == "user"
+            and isinstance(item.get("content"), str)
+            and item["content"].startswith(summary_prefix)
+        ]
+        if not summary_messages:
+            raise HTTPException(422, "Model did not return a usable context summary")
+        summary = summary_messages[-1]["content"][len(summary_prefix):].strip()
+        if not summary:
+            raise HTTPException(422, "Model returned an empty context summary")
+
+        await self.session_repo.set_context(session_id, summary, len(rows))
+        return ContextCompressionOut(
+            session_id=session_id,
+            summary=summary,
+            message_count=len(rows),
+            context_summary_cutoff=len(rows),
+        )
 
     async def list_messages(self, session_id: str, limit: int = 0, offset: int = 0) -> list[MessageOut]:
         exists = await self.session_repo.exists_by_id(session_id)
@@ -157,7 +265,7 @@ class SessionService:
         await self.session_repo.add_message(session_id, "user", content)
 
         try:
-            runtime, services = build_engine_runtime(agent_id, profile_name, session_id=session_id)
+            runtime, services = await self._build_runtime(agent_id, profile_name, session_id)
             result = await engine_reply_with_runtime(
                 EngineRequest(
                     message=content,
@@ -215,7 +323,8 @@ class SessionService:
         terminal_status = "completed"
         terminal_notice: str | None = None
         try:
-            runtime, services = build_engine_runtime(agent_id, profile_name, session_id=session_id)
+            runtime, services = await self._build_runtime(agent_id, profile_name, session_id)
+            model_name = str(getattr(getattr(services, "llm", None), "model", "") or "")
             run = engine_run_stream_with_runtime(
                 EngineRequest(
                     message=content,
@@ -235,16 +344,9 @@ class SessionService:
                     run_id = str(ev.data.get("run_id") or run_id or "") or None
                     yield sse("run_started", {"run_id": run_id})
                 elif t == "raw_response_event":
-                    raw_type = ev.data.get("type")
-                    raw_data = ev.data.get("data")
-                    if (
-                        raw_type == "response.output_text.delta"
-                        and not ev.data.get("provision_id")
-                        and isinstance(raw_data, dict)
-                    ):
-                        delta = raw_data.get("delta")
-                        if isinstance(delta, str) and delta:
-                            yield sse("message", {"text": delta})
+                    delta = raw_text_delta(ev, include_provisional=False)
+                    if delta is not None:
+                        yield sse("message", {"text": delta})
                 elif t == "provisional_text_delta":
                     provision_id = str(ev.data.get("provision_id", ""))
                     text = ev.data.get("text")
@@ -277,23 +379,67 @@ class SessionService:
                     hint = args.get("path") or args.get("file_path") or args.get("query") or args.get("command", "")
                     yield sse("tool_call", {"id": ev.data.get("id", ""), "name": ev.data.get("name", ""), "hint": str(hint)[:120]})
                 elif t == "tool_call_result":
+                    presentation = ev.data.get("presentation")
+                    result_summary = ev.data.get("reason") or ev.data.get("content", "")[:120]
+                    if ev.data.get("approval_required") and isinstance(presentation, dict):
+                        result_summary = presentation.get("summary") or presentation.get("title") or result_summary
                     yield sse("tool_result", {
                         "id": ev.data.get("id", ""),
                         "error": bool(ev.data.get("error") or ev.data.get("blocked")),
                         "blocked": bool(ev.data.get("blocked")),
                         "preflight": bool(ev.data.get("preflight")),
-                        "summary": ev.data.get("reason") or ev.data.get("content", "")[:120],
+                        "summary": result_summary,
                     })
+                    if ev.data.get("approval_required"):
+                        approval_payload = {
+                            "run_id": run_id,
+                            "approval_id": ev.data.get("approval_id", ""),
+                            "tool": ev.data.get("tool") or ev.data.get("name") or "tool",
+                            "level": ev.data.get("level", "execute"),
+                            "reason": ev.data.get("reason", "Approval required"),
+                            "arguments": ev.data.get("arguments") if isinstance(ev.data.get("arguments"), dict) else {},
+                        }
+                        if isinstance(presentation, dict):
+                            approval_payload["presentation"] = presentation
+                        yield sse("approval_required", approval_payload)
                 elif t in ("skill_start", "skill_end"):
                     yield sse("skill", {"name": ev.data.get("skill", ""), "status": "start" if t == "skill_start" else ev.data.get("status", "end")})
                 elif t == "blocked":
                     yield sse("message", {"text": f"\n⛔ 已阻断：{ev.data.get('reason', '')}\n"})
                 elif t == "token_usage":
+                    if self.token_stats_service is not None:
+                        try:
+                            project_path = str(working_dir or "")
+                            await self.token_stats_service.record_usage(
+                                session_id=session_id,
+                                run_id=run_id,
+                                project_name=Path(project_path).name if project_path else "",
+                                project_path=project_path,
+                                model=model_name,
+                                usage=ev.data,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "failed to persist token usage (session=%s)",
+                                session_id,
+                                exc_info=True,
+                            )
                     yield sse("token_usage", {
                         "input_tokens": ev.data.get("input_tokens", 0),
                         "output_tokens": ev.data.get("output_tokens", 0),
                         "total_tokens": ev.data.get("total_tokens", 0),
                     })
+                elif t == "context_usage":
+                    yield sse("context_usage", {
+                        "context_tokens": ev.data.get("context_tokens", 0),
+                        "context_window": ev.data.get("context_window", CONTEXT_DISPLAY_WINDOW),
+                        "context_percent": ev.data.get("context_percent", 0),
+                        "estimated": bool(ev.data.get("estimated", True)),
+                    })
+                elif t == "context_compression_start":
+                    yield sse("compression", {"active": True})
+                elif t == "context_compression_end":
+                    yield sse("compression", {"active": False})
                 elif t == "incomplete":
                     terminal_status = "incomplete"
                 elif t == "failed":
@@ -307,8 +453,7 @@ class SessionService:
                             "message",
                             {
                                 "text": (
-                                    "\n⚠️ 本轮回答已完成，但记忆保存失败，"
-                                    "系统会在后续维护中重试。\n"
+                                    "\n⚠️ 本轮记忆保存失败，系统会在后续维护中重试。\n"
                                 )
                             },
                         )

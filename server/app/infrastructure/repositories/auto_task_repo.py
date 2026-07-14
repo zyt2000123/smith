@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ..database import get_app_db
 
@@ -17,8 +17,9 @@ class AutoTaskRepo:
         await db.execute(
             "INSERT INTO auto_tasks "
             "(id, agent_id, title, description, trigger_type, trigger_config, "
-            "instruction, enabled, status, next_run_at, run_count, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "instruction, enabled, status, next_run_at, run_count, retry_count, "
+            "max_retries, lease_until, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 tid,
                 agent_id,
@@ -31,6 +32,9 @@ class AutoTaskRepo:
                 "idle",
                 data.get("next_run_at"),
                 0,
+                int(data.get("retry_count", 0)),
+                int(data.get("max_retries", 2)),
+                data.get("lease_until"),
                 now,
             ),
         )
@@ -66,6 +70,7 @@ class AutoTaskRepo:
         for field in (
             "title", "description", "trigger_type", "trigger_config",
             "instruction", "status", "last_run_at", "next_run_at",
+            "retry_count", "max_retries", "lease_until",
         ):
             if field in updates and updates[field] is not None:
                 set_parts.append(f"{field}=?")
@@ -101,11 +106,16 @@ class AutoTaskRepo:
         return True
 
     async def claim_running(self, task_id: str) -> bool:
-        """CAS: set status='running' only if not already running."""
+        """CAS claim with a lease so crashed workers can be reclaimed."""
         db = await get_app_db()
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        lease_until = (now + timedelta(minutes=15)).isoformat()
         cursor = await db.execute(
-            "UPDATE auto_tasks SET status='running' WHERE id=? AND status != 'running'",
-            (task_id,),
+            "UPDATE auto_tasks SET status='running', lease_until=? "
+            "WHERE id=? AND (status != 'running' OR lease_until IS NULL "
+            "OR lease_until <= ?)",
+            (lease_until, task_id, now_text),
         )
         await db.commit()
         return cursor.rowcount == 1
@@ -115,7 +125,7 @@ class AutoTaskRepo:
         db = await get_app_db()
         now = datetime.now(timezone.utc).isoformat()
         await db.execute(
-            "UPDATE auto_tasks SET status=?, last_run_at=?, next_run_at=?, "
+            "UPDATE auto_tasks SET status=?, last_run_at=?, next_run_at=?, lease_until=NULL, "
             "run_count = run_count + 1 WHERE id=?",
             (status, now, next_run_at, task_id),
         )
@@ -127,9 +137,9 @@ class AutoTaskRepo:
         now = datetime.now(timezone.utc).isoformat()
         rows = await db.execute_fetchall(
             "SELECT * FROM auto_tasks "
-            "WHERE enabled=1 AND status != 'running' "
-            "AND next_run_at IS NOT NULL AND next_run_at <= ?",
-            (now,),
+            "WHERE enabled=1 AND (status != 'running' OR lease_until IS NULL "
+            "OR lease_until <= ?) AND next_run_at IS NOT NULL AND next_run_at <= ?",
+            (now, now),
         )
         return [self._row_to_dict(r) for r in rows]
 
@@ -217,5 +227,8 @@ class AutoTaskRepo:
             "last_run_at": row["last_run_at"],
             "next_run_at": row["next_run_at"],
             "run_count": row["run_count"],
+            "retry_count": row["retry_count"],
+            "max_retries": row["max_retries"],
+            "lease_until": row["lease_until"],
             "created_at": row["created_at"],
         }

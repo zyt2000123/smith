@@ -2,22 +2,117 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { NodeBridge } from "./bridge.js";
-import { runShellCommand } from "./commands.js";
+import { buildSlashItems, filterSlash, runShellCommand } from "./commands.js";
 import { createAppStore } from "./store.js";
 
-test("retry command resets the shell to boot and reruns bridge startup", async () => {
-  const store = createAppStore();
-  let bootCalls = 0;
-  const bridge = {
-    boot: async () => {
-      bootCalls += 1;
+function skill(name: string) {
+  return {
+    name,
+    description: `Run ${name}.`,
+    source: "builtin",
+    version: "0.1.0",
+    argument_hint: "",
+  };
+}
+
+test("slash filtering keeps every command and skill for scrolling", () => {
+  const skills = Array.from({ length: 8 }, (_, index) => skill(`skill-${index + 1}`));
+  const items = filterSlash(buildSlashItems(skills), "/");
+
+  assert.equal(items.length, 23);
+  assert.deepEqual(
+    items.slice(-8).map((item) => item.command),
+    skills.map((item) => `/${item.name}`),
+  );
+});
+
+test("new keeps the old session while clear delegates deletion", async () => {
+  const oldSession = {
+    id: "session-1",
+    agent_id: "agent-1",
+    title: "old",
+    created_at: "now",
+    message_count: 1,
+  };
+
+  const newStore = createAppStore();
+  newStore.getState().set({ currentSession: oldSession, sessions: [oldSession], inputValue: "draft" });
+  let newCalls = 0;
+  const newBridge = {
+    startNewSession: async () => {
+      newCalls += 1;
+      newStore.getState().startFreshSession();
+      return true;
     },
   } as unknown as NodeBridge;
+  await runShellCommand("/new", { bridge: newBridge, exit: () => {}, getState: newStore.getState });
+  assert.equal(newCalls, 1);
+  assert.equal(newStore.getState().currentSession, null);
+  assert.equal(newStore.getState().sessions[0]?.id, "session-1");
+  assert.deepEqual(newStore.getState().transcript, []);
 
-  await runShellCommand("/retry", { bridge, exit: () => {}, getState: store.getState });
+  const clearStore = createAppStore();
+  clearStore.getState().set({ currentSession: oldSession, sessions: [oldSession] });
+  let clearCalls = 0;
+  const clearBridge = {
+    clearCurrentSession: async () => {
+      clearCalls += 1;
+      clearStore.getState().set({ sessions: [] });
+      clearStore.getState().startFreshSession();
+      return true;
+    },
+  } as unknown as NodeBridge;
+  await runShellCommand("/clear", { bridge: clearBridge, exit: () => {}, getState: clearStore.getState });
+  assert.equal(clearCalls, 1);
+  assert.equal(clearStore.getState().currentSession, null);
+  assert.deepEqual(clearStore.getState().sessions, []);
+});
 
-  assert.equal(bootCalls, 1);
-  assert.equal(store.getState().mode, "boot");
+test("clear keeps the current session when deletion fails", async () => {
+  const store = createAppStore();
+  store.getState().set({
+    currentSession: { id: "session-1", agent_id: "agent-1", title: "old", created_at: "now", message_count: 1 },
+  });
+  const bridge = {
+    clearCurrentSession: async () => false,
+  } as unknown as NodeBridge;
+
+  await runShellCommand("/clear", { bridge, exit: () => {}, getState: store.getState });
+
+  assert.equal(store.getState().currentSession?.id, "session-1");
+});
+
+test("model, compress, skill, and mcp commands use bridge contracts", async () => {
+  const store = createAppStore();
+  store.getState().set({
+    config: {
+      configured: true,
+      has_api_key: true,
+      provider: "openai",
+      base_url: "https://relay.example/v1",
+      model: "default-model",
+      max_output_tokens: null,
+      routes: {},
+      timeout_profiles: {},
+      models: {
+        "relay-fast": { provider: "openai", model: "fast-model", has_api_key: true },
+      },
+    },
+  });
+  const calls: string[] = [];
+  const bridge = {
+    selectModel: async (name: string | null) => calls.push(`model:${name}`),
+    compressCurrentSession: async () => calls.push("compress"),
+    refreshMcpServers: async () => calls.push("mcp"),
+    openTokenStats: async () => calls.push("token"),
+  } as unknown as NodeBridge;
+
+  await runShellCommand("/model relay-fast", { bridge, exit: () => {}, getState: store.getState });
+  await runShellCommand("/compress", { bridge, exit: () => {}, getState: store.getState });
+  await runShellCommand("/mcp", { bridge, exit: () => {}, getState: store.getState });
+  await runShellCommand("/token", { bridge, exit: () => {}, getState: store.getState });
+
+  assert.deepEqual(calls, ["model:relay-fast", "compress", "mcp", "token"]);
 });
 
 test("config reopens the five-field form with saved values intact", async () => {
@@ -31,6 +126,7 @@ test("config reopens the five-field form with saved values intact", async () => 
       model: "primary-model",
       max_output_tokens: null,
       routes: { gate: { model: "review-model", has_api_key: false } },
+      models: {},
       timeout_profiles: {},
     },
   });

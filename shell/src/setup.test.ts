@@ -14,6 +14,7 @@ function draft(overrides: Partial<SetupDraft> = {}): SetupDraft {
     max_output_tokens: "",
     api_key: "",
     routes: "",
+    models: "",
     interactive_api_key: "",
     gate_api_key: "",
     background_api_key: "",
@@ -40,6 +41,7 @@ test("setup draft restores the five essential values from saved config", () => {
     timeout_profiles: {
       gate: { read: 45, stream_read: 50 },
     },
+    models: {},
   };
 
   const result = createSetupDraft(config);

@@ -1,5 +1,7 @@
 import { localAuthHeaders } from "./auth.js";
 
+export const CONTEXT_DISPLAY_WINDOW = 256_000;
+
 export type LlmUsage = "interactive" | "gate" | "background";
 export type LlmTimeoutField = "connect" | "read" | "stream_read" | "write" | "pool";
 
@@ -9,7 +11,18 @@ export type LlmRoute = {
   model?: string;
   stream?: boolean;
   max_output_tokens?: number;
+  context_window?: number;
   timeout_profile?: LlmUsage;
+  has_api_key: boolean;
+};
+
+export type LlmModelProfile = {
+  provider?: string;
+  base_url?: string;
+  model?: string;
+  stream?: boolean;
+  max_output_tokens?: number;
+  context_window?: number;
   has_api_key: boolean;
 };
 
@@ -22,7 +35,9 @@ export type LlmConfig = {
   model: string;
   base_url: string;
   max_output_tokens: number | null;
+  context_window?: number | null;
   routes: Partial<Record<LlmUsage, LlmRoute>>;
+  models: Record<string, LlmModelProfile>;
   timeout_profiles: Partial<Record<LlmUsage, LlmTimeoutProfile>>;
 };
 
@@ -41,6 +56,7 @@ export type Session = {
   last_message_preview?: string | null;
   last_message_at?: string | null;
   message_count: number;
+  model_profile?: string | null;
 };
 
 export type SkillSummary = {
@@ -57,11 +73,64 @@ export type TokenUsage = {
   total_tokens: number;
 };
 
+export type TokenDay = TokenUsage & {
+  date: string;
+  sessions: number;
+};
+
+export type TokenModel = TokenUsage & {
+  model: string;
+  sessions: number;
+};
+
+export type TokenStats = TokenUsage & {
+  year: number;
+  session_count: number;
+  active_days: number;
+  current_streak: number;
+  longest_streak: number;
+  favorite_model: string | null;
+  peak_hour: number | null;
+  daily: TokenDay[];
+  models: TokenModel[];
+  estimated?: boolean;
+};
+
+export type ContextUsage = {
+  context_tokens: number;
+  context_window: number;
+  context_percent: number;
+  estimated: boolean;
+};
+
 export type StreamTerminalStatus = "completed" | "failed" | "incomplete";
+
+export type ApprovalDetail = {
+  label: string;
+  value: string;
+};
+
+export type ApprovalPresentation = {
+  title: string;
+  summary: string;
+  details: ApprovalDetail[];
+  reason: string;
+};
+
+export type PendingApproval = {
+  runId: string;
+  approvalId: string;
+  tool: string;
+  level: string;
+  reason: string;
+  arguments: Record<string, unknown>;
+  presentation?: ApprovalPresentation;
+};
 
 export type StreamEvent =
   | { type: "message"; text: string }
   | { type: "run_started"; runId: string }
+  | ({ type: "approval_required" } & PendingApproval)
   | { type: "provisional_text_delta"; provisionId: string; text: string }
   | { type: "provisional_commit"; provisionId: string }
   | { type: "provisional_retract"; provisionId: string; reason: string }
@@ -70,6 +139,8 @@ export type StreamEvent =
   | { type: "tool_result"; id: string; error: boolean; blocked: boolean; preflight: boolean; summary: string }
   | { type: "skill"; name: string; status: string }
   | ({ type: "token_usage" } & TokenUsage)
+  | ({ type: "context_usage" } & ContextUsage)
+  | { type: "compression"; active: boolean }
   | { type: "done"; id?: string; status: StreamTerminalStatus };
 
 type RequestOptions = {
@@ -137,6 +208,7 @@ export type LlmRouteInput = {
   model?: string | null;
   stream?: boolean | null;
   max_output_tokens?: number | null;
+  context_window?: number | null;
   timeout_profile?: LlmUsage | null;
 };
 
@@ -148,7 +220,9 @@ export type LlmConfigInput = {
   base_url: string;
   model: string;
   max_output_tokens?: number | null;
+  context_window?: number | null;
   routes?: Partial<Record<LlmUsage, LlmRouteInput | null>>;
+  models?: Record<string, LlmRouteInput | null>;
   timeout_profiles?: Partial<Record<LlmUsage, LlmTimeoutProfileInput | null>>;
 };
 
@@ -176,6 +250,8 @@ async function request<T>(baseUrl: string, pathname: string, options: RequestOpt
       const text = await response.text();
       throw new Error(`HTTP ${response.status}: ${text || response.statusText}`);
     }
+
+    if (response.status === 204) return undefined as T;
 
     return (await response.json()) as T;
   } catch (error) {
@@ -211,14 +287,20 @@ export async function listSessions(baseUrl: string, options: Pick<RequestOptions
   return request<Session[]>(baseUrl, "/api/agent/sessions", options);
 }
 
+export async function getTokenStats(baseUrl: string, year?: number): Promise<TokenStats> {
+  const query = year ? `?year=${encodeURIComponent(year)}` : "";
+  return request<TokenStats>(baseUrl, `/api/agent/token-stats${query}`);
+}
+
 export async function createSession(
   baseUrl: string,
   title: string,
+  modelProfile?: string | null,
   options: Pick<RequestOptions, "signal"> = {},
 ): Promise<Session> {
   return request<Session>(baseUrl, "/api/agent/sessions", {
     method: "POST",
-    body: { title },
+    body: { title, ...(modelProfile ? { model_profile: modelProfile } : {}) },
     signal: options.signal,
   });
 }
@@ -239,9 +321,73 @@ export async function listSkills(baseUrl: string): Promise<SkillSummary[]> {
   return request<SkillSummary[]>(baseUrl, "/api/agent/skills");
 }
 
+export type McpToolSummary = {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+};
+
+export type McpServer = {
+  name: string;
+  type: string;
+  url?: string | null;
+  command: string[];
+  status: "connected" | "error";
+  error?: string | null;
+  tools: McpToolSummary[];
+};
+
+export async function listMcpServers(baseUrl: string): Promise<McpServer[]> {
+  return request<McpServer[]>(baseUrl, "/api/agent/mcp");
+}
+
+export type ContextCompression = {
+  session_id: string;
+  summary: string;
+  message_count: number;
+  context_summary_cutoff: number;
+};
+
+export async function compressSession(baseUrl: string, sessionId: string): Promise<ContextCompression> {
+  return request<ContextCompression>(baseUrl, `/api/agent/sessions/${sessionId}/compress`, {
+    method: "POST",
+    timeoutMs: 120_000,
+  });
+}
+
+export async function updateSessionModel(
+  baseUrl: string,
+  sessionId: string,
+  modelProfile: string | null,
+): Promise<Session> {
+  return request<Session>(baseUrl, `/api/agent/sessions/${sessionId}/model`, {
+    method: "PATCH",
+    body: { model_profile: modelProfile },
+  });
+}
+
+export async function resolveRunApproval(
+  baseUrl: string,
+  runId: string,
+  approvalId: string,
+  approved: boolean,
+): Promise<void> {
+  await request<void>(baseUrl, `/api/agent/runs/${runId}/approval`, {
+    method: "POST",
+    body: { approval_id: approvalId, approved },
+  });
+}
+
+export async function deleteSession(baseUrl: string, sessionId: string): Promise<void> {
+  await request<void>(baseUrl, `/api/agent/sessions/${sessionId}`, {
+    method: "DELETE",
+  });
+}
+
 type StreamMessageOptions = {
   context?: string;
   skillName?: string;
+  workingDir?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
 };
@@ -299,9 +445,49 @@ function terminalStatus(payload: Record<string, unknown>): StreamTerminalStatus 
   return "completed";
 }
 
+function objectPayload(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function approvalPresentation(payload: Record<string, unknown>): ApprovalPresentation | undefined {
+  const raw = objectPayload(payload.presentation);
+  if (Object.keys(raw).length === 0) return undefined;
+
+  const details = Array.isArray(raw.details)
+    ? raw.details.flatMap((item) => {
+        const detail = objectPayload(item);
+        const label = String(detail.label ?? "").trim();
+        return label ? [{ label, value: String(detail.value ?? "") }] : [];
+      })
+    : [];
+  const title = String(raw.title ?? "").trim();
+  const summary = String(raw.summary ?? "").trim();
+  const reason = String(raw.reason ?? "").trim();
+  if (!title && !summary && details.length === 0 && !reason) return undefined;
+  return {
+    title: title || "Approval required",
+    summary,
+    details,
+    reason,
+  };
+}
+
 const SSE_EVENT_DECODERS: Partial<Record<string, SseEventDecoder>> = {
   message: (payload) => ({ type: "message", text: String(payload.text ?? "") }),
   run_started: (payload) => ({ type: "run_started", runId: String(payload.run_id ?? "") }),
+  approval_required: (payload) => {
+    const presentation = approvalPresentation(payload);
+    return {
+      type: "approval_required",
+      runId: String(payload.run_id ?? ""),
+      approvalId: String(payload.approval_id ?? ""),
+      tool: String(payload.tool ?? "tool"),
+      level: String(payload.level ?? "execute"),
+      reason: String(payload.reason ?? "Approval required"),
+      arguments: objectPayload(payload.arguments),
+      ...(presentation ? { presentation } : {}),
+    };
+  },
   provisional_text_delta: (payload) => ({
     type: "provisional_text_delta",
     provisionId: String(payload.provision_id ?? ""),
@@ -345,6 +531,17 @@ const SSE_EVENT_DECODERS: Partial<Record<string, SseEventDecoder>> = {
     input_tokens: Number(payload.input_tokens ?? 0),
     output_tokens: Number(payload.output_tokens ?? 0),
     total_tokens: Number(payload.total_tokens ?? 0),
+  }),
+  context_usage: (payload) => ({
+    type: "context_usage",
+    context_tokens: Number(payload.context_tokens ?? 0),
+    context_window: Number(payload.context_window ?? CONTEXT_DISPLAY_WINDOW),
+    context_percent: Number(payload.context_percent ?? 0),
+    estimated: Boolean(payload.estimated ?? true),
+  }),
+  compression: (payload) => ({
+    type: "compression",
+    active: Boolean(payload.active),
   }),
   done: (payload) => ({
     type: "done",
@@ -442,6 +639,7 @@ export async function* streamMessage(
         content,
         context: options.context,
         skill_name: options.skillName,
+        working_dir: options.workingDir,
       }),
     });
 

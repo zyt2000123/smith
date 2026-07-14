@@ -17,6 +17,7 @@ from app.cli import (  # noqa: E402
     ensure_smith,
     resolve_session,
 )
+from app.cli_shell import _launch_shell  # noqa: E402
 
 
 class FakeAgentService:
@@ -97,6 +98,27 @@ def test_should_launch_shell_requires_tty() -> None:
     assert _should_launch_shell(["shell"], stdin_tty=True, stdout_tty=True) is True
     assert _should_launch_shell([], stdin_tty=False, stdout_tty=True) is False
     assert _should_launch_shell(["chat"], stdin_tty=True, stdout_tty=True) is False
+
+
+def test_launch_shell_preserves_the_invoking_directory_for_the_hud(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entry = tmp_path / "index.js"
+    entry.touch()
+    captured: dict = {}
+
+    def fake_run(command, *, cwd, env, check):
+        captured.update(command=command, cwd=cwd, env=env, check=check)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SMITH_PROJECT_CWD", raising=False)
+    monkeypatch.setattr("app.cli_shell._shell_entry_path", lambda: entry)
+    monkeypatch.setattr("app.cli_shell.subprocess.run", fake_run)
+
+    assert _launch_shell(["shell"]) == 0
+    assert captured["env"]["SMITH_PROJECT_CWD"] == str(tmp_path)
 
 
 def test_find_session_in_list_matches_by_id() -> None:

@@ -3,7 +3,12 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from engine.execution.compression import compact_history, needs_compaction
+from engine.execution.compression import (
+    DEFAULT_CONTEXT_LIMIT,
+    compact_history,
+    compress,
+    needs_compaction,
+)
 
 
 def test_needs_compaction_uses_actual_conversation_size() -> None:
@@ -24,6 +29,42 @@ def test_needs_compaction_accounts_for_cjk_density() -> None:
     conversation = [{"role": "user", "content": "证" * 90_000}]
 
     assert needs_compaction(conversation, context_limit=120_000)
+
+
+def test_needs_compaction_defaults_to_conservative_context_window() -> None:
+    conversation = [{"role": "user", "content": "证" * (int(DEFAULT_CONTEXT_LIMIT * 0.7) + 1)}]
+
+    assert needs_compaction(conversation)
+
+
+def test_compress_uses_the_128k_trigger_even_for_large_declared_windows() -> None:
+    class LargeWindowLLM:
+        context_window = 1_000_000
+        context_window_declared = True
+
+        async def chat(self, messages, tools=None):
+            return SimpleNamespace(text="summary")
+
+    below_limit = [{"role": "user", "content": "证" * 127_999}]
+    at_limit = [{"role": "user", "content": "证" * 128_000}]
+
+    assert asyncio.run(compress(below_limit, LargeWindowLLM())) is below_limit
+    assert asyncio.run(compress(at_limit, LargeWindowLLM())) is not at_limit
+
+
+def test_compress_uses_128k_hard_trigger_when_window_is_undeclared() -> None:
+    class UnconfiguredLLM:
+        context_window = DEFAULT_CONTEXT_LIMIT
+        context_window_declared = False
+
+        async def chat(self, messages, tools=None):
+            return SimpleNamespace(text="summary")
+
+    below_limit = [{"role": "user", "content": "证" * (DEFAULT_CONTEXT_LIMIT - 1)}]
+    at_limit = [{"role": "user", "content": "证" * DEFAULT_CONTEXT_LIMIT}]
+
+    assert asyncio.run(compress(below_limit, UnconfiguredLLM())) is below_limit
+    assert asyncio.run(compress(at_limit, UnconfiguredLLM())) is not at_limit
 
 
 def test_compact_history_keeps_tool_evidence_in_summary_input() -> None:

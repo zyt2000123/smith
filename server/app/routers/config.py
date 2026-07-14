@@ -20,6 +20,7 @@ class LLMRoutePatch(BaseModel):
     model: str | None = None
     stream: bool | None = None
     max_output_tokens: int | None = Field(default=None, gt=0)
+    context_window: int | None = Field(default=None, gt=0)
     timeout_profile: LLMUsageName | None = None
 
     @field_validator("max_output_tokens", mode="before")
@@ -66,7 +67,9 @@ class LLMConfig(BaseModel):
     model: str | None = None
     stream: bool | None = None
     max_output_tokens: int | None = Field(default=None, gt=0)
+    context_window: int | None = Field(default=None, gt=0)
     routes: dict[LLMUsageName, LLMRoutePatch | None] | None = None
+    models: dict[str, LLMRoutePatch | None] | None = None
     timeout_profiles: dict[LLMUsageName, LLMTimeoutProfilePatch | None] | None = None
 
     @field_validator("max_output_tokens", mode="before")

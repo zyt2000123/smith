@@ -75,3 +75,21 @@ test("finishing a request starts the next queued message in FIFO order", async (
     ["third"],
   );
 });
+
+test("starting a new session keeps the existing session in history", () => {
+  const store = createAppStore();
+  const session = {
+    id: "session-1",
+    agent_id: "agent-1",
+    title: "old",
+    created_at: "now",
+    message_count: 1,
+  };
+  store.getState().set({ currentSession: session, sessions: [session], inputValue: "draft" });
+
+  const bridge = new NodeBridge(store);
+
+  assert.equal(bridge.startNewSession(), true);
+  assert.equal(store.getState().currentSession, null);
+  assert.equal(store.getState().sessions[0]?.id, "session-1");
+});

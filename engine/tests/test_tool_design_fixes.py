@@ -84,6 +84,31 @@ def test_register_stores_security_metadata():
     assert defn.read_actions == frozenset({"get", "list"})
 
 
+def test_register_stores_rich_execution_contract():
+    registry = ToolRegistry()
+    registry.register(
+        "custom_writer",
+        "",
+        {},
+        lambda: "OK",
+        is_write_tool=True,
+        timeout_seconds=2.5,
+        retryable=True,
+        side_effect="write",
+        idempotent=True,
+        concurrency="serial",
+        execution_environment="either",
+    )
+
+    defn = registry.list_tools()[0]
+    assert defn.timeout_seconds == 2.5
+    assert defn.retryable is True
+    assert defn.side_effect == "write"
+    assert defn.idempotent is True
+    assert defn.concurrency == "serial"
+    assert defn.execution_environment == "either"
+
+
 def test_register_rejects_invalid_permission_level():
     registry = ToolRegistry()
     try:
@@ -121,6 +146,53 @@ def test_load_providers_reads_security_metadata_from_tool_meta():
     assert defn.is_write_tool
     assert defn.permission_level == "write"
     assert defn.read_actions == frozenset({"get"})
+
+
+def test_load_providers_reads_rich_execution_contract_from_tool_meta():
+    provider = (
+        "TOOL_META = {\n"
+        '    "name": "contract_tool",\n'
+        '    "parameters": {"type": "object", "properties": {}},\n'
+        '    "timeout_seconds": 1.5,\n'
+        '    "retryable": True,\n'
+        '    "side_effect": "external",\n'
+        '    "idempotent": True,\n'
+        '    "concurrency": "serial",\n'
+        '    "execution_environment": "sandbox",\n'
+        "}\n"
+        "\n"
+        "def execute(**kwargs):\n"
+        '    return "OK"\n'
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "contract_tool.py").write_text(provider, encoding="utf-8")
+        registry = ToolRegistry()
+        registry.load_providers(Path(tmp))
+
+    defn = registry.list_tools()[0]
+    assert defn.timeout_seconds == 1.5
+    assert defn.retryable is True
+    assert defn.side_effect == "external"
+    assert defn.is_write_tool is True
+    assert defn.idempotent is True
+    assert defn.concurrency == "serial"
+    assert defn.execution_environment == "sandbox"
+
+
+def test_tool_timeout_returns_structured_error():
+    async def slow_tool():
+        await asyncio.sleep(0.05)
+        return "late"
+
+    async def run():
+        registry = ToolRegistry()
+        registry.register("slow", "", {}, slow_tool, timeout_seconds=0.001)
+        return await registry.execute(ToolCall(id="slow-1", name="slow", arguments={}))
+
+    result = asyncio.run(run())
+    assert result.is_error is True
+    assert result.error_kind == "timeout"
+    assert result.timed_out is True
 
 
 def test_load_providers_skips_provider_with_invalid_security_metadata():

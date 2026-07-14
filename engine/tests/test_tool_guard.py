@@ -139,7 +139,10 @@ def test_memory_exception_does_not_bypass_fact_gate():
     assert first.challenged
 
     policy.begin_round()
-    assert policy.evaluate(call).allowed
+    second = policy.evaluate(call)
+    assert not second.allowed
+    assert second.approval_required
+    assert second.needs_confirmation
 
 
 def test_path_tools_are_guarded():
@@ -210,6 +213,54 @@ def test_session_whitelist_extends_boundary_but_not_sensitive_blocks():
     ssh_path = str(Path.home() / ".ssh")
     guard.whitelist.allow_path(ssh_path)
     assert not guard.check(ToolCall(id="t", name="list_dir", arguments={"path": ssh_path})).allowed
+
+
+def test_session_tool_whitelist_does_not_bypass_sensitive_paths(tmp_path: Path):
+    guard = ToolGuard(_RULES, allowed_dirs=[tmp_path])
+    guard.whitelist.allow_tool("write_file")
+
+    result = guard.check(
+        ToolCall(
+            id="t",
+            name="write_file",
+            arguments={"path": str(tmp_path / ".env"), "content": "secret"},
+        )
+    )
+
+    assert not result.allowed
+    assert result.needs_confirmation
+
+
+def test_write_tool_requests_approval_after_hard_guard_passes(tmp_path: Path):
+    guard = ToolGuard(tmp_path / "missing-rules.json", allowed_dirs=[tmp_path])
+
+    result = guard.check(
+        ToolCall(
+            id="t",
+            name="write_file",
+            arguments={"path": str(tmp_path / "notes.txt"), "content": "safe"},
+        )
+    )
+
+    assert result.allowed
+    assert result.approval_required
+    assert result.level is PermissionLevel.WRITE
+
+
+def test_sensitive_write_remains_hard_blocked_and_not_approvable(tmp_path: Path):
+    guard = ToolGuard(tmp_path / "missing-rules.json", allowed_dirs=[tmp_path])
+
+    result = guard.check(
+        ToolCall(
+            id="t",
+            name="write_file",
+            arguments={"path": str(tmp_path / ".env"), "content": "secret"},
+        )
+    )
+
+    assert not result.allowed
+    assert result.needs_confirmation
+    assert not result.approval_required
 
 
 def test_dollar_anchored_rule_patterns_match_raw_argument_values():

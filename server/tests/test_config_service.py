@@ -102,6 +102,27 @@ llm:
     assert stored["llm"]["timeout_profiles"] == {"gate": {"stream_read": 50.0}}
 
 
+def test_config_service_persists_context_windows_per_route_and_model(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(ConfigService, "_config_path", config_path)
+
+    saved = ConfigService().set_llm_config(
+        updates={
+            "context_window": 200_000,
+            "routes": {"gate": {"context_window": 128_000}},
+            "models": {"large-relay": {"context_window": 1_000_000}},
+        },
+    )
+
+    assert saved["context_window"] == 200_000
+    assert saved["routes"]["gate"]["context_window"] == 128_000
+    assert saved["models"]["large-relay"]["context_window"] == 1_000_000
+    stored = load_yaml(config_path)
+    assert stored["llm"]["context_window"] == 200_000
+    assert stored["llm"]["routes"]["gate"]["context_window"] == 128_000
+    assert stored["llm"]["models"]["large-relay"]["context_window"] == 1_000_000
+
+
 def test_config_api_accepts_and_returns_nested_configuration(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     monkeypatch.setattr(ConfigService, "_config_path", config_path)
@@ -230,6 +251,53 @@ llm:
     monkeypatch.setattr(ConfigService, "_config_path", config_path)
 
     assert ConfigService().get_llm_config()["max_output_tokens"] is None
+
+
+def test_config_service_persists_named_model_profiles_without_exposing_keys(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(ConfigService, "_config_path", config_path)
+
+    saved = ConfigService().set_llm_config(
+        updates={
+            "models": {
+                "relay-fast": {
+                    "provider": "openai",
+                    "api_key": "relay-secret",
+                    "base_url": "https://relay.example/v1",
+                    "model": "fast-model",
+                    "max_output_tokens": 1024,
+                },
+            },
+        },
+    )
+
+    assert saved["models"] == {
+        "relay-fast": {
+            "provider": "openai",
+            "base_url": "https://relay.example/v1",
+            "model": "fast-model",
+            "max_output_tokens": 1024,
+            "has_api_key": True,
+        },
+    }
+    assert load_yaml(config_path)["llm"]["models"]["relay-fast"]["api_key"] == "relay-secret"
+
+
+def test_config_api_rejects_invalid_named_model_profile(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(ConfigService, "_config_path", tmp_path / "config.yaml")
+    app = FastAPI()
+    app.include_router(config_router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/config/llm",
+            json={"models": {"relay-fast": {"model": ""}}},
+        )
+
+    assert response.status_code == 422
 
 
 def test_config_api_rejects_unknown_provider_and_boolean_generation_limit(monkeypatch, tmp_path: Path) -> None:

@@ -203,7 +203,7 @@ def _entries_to_source(
             summary = _truncate_source(summary, summary_limit)
         metadata = ", ".join(
             f"{key}={entry[key]}"
-            for key in ("kind", "scope", "evidence")
+            for key in ("kind", "scope", "evidence", "status", "reason")
             if entry.get(key)
         )
         signals = entry.get("signals")
@@ -224,7 +224,7 @@ def _entries_to_source(
     return _truncate_source(source, source_limit) if source_limit is not None else source
 
 
-_RECENT_KINDS = {"work", "decision", "correction", "remember", "forget"}
+_RECENT_KINDS = {"work", "partial_work", "decision", "correction", "remember", "forget"}
 
 
 def _entries_for_view(entries: list[dict], view: MemoryViewName) -> list[dict]:
@@ -240,7 +240,7 @@ def _entries_for_view(entries: list[dict], view: MemoryViewName) -> list[dict]:
             if kind in _RECENT_KINDS and (scope == "project" or kind in {"correction", "forget"}):
                 selected.append(entry)
         elif view == "durable":
-            if kind not in {"preference", "pattern"} and (
+            if kind not in {"preference", "pattern", "partial_work"} and (
                 scope == "project" or kind in {"correction", "remember", "forget"}
             ):
                 selected.append(entry)
@@ -374,8 +374,13 @@ def _fallback_recent_document(entries: list[dict]) -> str:
     for entry in entries[-16:]:
         topic = _fallback_inline(entry.get("task"), 80) or "未命名工作"
         date = _fallback_date(entry.get("timestamp"))
+        is_partial = entry.get("kind") == "partial_work"
+        status = "未完成" if is_partial else "已记录"
+        reason = _fallback_inline(entry.get("reason"), 80)
+        reason_suffix = f"；原因：{reason}" if reason else ""
         active_lines.append(
-            f"- **{topic}** — 状态：已记录；下一步：依据现有证据继续处理；更新：{date}。"
+            f"- **{topic}** — 状态：{status}{reason_suffix}；"
+            f"下一步：依据现有证据继续处理；更新：{date}。"
         )
         summary = _fallback_inline(entry.get("summary"), 180)
         if summary:

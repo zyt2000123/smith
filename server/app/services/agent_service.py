@@ -10,16 +10,20 @@ from ..infrastructure.repositories.session_repo import SessionRepo
 from ..infrastructure.repositories.task_repo import TaskRepo
 from ..schemas.agent_profile import AgentProfileOut, AgentProfileUpdate
 from ..schemas.auto_task import AutoTaskCreate, AutoTaskRunOut, AutoTaskUpdate
-from ..schemas.session import MessageOut, SessionOut
+from ..schemas.session import ContextCompressionOut, MessageOut, SessionOut
+from ..schemas.run import ApprovalDecision
 from ..schemas.task import TaskCreate, TaskOut
+from ..schemas.mcp import McpServerOut
 from .auto_task_service import AutoTaskService
 from .agent_profile_service import AgentProfileService
 from .profile_file_service import ProfileFileService
 from .run_state_service import RunStateService
 from .session_service import SessionService
 from .skill_service import SkillService
+from .mcp_service import McpService
 from .stats_service import StatsService
 from .task_service import TaskService
+from .token_stats_service import TokenStatsService
 
 SMITH_NAME = "Smith"
 SMITH_DESCRIPTION = (
@@ -42,12 +46,19 @@ class AgentService:
         skill_service: SkillService | Any | None = None,
         stats_service: StatsService | Any | None = None,
         run_state_service: RunStateService | Any | None = None,
+        mcp_service: McpService | Any | None = None,
+        token_stats_service: TokenStatsService | Any | None = None,
     ) -> None:
         agent_profile_repo = AgentProfileRepo()
         session_repo = SessionRepo()
         auto_task_repo = AutoTaskRepo()
+        self.token_stats_service = token_stats_service or TokenStatsService()
         self.agent_profile_service = agent_profile_service or AgentProfileService(agent_profile_repo)
-        self.session_service = session_service or SessionService(session_repo, agent_profile_repo)
+        self.session_service = session_service or SessionService(
+            session_repo,
+            agent_profile_repo,
+            token_stats_service=self.token_stats_service,
+        )
         self.task_service = task_service or TaskService(TaskRepo(), agent_profile_repo)
         self.auto_task_service = auto_task_service or AutoTaskService(
             auto_task_repo,
@@ -58,6 +69,7 @@ class AgentService:
         self.skill_service = skill_service or SkillService(agent_profile_repo)
         self.stats_service = stats_service or StatsService()
         self.run_state_service = run_state_service or RunStateService()
+        self.mcp_service = mcp_service or McpService()
 
     async def ensure_profile(self) -> AgentProfileOut:
         from ..schemas.agent_profile import AgentProfileCreate
@@ -93,12 +105,25 @@ class AgentService:
         self,
         title: str,
         identity_id: str | None = None,
+        model_profile: str | None = None,
     ) -> SessionOut:
         return await self.session_service.create_session(
             await self._profile_id(),
             title,
             identity_id,
+            model_profile,
         )
+
+    async def update_session_model(self, session_id: str, model_profile: str | None) -> SessionOut:
+        return await self.session_service.update_model_profile(
+            await self._profile_id(), session_id, model_profile
+        )
+
+    async def compress_session(self, session_id: str) -> ContextCompressionOut:
+        return await self.session_service.compress_session(await self._profile_id(), session_id)
+
+    async def delete_session(self, session_id: str) -> None:
+        await self.session_service.delete_session(await self._profile_id(), session_id)
 
     async def list_identities(self) -> list[dict]:
         from .engine_runtime import load_runtime_identity_catalog
@@ -170,6 +195,10 @@ class AgentService:
     async def list_skills(self):
         return await self.skill_service.list_skills(await self._profile_id())
 
+    async def list_mcp_servers(self) -> list[McpServerOut]:
+        await self._profile_id()
+        return await self.mcp_service.list_servers()
+
     async def list_files(self) -> list[dict]:
         await self._profile_id()
         return await self.profile_file_service.list_files()
@@ -185,8 +214,20 @@ class AgentService:
     async def get_stats(self) -> dict:
         return await self.stats_service.get_agent_stats(await self._profile_id())
 
+    async def get_token_stats(self, year: int | None = None) -> dict:
+        await self.token_stats_service.sync_from_traces()
+        return await self.token_stats_service.get_stats(await self._profile_id(), year=year)
+
     async def get_run(self, run_id: str):
         return self.run_state_service.get_run(await self._profile_id(), run_id)
+
+    async def resolve_run_approval(self, run_id: str, decision: ApprovalDecision):
+        return self.run_state_service.resolve_approval(
+            await self._profile_id(),
+            run_id,
+            decision.approval_id,
+            approved=decision.approved,
+        )
 
     async def list_tasks(self) -> list[TaskOut]:
         return await self.task_service.list_tasks(await self._profile_id())
