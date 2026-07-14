@@ -17,6 +17,7 @@ from ..schemas.session import (
     SessionModelUpdate,
     SessionOut,
 )
+from ..schemas.project_instruction import ProjectInstructionInit, ProjectInstructionOut
 from ..schemas.run import ApprovalDecision, RunStateOut
 from ..schemas.skill import SkillSummaryOut
 from ..schemas.mcp import McpServerOut
@@ -171,6 +172,14 @@ async def update_file(
     svc: AgentService = Depends(get_agent_service),
 ):
     return await svc.update_file(filename, body.content)
+
+
+@router.put("/project-instructions", response_model=ProjectInstructionOut)
+async def initialize_project_instructions(
+    body: ProjectInstructionInit,
+    svc: AgentService = Depends(get_agent_service),
+):
+    return await svc.initialize_project_instructions(body.working_dir)
 
 
 @router.get("/stats")

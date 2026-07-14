@@ -14,6 +14,9 @@ from ..infrastructure.database import get_app_db
 
 DbProvider = Callable[[], Awaitable[aiosqlite.Connection]]
 
+# These values describe unavailable or locally derived attribution, not a model.
+_NON_MODEL_STAT_KEYS = frozenset({"unknown", "local-estimate"})
+
 
 class TokenStatsService:
     """Persist and aggregate Agent-Smith's local token usage events."""
@@ -321,14 +324,15 @@ class TokenStatsService:
             day_stat["total_tokens"] += event_total
             day_stat["sessions"].add(str(row["session_id"]))
 
-            model_stat = models.setdefault(
-                model,
-                {"model": model, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "sessions": set()},
-            )
-            model_stat["input_tokens"] += input_tokens
-            model_stat["output_tokens"] += output_tokens
-            model_stat["total_tokens"] += event_total
-            model_stat["sessions"].add(str(row["session_id"]))
+            if model not in _NON_MODEL_STAT_KEYS:
+                model_stat = models.setdefault(
+                    model,
+                    {"model": model, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "sessions": set()},
+                )
+                model_stat["input_tokens"] += input_tokens
+                model_stat["output_tokens"] += output_tokens
+                model_stat["total_tokens"] += event_total
+                model_stat["sessions"].add(str(row["session_id"]))
 
             total_input += input_tokens
             total_output += output_tokens

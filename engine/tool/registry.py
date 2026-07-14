@@ -47,6 +47,7 @@ class ToolRegistry:
         self._tools: dict[str, tuple[ToolDefinition, Callable]] = {}
         self._enabled: set[str] | None = None
         self._execution_ledger: ToolExecutionLedger | None = None
+        self._working_dir: Path | None = None
 
     def register(
         self,
@@ -235,6 +236,49 @@ class ToolRegistry:
     def bind_execution_ledger(self, ledger: "ToolExecutionLedger | None") -> None:
         """Bind a per-run ledger used to protect side-effecting tools."""
         self._execution_ledger = ledger
+
+    def bind_working_directory(self, working_dir: str | Path | None) -> None:
+        """Bind the root used for relative paths during one agent run."""
+        self._working_dir = Path(working_dir).expanduser().resolve() if working_dir else None
+
+    def normalize_call(self, call: ToolCall) -> ToolCall:
+        """Resolve declared relative paths against the bound project directory.
+
+        This is deliberately performed before policy checks so the safety guard
+        and the provider operate on the same canonical paths.
+        """
+        if self._working_dir is None:
+            return call
+
+        entry = self._tools.get(_canonical_tool_name(call.name))
+        if entry is None:
+            return call
+
+        definition, _ = entry
+        arguments = dict(call.arguments)
+        properties = (
+            definition.parameters.get("properties")
+            if isinstance(definition.parameters, dict)
+            else None
+        )
+        if isinstance(properties, dict) and "cwd" in properties and not arguments.get("cwd"):
+            arguments["cwd"] = str(self._working_dir)
+
+        for argument_name in definition.path_args:
+            value = arguments.get(argument_name)
+            if not isinstance(value, str) or not value:
+                continue
+            candidate = Path(value).expanduser()
+            if not candidate.is_absolute():
+                candidate = self._working_dir / candidate
+            arguments[argument_name] = str(candidate.resolve())
+
+        return ToolCall(
+            id=call.id,
+            name=call.name,
+            arguments=arguments,
+            idempotency_key=call.idempotency_key,
+        )
 
     async def _invoke(
         self,

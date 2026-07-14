@@ -291,6 +291,18 @@ export async function ensureAgentProfile(baseUrl: string): Promise<AgentProfile>
   });
 }
 
+export type ProjectInstruction = {
+  path: string;
+  created: boolean;
+};
+
+export async function initializeProjectInstructions(baseUrl: string, workingDir: string): Promise<ProjectInstruction> {
+  return request<ProjectInstruction>(baseUrl, "/api/agent/project-instructions", {
+    method: "PUT",
+    body: { working_dir: workingDir },
+  });
+}
+
 export async function listSessions(baseUrl: string, options: Pick<RequestOptions, "signal"> = {}): Promise<Session[]> {
   return request<Session[]>(baseUrl, "/api/agent/sessions", options);
 }

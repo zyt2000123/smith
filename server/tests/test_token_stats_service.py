@@ -75,19 +75,28 @@ async def test_token_stats_aggregates_daily_models_and_streaks() -> None:
         usage={"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
         occurred_at=datetime.fromisoformat("2026-01-04T14:00:00+00:00"),
     )
+    await service.record_usage(
+        session_id="s2",
+        run_id="r3",
+        project_name="Other",
+        project_path="/tmp/Other",
+        model="",
+        usage={"input_tokens": 40, "output_tokens": 10, "total_tokens": 50},
+        occurred_at=datetime.fromisoformat("2026-01-04T10:00:00+00:00"),
+    )
 
     stats = await service.get_stats("agent-1", year=2026)
 
     assert stats["year"] == 2026
-    assert stats["total_tokens"] == 48
-    assert stats["input_tokens"] == 32
-    assert stats["output_tokens"] == 16
+    assert stats["total_tokens"] == 98
+    assert stats["input_tokens"] == 72
+    assert stats["output_tokens"] == 26
     assert stats["session_count"] == 2
     assert stats["active_days"] == 3
     assert stats["current_streak"] == 1
     assert stats["longest_streak"] == 2
     assert stats["favorite_model"] == "gpt-test"
-    assert stats["peak_hour"] == 11
+    assert stats["peak_hour"] == 10
     assert stats["daily"][0] == {
         "date": "2026-01-01",
         "input_tokens": 10,
@@ -96,7 +105,7 @@ async def test_token_stats_aggregates_daily_models_and_streaks() -> None:
         "sessions": 1,
     }
     assert stats["daily"][-1]["date"] == "2026-12-31"
-    assert stats["models"][0]["model"] == "gpt-test"
+    assert [model["model"] for model in stats["models"]] == ["gpt-test", "claude-test"]
     assert stats["models"][0]["total_tokens"] == 45
 
 
@@ -264,6 +273,8 @@ async def test_sync_from_messages_provides_explicit_local_estimate(tmp_path: Pat
     stats = await service.get_stats("agent-1", year=2026)
     assert stats["total_tokens"] > 0
     assert stats["estimated"] is True
+    assert stats["models"] == []
+    assert stats["favorite_model"] is None
     async with db.execute("SELECT count(*) AS count FROM token_usage_events") as cursor:
         row = await cursor.fetchone()
     assert row["count"] == 2

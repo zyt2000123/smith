@@ -148,6 +148,75 @@ def test_load_providers_reads_security_metadata_from_tool_meta():
     assert defn.read_actions == frozenset({"get"})
 
 
+def test_builtin_file_tools_resolve_relative_paths_from_the_bound_project_dir(tmp_path: Path):
+    project_dir = tmp_path / "OpenAI_project"
+    project_dir.mkdir()
+    registry = ToolRegistry()
+    registry.load_providers(ROOT / "agents" / "tools")
+    registry.bind_working_directory(project_dir)
+
+    write = registry.normalize_call(
+        ToolCall(
+            id="write",
+            name="write_file",
+            arguments={"path": "app/main.py", "content": "x"},
+        )
+    )
+    read = registry.normalize_call(
+        ToolCall(id="read", name="read_file", arguments={"path": "app/main.py"})
+    )
+    shell = registry.normalize_call(
+        ToolCall(id="shell", name="shell", arguments={"command": "pwd"})
+    )
+
+    expected_path = str((project_dir / "app" / "main.py").resolve())
+    assert write.arguments["path"] == expected_path
+    assert read.arguments["path"] == expected_path
+    assert shell.arguments["cwd"] == str(project_dir.resolve())
+
+
+def test_builtin_write_file_writes_relative_paths_under_the_bound_project_dir(tmp_path: Path):
+    async def run():
+        project_dir = tmp_path / "OpenAI_project"
+        project_dir.mkdir()
+        registry = ToolRegistry()
+        registry.load_providers(ROOT / "agents" / "tools")
+        registry.bind_working_directory(project_dir)
+        call = registry.normalize_call(
+            ToolCall(
+                id="write",
+                name="write_file",
+                arguments={"path": "app/main.py", "content": "print('ok')\n"},
+            )
+        )
+        result = await registry.execute(call)
+        return project_dir, result
+
+    project_dir, result = asyncio.run(run())
+
+    assert not result.is_error
+    assert (project_dir / "app" / "main.py").read_text(encoding="utf-8") == "print('ok')\n"
+
+
+def test_builtin_shell_uses_the_bound_project_dir_when_cwd_is_omitted(tmp_path: Path):
+    async def run():
+        project_dir = tmp_path / "OpenAI_project"
+        project_dir.mkdir()
+        registry = ToolRegistry()
+        registry.load_providers(ROOT / "agents" / "tools")
+        registry.bind_working_directory(project_dir)
+        call = registry.normalize_call(
+            ToolCall(id="shell", name="shell", arguments={"command": "pwd"})
+        )
+        result = await registry.execute(call)
+        return project_dir, result
+
+    project_dir, result = asyncio.run(run())
+
+    assert not result.is_error
+    assert str(project_dir.resolve()) in result.content
+
+
 def test_load_providers_reads_rich_execution_contract_from_tool_meta():
     provider = (
         "TOOL_META = {\n"

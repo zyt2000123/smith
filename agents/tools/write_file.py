@@ -23,7 +23,9 @@ TOOL_META = {
             }
         },
         "required": ["path", "content"]
-    }
+    },
+    "path_args": ["path"],
+    "is_write_tool": True,
 }
 
 

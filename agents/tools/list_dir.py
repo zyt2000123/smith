@@ -16,6 +16,7 @@ TOOL_META = {
         },
         "required": [],
     },
+    "path_args": ["path"],
 }
 
 MAX_ENTRIES = 300

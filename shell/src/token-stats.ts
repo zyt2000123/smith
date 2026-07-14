@@ -1,54 +1,34 @@
 import type { TokenDay } from "./api.js";
 
-export type TokenTab = "overview" | "models" | "daily" | "stats";
+export type TokenTab = "overview" | "models" | "stats";
 
-export const TOKEN_TABS: readonly TokenTab[] = ["overview", "models", "daily", "stats"];
+export const TOKEN_TABS: readonly TokenTab[] = ["overview", "models", "stats"];
 
 export const TOKEN_TAB_LABELS: Record<TokenTab, string> = {
   overview: "Overview",
   models: "Models",
-  daily: "Daily",
   stats: "Stats",
 };
 
-export type HeatmapCell = TokenDay & { level: number };
-export type HeatmapWeek = Array<HeatmapCell | null> & { key: string };
-
-export function tokenLevel(totalTokens: number, maxTokens: number): number {
-  if (totalTokens <= 0 || maxTokens <= 0) return 0;
-  const ratio = totalTokens / maxTokens;
-  if (ratio <= 0.25) return 1;
-  if (ratio <= 0.5) return 2;
-  if (ratio <= 0.75) return 3;
-  if (ratio < 1) return 4;
-  return 5;
+function todayInLocalTimezone(): string {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 10);
 }
 
-export function buildHeatmapWeeks(year: number, daily: TokenDay[]): HeatmapWeek[] {
+function emptyTokenDay(date: string): TokenDay {
+  return { date, input_tokens: 0, output_tokens: 0, total_tokens: 0, sessions: 0 };
+}
+
+export function buildRecentDays(daily: TokenDay[], asOfDate = todayInLocalTimezone()): TokenDay[] {
   const byDate = new Map(daily.map((item) => [item.date, item]));
-  const maxTokens = Math.max(0, ...daily.map((item) => item.total_tokens));
-  const start = new Date(Date.UTC(year, 0, 1));
-  const end = new Date(Date.UTC(year + 1, 0, 1));
-  const daysInYear = Math.round((end.getTime() - start.getTime()) / 86_400_000);
-  const mondayOffset = (start.getUTCDay() + 6) % 7;
-  const weeks: HeatmapWeek[] = [];
+  const asOf = new Date(`${asOfDate}T00:00:00.000Z`);
 
-  for (let cursor = 0; cursor < mondayOffset + daysInYear; cursor += 1) {
-    const week = Math.floor(cursor / 7);
-    const dayIndex = cursor % 7;
-    if (!weeks[week]) {
-      const nextWeek = Array.from({ length: 7 }, () => null) as HeatmapWeek;
-      nextWeek.key = `${year}-week-${week}`;
-      weeks[week] = nextWeek;
-    }
-    if (cursor < mondayOffset) continue;
-
-    const current = new Date(start.getTime() + (cursor - mondayOffset) * 86_400_000);
-    const item = byDate.get(current.toISOString().slice(0, 10));
-    if (item) weeks[week][dayIndex] = { ...item, level: tokenLevel(item.total_tokens, maxTokens) };
-  }
-
-  return weeks;
+  return Array.from({ length: 7 }, (_, index) => {
+    const current = new Date(asOf.getTime() - (6 - index) * 86_400_000);
+    const date = current.toISOString().slice(0, 10);
+    return byDate.get(date) ?? emptyTokenDay(date);
+  });
 }
 
 export function formatTokenCount(value: number): string {

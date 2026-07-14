@@ -19,7 +19,11 @@ test("slash filtering keeps only general commands", () => {
   const skills = Array.from({ length: 8 }, (_, index) => skill(`skill-${index + 1}`));
   const items = filterSlash(buildSlashItems(skills), "/");
 
-  assert.equal(items.length, 13);
+  assert.equal(items.length, 14);
+  assert.equal(
+    items.some((item) => item.command === "/init"),
+    true,
+  );
   assert.equal(
     items.some((item) => item.command === "/approve" || item.command === "/deny"),
     false,
@@ -84,6 +88,29 @@ test("clear keeps the current session when deletion fails", async () => {
   await runShellCommand("/clear", { bridge, exit: () => {}, getState: store.getState });
 
   assert.equal(store.getState().currentSession?.id, "session-1");
+});
+
+test("init command creates project instructions once and reports the preserved file", async () => {
+  const store = createAppStore();
+  const calls: string[] = [];
+  const context = {
+    bridge: {
+      initializeProject: async (workingDir: string) => {
+        calls.push(workingDir);
+        return { path: `${workingDir}/.smith/SMITH.md`, created: calls.length === 1 };
+      },
+    } as unknown as NodeBridge,
+    exit: () => {},
+    getState: store.getState,
+    workingDir: "/workspace/project",
+  };
+
+  await runShellCommand("/init", context);
+  assert.match(store.getState().statusLine, /Created .+\.smith\/SMITH\.md/);
+
+  await runShellCommand("/init", context);
+  assert.match(store.getState().statusLine, /Already exists:.+not changed/);
+  assert.deepEqual(calls, ["/workspace/project", "/workspace/project"]);
 });
 
 test("model commands add relay-sharing profiles and use bridge contracts", async () => {

@@ -578,7 +578,7 @@ async function submitWhileBusy(
 ): Promise<void> {
   if (input.startsWith("/")) {
     if (input === "/approve" || input === "/deny") {
-      await runShellCommand(input, { bridge, exit: () => {}, getState });
+      await runShellCommand(input, { bridge, exit: () => {}, getState, workingDir: PROJECT_CWD });
       rememberSubmittedInput(input);
       return;
     }
@@ -620,7 +620,7 @@ async function submitChat(
   }
   if (input.startsWith("/") && !explicitSkill) {
     if (completeSlashSelection(input, slashMenuOpen, slashItems, slashIndex)) return;
-    await runShellCommand(input, { bridge, exit, getState });
+    await runShellCommand(input, { bridge, exit, getState, workingDir: PROJECT_CWD });
     return;
   }
 
@@ -730,7 +730,6 @@ function SmithApp() {
   useEffect(() => {
     if (skillsIndex >= skills.length) getState().set({ skillsIndex: 0 });
   }, [skills.length, skillsIndex]);
-
   const handleInputChange = useCallback(
     (value: string) => {
       const suppressed = suppressRef.current;
