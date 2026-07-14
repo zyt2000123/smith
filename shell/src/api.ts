@@ -41,6 +41,10 @@ export type LlmConfig = {
   timeout_profiles: Partial<Record<LlmUsage, LlmTimeoutProfile>>;
 };
 
+export type RelayModelCatalog = {
+  models: string[];
+};
+
 export type AgentProfile = {
   id: string;
   name: string;
@@ -266,6 +270,10 @@ export async function getLlmConfig(baseUrl: string): Promise<LlmConfig> {
   return request<LlmConfig>(baseUrl, "/api/config/llm");
 }
 
+export async function listRelayModels(baseUrl: string): Promise<RelayModelCatalog> {
+  return request<RelayModelCatalog>(baseUrl, "/api/config/llm/models");
+}
+
 export async function setLlmConfig(baseUrl: string, payload: LlmConfigInput): Promise<LlmConfig> {
   return request<LlmConfig>(baseUrl, "/api/config/llm", {
     method: "POST",
@@ -415,7 +423,7 @@ function parseSseChunk(rawChunk: string): ParsedSseChunk | null {
   let eventName = "message";
   const dataLines: string[] = [];
 
-  for (const line of rawChunk.split("\n")) {
+  for (const line of rawChunk.replace(/\r\n?/g, "\n").split("\n")) {
     const separator = line.indexOf(":");
     if (separator < 1) continue;
 
@@ -566,6 +574,7 @@ function consumeSseChunks(chunks: string[], sawDone: boolean): { events: StreamE
   let completed = sawDone;
 
   for (const chunk of chunks) {
+    if (completed) break;
     const event = decodeSseEvent(chunk);
     if (!event) continue;
     events.push(event);
@@ -590,7 +599,7 @@ async function* readSseEvents(
       if (done) break;
       onActivity?.();
 
-      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n?/g, "\n");
       const parsed = splitSseBuffer(buffer);
       buffer = parsed.remainder;
       const consumed = consumeSseChunks(parsed.chunks, sawDone);
@@ -599,7 +608,7 @@ async function* readSseEvents(
       if (sawDone) return;
     }
 
-    buffer += decoder.decode().replace(/\r\n/g, "\n");
+    buffer += decoder.decode().replace(/\r\n?/g, "\n");
     const parsed = splitSseBuffer(buffer);
     const chunks = parsed.remainder.trim() ? [...parsed.chunks, parsed.remainder] : parsed.chunks;
     const consumed = consumeSseChunks(chunks, sawDone);

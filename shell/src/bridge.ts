@@ -16,6 +16,7 @@ import {
   type LlmConfigInput,
   listMcpServers,
   listMessages,
+  listRelayModels,
   listSessions,
   listSkills,
   resolveRunApproval,
@@ -27,6 +28,7 @@ import {
   updateSessionModel,
 } from "./api.js";
 import { ensureLocalServer } from "./dev-server.js";
+import { createModelPicker, type ModelPickerTarget } from "./model-picker.js";
 import { MAX_QUEUED_MESSAGES, type QueuedMessage } from "./queue.js";
 import { createSetupDraft } from "./setup.js";
 import { type AppStore, TRANSCRIPT_LIMIT } from "./store.js";
@@ -139,6 +141,7 @@ function applyBatchedStreamEvent(
 
 export class NodeBridge {
   private activeRequest: AbortController | null = null;
+  private tokenStatsRequestId = 0;
 
   constructor(private store: StoreApi<AppStore>) {}
 
@@ -206,22 +209,27 @@ export class NodeBridge {
       return;
     }
     if (this.s.approvalResolving) return;
+    const approvalId = pending.approvalId;
+    const baseUrl = this.s.baseUrl;
 
     this.s.set({
       approvalResolving: true,
       statusLine: approved ? "Allowing the requested action…" : "Denying the requested action…",
     });
     try {
-      await resolveRunApproval(this.s.baseUrl, pending.runId, pending.approvalId, approved);
+      await resolveRunApproval(baseUrl, pending.runId, approvalId, approved);
+      if (this.s.pendingApproval?.approvalId !== approvalId) return;
       this.s.set({
         pendingApproval: null,
         transcript: removeApprovalNotice(this.s.transcript, pending.approvalId),
         statusLine: approved ? "Approval granted. Continuing…" : "Approval denied. Continuing safely…",
       });
     } catch (error) {
-      this.s.set({ statusLine: `Approval update failed: ${errorMessage(error)}` });
+      if (this.s.pendingApproval?.approvalId === approvalId) {
+        this.s.set({ statusLine: `Approval update failed: ${errorMessage(error)}` });
+      }
     } finally {
-      this.s.set({ approvalResolving: false });
+      if (this.s.pendingApproval?.approvalId === approvalId) this.s.set({ approvalResolving: false });
     }
   }
 
@@ -289,7 +297,7 @@ export class NodeBridge {
 
   async saveConfig(input: LlmConfigInput): Promise<void> {
     const { baseUrl } = this.s;
-    this.s.set({ busy: true, statusLine: "Saving configuration…" });
+    this.s.set({ busy: true, inputLocked: true, statusLine: "Saving configuration…" });
     try {
       const saved = await setLlmConfig(baseUrl, input);
       this.s.set({ config: saved });
@@ -305,7 +313,7 @@ export class NodeBridge {
     } catch (error) {
       this.s.set({ statusLine: `Save failed: ${errorMessage(error)}` });
     } finally {
-      this.s.set({ busy: false });
+      this.s.set({ busy: false, inputLocked: false });
     }
   }
 
@@ -317,10 +325,14 @@ export class NodeBridge {
   async refreshMcpServers(): Promise<void> {
     const { baseUrl, agent } = this.s;
     if (!baseUrl || !agent) return;
+    if (this.s.inputLocked) return;
+    this.s.set({ inputLocked: true, statusLine: "Loading MCP servers…" });
     try {
       this.s.set({ mcpServers: await listMcpServers(baseUrl) });
     } catch (error) {
       this.s.pushSystemLine(`MCP unavailable: ${errorMessage(error)}`, "error");
+    } finally {
+      this.s.set({ inputLocked: false });
     }
   }
 
@@ -330,11 +342,14 @@ export class NodeBridge {
       this.s.set({ statusLine: "Shell is not ready yet." });
       return;
     }
+    const requestId = ++this.tokenStatsRequestId;
     this.s.set({ panel: "tokens", tokenStats: null, statusLine: "Loading token statistics…" });
     try {
       const tokenStats = await getTokenStats(baseUrl);
+      if (requestId !== this.tokenStatsRequestId || this.s.panel !== "tokens") return;
       this.s.set({ tokenStats, panel: "tokens", statusLine: "Token statistics ready." });
     } catch (error) {
+      if (requestId !== this.tokenStatsRequestId || this.s.panel !== "tokens") return;
       this.s.pushSystemLine(`Token statistics unavailable: ${errorMessage(error)}`, "error");
       this.s.set({ panel: "chat", statusLine: "Token statistics unavailable." });
     }
@@ -346,8 +361,18 @@ export class NodeBridge {
       this.s.set({ statusLine: `Unknown model profile: ${modelProfile}` });
       return;
     }
+    if (this.s.inputLocked || this.s.compressing) return;
+    if (!currentSession) {
+      this.s.set({
+        selectedModelProfile: modelProfile,
+        statusLine: modelProfile ? `Model selected: ${modelProfile}.` : "Default model selected.",
+      });
+      return;
+    }
+
+    this.s.set({ inputLocked: true, statusLine: "Updating the session model…" });
     try {
-      const session = currentSession ? await updateSessionModel(baseUrl, currentSession.id, modelProfile) : null;
+      const session = await updateSessionModel(baseUrl, currentSession.id, modelProfile);
       this.s.set({
         selectedModelProfile: modelProfile,
         ...(session ? { currentSession: session } : {}),
@@ -355,6 +380,102 @@ export class NodeBridge {
       });
     } catch (error) {
       this.s.set({ statusLine: `Model selection failed: ${errorMessage(error)}` });
+    } finally {
+      this.s.set({ inputLocked: false });
+    }
+  }
+
+  async openModelPicker(): Promise<void> {
+    const { baseUrl, config } = this.s;
+    if (!config?.configured) {
+      this.s.set({ statusLine: "Configure the default relay before loading models." });
+      return;
+    }
+    if (this.s.inputLocked || this.s.compressing) return;
+
+    this.s.set({ busy: true, inputLocked: true, statusLine: "Loading models from the relay…" });
+    try {
+      const catalog = await listRelayModels(baseUrl);
+      if (catalog.models.length === 0) {
+        this.s.set({ statusLine: "The relay returned no models. Use /model add <model-id> [profile]." });
+        return;
+      }
+      this.s.set({
+        modelPicker: createModelPicker(catalog.models),
+        inputValue: "",
+        statusLine: `${catalog.models.length} relay model(s). Choose one and press Enter.`,
+      });
+    } catch (error) {
+      this.s.set({ statusLine: `Model discovery failed: ${errorMessage(error)}` });
+    } finally {
+      this.s.set({ busy: false, inputLocked: false });
+    }
+  }
+
+  async applyDiscoveredModel(model: string, target: ModelPickerTarget): Promise<void> {
+    const { baseUrl, config } = this.s;
+    const modelId = model.trim();
+    if (!config?.configured || !modelId) {
+      this.s.set({ statusLine: "The selected model is unavailable." });
+      return;
+    }
+    if (this.s.inputLocked || this.s.compressing) return;
+
+    this.s.set({ busy: true, inputLocked: true, statusLine: "Updating model configuration…" });
+    try {
+      const saved = await setLlmConfig(baseUrl, {
+        provider: config.provider,
+        base_url: config.base_url,
+        model: target === "primary" ? modelId : config.model,
+        ...(target === "review" ? { routes: { gate: { model: modelId } } } : {}),
+      });
+      this.s.set({
+        config: saved,
+        modelPicker: null,
+        statusLine:
+          target === "primary" ? `Primary model updated to ${modelId}.` : `Review model updated to ${modelId}.`,
+      });
+    } catch (error) {
+      this.s.set({ statusLine: `Model configuration failed: ${errorMessage(error)}` });
+    } finally {
+      this.s.set({ busy: false, inputLocked: false });
+    }
+  }
+
+  async addModelProfile(model: string, profileName = model): Promise<void> {
+    const { baseUrl, config } = this.s;
+    const modelId = model.trim();
+    const name = profileName.trim();
+    if (!config?.configured) {
+      this.s.set({ statusLine: "Configure the default relay before adding models." });
+      return;
+    }
+    if (!modelId || !name) {
+      this.s.set({ statusLine: "Model ID and profile name are required." });
+      return;
+    }
+    if (name === "default" || name === "base") {
+      this.s.set({ statusLine: `Profile name ${name} is reserved.` });
+      return;
+    }
+
+    this.s.set({ busy: true, inputLocked: true, statusLine: `Adding model profile ${name}…` });
+    try {
+      const saved = await setLlmConfig(baseUrl, {
+        provider: config.provider,
+        base_url: config.base_url,
+        model: config.model,
+        models: { [name]: { model: modelId } },
+      });
+      const action = config.models[name] ? "Updated" : "Added";
+      this.s.set({
+        config: saved,
+        statusLine: `${action} ${name} (${modelId}). It reuses the default relay; switch with /model ${name}.`,
+      });
+    } catch (error) {
+      this.s.set({ statusLine: `Model add failed: ${errorMessage(error)}` });
+    } finally {
+      this.s.set({ busy: false, inputLocked: false });
     }
   }
 
@@ -382,7 +503,7 @@ export class NodeBridge {
   }
 
   startNewSession(): boolean {
-    if (this.activeRequest) {
+    if ((this.activeRequest && !this.activeRequest.signal.aborted) || this.s.compressing || this.s.inputLocked) {
       this.s.set({ statusLine: "Cancel the current task before starting a new session." });
       return false;
     }
@@ -393,21 +514,28 @@ export class NodeBridge {
   }
 
   async clearCurrentSession(): Promise<boolean> {
-    if (this.activeRequest) {
+    if ((this.activeRequest && !this.activeRequest.signal.aborted) || this.s.compressing || this.s.inputLocked) {
       this.s.set({ statusLine: "Cancel the current task before clearing the session." });
       return false;
     }
 
     const { baseUrl, currentSession } = this.s;
-    if (currentSession) {
-      try {
-        await deleteSession(baseUrl, currentSession.id);
-      } catch (error) {
-        this.s.pushSystemLine(`Session deletion failed: ${errorMessage(error)}`, "error");
-        this.s.set({ statusLine: "Session was not cleared because deletion failed." });
-        return false;
-      }
+    if (!currentSession) {
+      clearTerminal();
+      this.s.startFreshSession();
+      return true;
+    }
+
+    this.s.set({ inputLocked: true, statusLine: "Clearing current session…" });
+    try {
+      await deleteSession(baseUrl, currentSession.id);
       this.s.set({ sessions: this.s.sessions.filter((session) => session.id !== currentSession.id) });
+    } catch (error) {
+      this.s.pushSystemLine(`Session deletion failed: ${errorMessage(error)}`, "error");
+      this.s.set({ statusLine: "Session was not cleared because deletion failed." });
+      return false;
+    } finally {
+      this.s.set({ inputLocked: false });
     }
 
     clearTerminal();
@@ -416,7 +544,12 @@ export class NodeBridge {
   }
 
   async resumeSession(session: Session): Promise<void> {
+    if ((this.activeRequest && !this.activeRequest.signal.aborted) || this.s.compressing || this.s.inputLocked) {
+      this.s.set({ statusLine: "Finish the current shell operation before resuming a session." });
+      return;
+    }
     const { baseUrl } = this.s;
+    this.s.set({ inputLocked: true, statusLine: `Loading ${session.id}…` });
     try {
       const messages = await listMessages(baseUrl, session.id);
       const transcript = limitTranscript(restoreTranscript(messages), TRANSCRIPT_LIMIT);
@@ -440,13 +573,23 @@ export class NodeBridge {
         panel: "chat",
         statusLine: `Resumed ${session.id} (${messages.length} messages).`,
       });
-    } catch {
-      this.s.set({ currentSession: session, panel: "chat", queuedMessages: [] });
-      this.s.pushSystemLine(`Resumed ${session.id} (history unavailable).`);
+    } catch (error) {
+      const message = errorMessage(error);
+      if (/HTTP 404\b/.test(message)) {
+        this.s.set({ sessions: this.s.sessions.filter((item) => item.id !== session.id) });
+      }
+      this.s.pushSystemLine(`Could not resume ${session.id}: ${message}`, "error");
+      this.s.set({ statusLine: "Resume failed. The current session was kept." });
+    } finally {
+      this.s.set({ inputLocked: false });
     }
   }
 
   async sendMessage(text: string, skillName?: string): Promise<boolean> {
+    if (this.s.inputLocked || this.s.compressing) {
+      this.s.set({ statusLine: "Wait for the current shell operation to finish." });
+      return false;
+    }
     if (this.activeRequest) return this.enqueueMessage(text, skillName);
 
     const ready = this.getReadySession();
@@ -525,6 +668,11 @@ export class NodeBridge {
     const title = text.trim().split(/\n+/)[0]?.slice(0, 40) || "Smith Session";
     const session = await createSession(baseUrl, title, this.s.selectedModelProfile, { signal });
     if (signal.aborted) {
+      try {
+        await deleteSession(baseUrl, session.id);
+      } catch {
+        // Best-effort cleanup prevents a cancelled first message from leaving an orphan session.
+      }
       throw signal.reason ?? new DOMException("The request was aborted.", "AbortError");
     }
     this.s.set({ currentSession: session });
@@ -550,6 +698,7 @@ export class NodeBridge {
         workingDir: process.env.SMITH_PROJECT_CWD?.trim() || process.cwd(),
         signal,
       })) {
+        if (signal.aborted) break;
         const status = applyBatchedStreamEvent(event, messageBatcher, provisionalBatcher, (next) =>
           this.s.applyEvent(next),
         );
@@ -565,6 +714,8 @@ export class NodeBridge {
         provisionalBatcher.flush();
       }
     }
+
+    if (signal.aborted) return;
 
     if (!terminalStatus) throw new Error("SSE stream ended before completion.");
     if (terminalStatus === "completed") {
@@ -602,7 +753,13 @@ export class NodeBridge {
 
   private reportRequestError(error: unknown): void {
     const message = errorMessage(error);
+    const pendingApproval = this.s.pendingApproval;
     this.s.closeTurn();
+    this.s.set({
+      pendingApproval: null,
+      approvalResolving: false,
+      ...(pendingApproval ? { transcript: removeApprovalNotice(this.s.transcript, pendingApproval.approvalId) } : {}),
+    });
     this.s.pushSystemLine(`[error] ${message}`, "error");
     this.s.set({ statusLine: "Request failed. See the transcript for details." });
   }

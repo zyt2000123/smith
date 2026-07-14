@@ -16,6 +16,12 @@ import { loadHistory, saveHistory } from "./history.js";
 import { RunProgress, StatusHud } from "./hud.js";
 import { useShellInput } from "./input.js";
 import { getVisibleList, SKILLS_PANEL_VISIBLE_ITEMS, SLASH_MENU_VISIBLE_ITEMS } from "./list-navigation.js";
+import {
+  MODEL_PICKER_VISIBLE_ITEMS,
+  type ModelPickerState,
+  modelPickerOptions,
+  modelPickerTargetLabel,
+} from "./model-picker.js";
 import type { QueuedMessage } from "./queue.js";
 import {
   buildLlmConfigInput,
@@ -63,7 +69,7 @@ function truncate(text: string, max = 80): string {
 }
 
 function armSkill(skill: SkillSummary): void {
-  getState().set({ pendingSkill: skill, panel: "chat", statusLine: `Skill ${skill.name} armed.` });
+  getState().set({ pendingSkill: skill, panel: "chat", statusLine: "" });
 }
 
 function hasTurnBefore(items: readonly { kind: string }[], index: number): boolean {
@@ -296,10 +302,12 @@ type ShellFooterProps = {
   mode: AppStore["mode"];
   busy: boolean;
   compressing: boolean;
+  inputLocked: boolean;
   statusLine: string;
   pendingApproval: PendingApproval | null;
   approvalIndex: number;
   approvalResolving: boolean;
+  modelPicker: ModelPickerState | null;
   pendingSkill: SkillSummary | null;
   queuedMessages: QueuedMessage[];
   inputValue: string;
@@ -396,6 +404,42 @@ function ApprovalPrompt({
   );
 }
 
+function ModelPickerPrompt({ picker }: { picker: ModelPickerState }) {
+  const options = modelPickerOptions(picker);
+  const { items, startIndex } = getVisibleList(options, picker.selectedIndex, MODEL_PICKER_VISIBLE_ITEMS);
+  const title =
+    picker.step === "model"
+      ? "Choose a relay model"
+      : picker.step === "target"
+        ? `Configure ${picker.model} as…`
+        : `Configure ${picker.model} as ${modelPickerTargetLabel(picker.target)}?`;
+
+  return (
+    <Box borderColor={ACCENT} borderStyle="round" flexDirection="column" marginBottom={1} paddingX={1}>
+      <Text color={ACCENT} bold>
+        Model configuration
+      </Text>
+      <Text color={INFO}>{title}</Text>
+      <Box flexDirection="column" marginTop={1}>
+        {items.map((option, index) => {
+          const optionIndex = startIndex + index;
+          return (
+            <Text
+              key={option}
+              color={picker.selectedIndex === optionIndex ? ACCENT : INFO}
+              bold={picker.selectedIndex === optionIndex}
+            >
+              {picker.selectedIndex === optionIndex ? "❯ " : "  "}
+              {option}
+            </Text>
+          );
+        })}
+      </Box>
+      <Text color={MUTED}>↑/↓ select · Enter continue · Esc cancel</Text>
+    </Box>
+  );
+}
+
 function footerPlaceholder(props: ShellFooterProps): string {
   if (props.mode === "setup") {
     return props.activeSetupField === "save" ? "Enter to save" : `Edit ${setupFieldLabel(props.activeSetupField)}`;
@@ -427,6 +471,7 @@ function SkillIndicator({ skill }: { skill: SkillSummary | null }) {
 }
 
 function FooterInput(props: ShellFooterProps) {
+  if (props.modelPicker) return <ModelPickerPrompt picker={props.modelPicker} />;
   if (props.pendingApproval) {
     return (
       <ApprovalPrompt
@@ -445,8 +490,8 @@ function FooterInput(props: ShellFooterProps) {
         <TextInput
           value={props.inputValue}
           placeholder={placeholder}
-          focus={!props.compressing}
-          showCursor={!props.compressing}
+          focus={!props.compressing && !props.inputLocked}
+          showCursor={!props.compressing && !props.inputLocked}
           mask={props.mode === "setup" && isApiKeySetupField(props.activeSetupField) ? "•" : undefined}
           onChange={props.onInputChange}
           onSubmit={props.mode === "setup" ? props.onSetupSubmit : props.onChatSubmit}
@@ -638,6 +683,7 @@ function SmithApp() {
   const panel = useS((state) => state.panel);
   const busy = useS((state) => state.busy);
   const compressing = useS((state) => state.compressing);
+  const inputLocked = useS((state) => state.inputLocked);
   const inputValue = useS((state) => state.inputValue);
   const statusLine = useS((state) => state.statusLine);
   const pendingSkill = useS((state) => state.pendingSkill);
@@ -656,6 +702,7 @@ function SmithApp() {
   const pendingApproval = useS((state) => state.pendingApproval);
   const approvalIndex = useS((state) => state.approvalIndex);
   const approvalResolving = useS((state) => state.approvalResolving);
+  const modelPicker = useS((state) => state.modelPicker);
   const skills = useS((state) => state.skills);
   const config = useS((state) => state.config);
   const currentSession = useS((state) => state.currentSession);
@@ -719,6 +766,7 @@ function SmithApp() {
     setupFlow,
     busy,
     compressing,
+    inputLocked,
     viewMode,
     slashMenuOpen,
     slashItems,
@@ -773,8 +821,10 @@ function SmithApp() {
             activeSetupField={activeSetupField}
             approvalIndex={approvalIndex}
             approvalResolving={approvalResolving}
+            modelPicker={modelPicker}
             busy={busy}
             compressing={compressing}
+            inputLocked={inputLocked}
             config={config}
             currentSession={currentSession}
             selectedModelProfile={selectedModelProfile}

@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from app.routers.config import LLMConfig, router as config_router  # noqa: E402
+from app.routers.config import LLMConfig, get_config_service, router as config_router  # noqa: E402
+from app.services import config_service as config_service_module  # noqa: E402
 from app.services.config_service import ConfigService  # noqa: E402
 from common.yaml_utils import load_yaml  # noqa: E402
 from engine.llm import model_config  # noqa: E402
@@ -153,6 +155,122 @@ def test_config_api_accepts_and_returns_nested_configuration(monkeypatch, tmp_pa
         assert response.json()["timeout_profiles"] == {"background": {"read": 240.0, "stream_read": 300.0}}
         assert "api_key" not in response.json()
         assert client.get("/api/config/llm").json()["configured"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_service_discovers_models_from_the_interactive_relay_without_returning_secrets(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+llm:
+  provider: openai
+  api_key: base-secret
+  base_url: https://base.example/v1
+  model: base-model
+  routes:
+    interactive:
+      api_key: relay-secret
+      base_url: https://relay.example/v1
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ConfigService, "_config_path", config_path)
+
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return {"object": "list", "data": [{"id": "GLM-5.2"}, {"id": "gpt-4.1"}, {"id": "GLM-5.2"}]}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, url: str, *, headers: dict[str, str]) -> FakeResponse:
+            calls.append((url, headers))
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        config_service_module,
+        "httpx",
+        SimpleNamespace(AsyncClient=lambda **_kwargs: FakeClient()),
+        raising=False,
+    )
+
+    result = await ConfigService().list_relay_models()
+
+    assert result == {"models": ["GLM-5.2", "gpt-4.1"]}
+    assert calls == [("https://relay.example/v1/models", {"Authorization": "Bearer relay-secret"})]
+    assert "secret" not in str(result)
+
+
+def test_config_api_lists_discovered_models_without_exposing_credentials() -> None:
+    class FakeConfigService:
+        async def list_relay_models(self) -> dict[str, list[str]]:
+            return {"models": ["GLM-5.2"]}
+
+    app = FastAPI()
+    app.include_router(config_router)
+    app.dependency_overrides[get_config_service] = FakeConfigService
+
+    with TestClient(app) as client:
+        response = client.get("/api/config/llm/models")
+
+    assert response.status_code == 200
+    assert response.json() == {"models": ["GLM-5.2"]}
+
+
+@pytest.mark.asyncio
+async def test_config_service_rejects_an_invalid_relay_model_list(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+llm:
+  api_key: relay-secret
+  base_url: https://relay.example/v1
+  model: default-model
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ConfigService, "_config_path", config_path)
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return {"models": ["GLM-5.2"]}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, _url: str, *, headers: dict[str, str]) -> FakeResponse:
+            assert headers == {"Authorization": "Bearer relay-secret"}
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        config_service_module,
+        "httpx",
+        SimpleNamespace(AsyncClient=lambda **_kwargs: FakeClient()),
+    )
+
+    with pytest.raises(HTTPException, match="invalid model list") as exc_info:
+        await ConfigService().list_relay_models()
+
+    assert exc_info.value.status_code == 502
 
 
 def test_persisted_api_configuration_resolves_to_engine_route(monkeypatch, tmp_path: Path) -> None:

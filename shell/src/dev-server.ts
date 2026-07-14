@@ -15,6 +15,11 @@ const REQUIRED_PATHS = [
   "/api/agent/ensure",
   "/api/agent/skills",
   "/api/agent/sessions/{session_id}/messages/stream",
+  "/api/agent/sessions/{session_id}/model",
+  "/api/agent/sessions/{session_id}/compress",
+  "/api/agent/sessions/{session_id}",
+  "/api/agent/token-stats",
+  "/api/agent/runs/{run_id}/approval",
 ] as const;
 
 type ServerConnection = {

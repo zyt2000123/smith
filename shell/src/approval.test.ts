@@ -63,3 +63,24 @@ test("structured presentation wins over generic frontend tool-name fallbacks", (
   assert.deepEqual(approvalDetails(approval), [{ label: "Commit message", value: "fix approval" }]);
   assert.equal(approvalReason(approval), "This changes repository history.");
 });
+
+test("structured approval details stay single-line and bounded", () => {
+  const details = approvalDetails({
+    runId: "run-1",
+    approvalId: "approval-1",
+    tool: "shell",
+    level: "execute",
+    reason: "Approval required",
+    arguments: {},
+    presentation: {
+      title: "Run command",
+      summary: "Smith wants to run a command.",
+      details: [{ label: "Command", value: "line one\nline two ".repeat(40) }],
+      reason: "Need approval.",
+    },
+  });
+
+  assert.equal(details[0]?.label, "Command");
+  assert.equal(details[0]?.value.includes("\n"), false);
+  assert.equal((details[0]?.value.length ?? 0) <= 240, true);
+});

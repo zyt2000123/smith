@@ -20,6 +20,7 @@ import type {
 import { CONTEXT_DISPLAY_WINDOW } from "./api.js";
 import { createEmptyConversation } from "./conversation.js";
 import { HISTORY_LIMIT } from "./history.js";
+import type { ModelPickerState } from "./model-picker.js";
 import type { QueuedMessage } from "./queue.js";
 import type { TokenTab } from "./token-stats.js";
 import {
@@ -28,6 +29,7 @@ import {
   createSystemEntry,
   createTurnEntry,
   limitTranscript,
+  removeApprovalNotice,
   type TranscriptEntry,
   type TranscriptViewMode,
 } from "./transcript-state.js";
@@ -76,12 +78,14 @@ export type AppState = {
   viewMode: TranscriptViewMode;
   pendingSkill: SkillSummary | null;
   queuedMessages: QueuedMessage[];
+  inputLocked: boolean;
   busy: boolean;
   compressing: boolean;
   runStartedAt: number | null;
   pendingApproval: PendingApproval | null;
   approvalIndex: number;
   approvalResolving: boolean;
+  modelPicker: ModelPickerState | null;
   inputValue: string;
   inputHistory: string[];
   historyIndex: number;
@@ -178,11 +182,14 @@ function applyStreamState(state: AppState, event: StreamEvent): Partial<AppState
   }
 
   if (event.type === "done") {
+    const transcript = applyStreamEvent(state.transcript, event);
     return {
       pendingApproval: null,
       approvalResolving: false,
       toolActivity: applyToolActivity(state.toolActivity, event),
-      transcript: applyStreamEvent(state.transcript, event),
+      transcript: state.pendingApproval
+        ? removeApprovalNotice(transcript, state.pendingApproval.approvalId)
+        : transcript,
     };
   }
 
@@ -232,12 +239,14 @@ export function createAppStore(initialHistory: string[] = []) {
     viewMode: "compact",
     pendingSkill: null,
     queuedMessages: [],
+    inputLocked: false,
     busy: false,
     compressing: false,
     runStartedAt: null,
     pendingApproval: null,
     approvalIndex: 0,
     approvalResolving: false,
+    modelPicker: null,
     inputValue: "",
     inputHistory: initialHistory,
     historyIndex: -1,
@@ -289,6 +298,7 @@ export function createAppStore(initialHistory: string[] = []) {
         pendingApproval: null,
         approvalIndex: 0,
         approvalResolving: false,
+        modelPicker: null,
         transcriptEpoch: s.transcriptEpoch + 1,
       })),
     clearChat: () =>
@@ -297,6 +307,7 @@ export function createAppStore(initialHistory: string[] = []) {
         pendingApproval: null,
         approvalIndex: 0,
         approvalResolving: false,
+        modelPicker: null,
         transcriptEpoch: s.transcriptEpoch + 1,
       })),
     startFreshSession: () =>
@@ -305,6 +316,7 @@ export function createAppStore(initialHistory: string[] = []) {
         pendingApproval: null,
         approvalIndex: 0,
         approvalResolving: false,
+        modelPicker: null,
         transcriptEpoch: s.transcriptEpoch + 1,
       })),
 

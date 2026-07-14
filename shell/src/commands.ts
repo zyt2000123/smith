@@ -25,7 +25,7 @@ const HELP_TEXT = [
   "- `/new` — start a fresh session and keep the current session in history",
   "- `/clear` — delete the current session and start fresh",
   "- `/compress` — summarize and persist the active session context",
-  "- `/model [name|default]` — select a configured model profile",
+  "- `/model` — discover relay models and configure the primary or review model",
   "- `/config` — edit LLM config",
   "- `/sessions` — recent sessions",
   "- `/token` — local token usage dashboard",
@@ -33,11 +33,10 @@ const HELP_TEXT = [
   "- `/mcp` — inspect configured MCP servers and tools",
   "- `/resume <id>` — resume session",
   "- `/compact` — switch to compact view; Ctrl+O toggles compact/transcript",
-  "- `/approve` / `/deny` — resolve the pending high-risk tool approval",
   "- `/exit` — quit",
 ].join("\n");
 
-export function buildSlashItems(skills: SkillSummary[]): SlashItem[] {
+export function buildSlashItems(_skills: SkillSummary[]): SlashItem[] {
   const commands: SlashItem[] = [
     {
       id: "help",
@@ -45,22 +44,6 @@ export function buildSlashItems(skills: SkillSummary[]): SlashItem[] {
       title: "/help",
       command: "/help",
       description: "Show commands.",
-      category: "Commands",
-    },
-    {
-      id: "approve",
-      kind: "command",
-      title: "/approve",
-      command: "/approve",
-      description: "Allow the pending tool call.",
-      category: "Commands",
-    },
-    {
-      id: "deny",
-      kind: "command",
-      title: "/deny",
-      command: "/deny",
-      description: "Reject the pending tool call.",
       category: "Commands",
     },
     { id: "exit", kind: "command", title: "/exit", command: "/exit", description: "Quit Smith.", category: "Commands" },
@@ -85,7 +68,7 @@ export function buildSlashItems(skills: SkillSummary[]): SlashItem[] {
       kind: "command",
       title: "/model",
       command: "/model",
-      description: "Select a configured model profile.",
+      description: "Select or add a model profile.",
       category: "Commands",
     },
     {
@@ -154,18 +137,7 @@ export function buildSlashItems(skills: SkillSummary[]): SlashItem[] {
     },
   ];
 
-  return [
-    ...commands,
-    ...skills.map((skill) => ({
-      id: `sk-${skill.name}`,
-      kind: "skill" as const,
-      title: skill.name,
-      command: `/${skill.name}`,
-      description: skill.description || "Run skill.",
-      category: "Skills",
-      skill,
-    })),
-  ];
+  return commands;
 }
 
 export function filterSlash(items: SlashItem[], input: string): SlashItem[] {
@@ -252,7 +224,7 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
       await context.bridge.sendMessage(prompt, skill.name);
       return;
     }
-    state.set({ pendingSkill: skill, panel: "chat", statusLine: `Skill ${skill.name} armed.` });
+    state.set({ pendingSkill: skill, panel: "chat", statusLine: "" });
   },
   "/mcp": async (_args, context) => {
     await context.bridge.refreshMcpServers();
@@ -263,18 +235,16 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
     const state = context.getState();
     const requested = args[0];
     if (!requested) {
-      const models = Object.entries(state.config?.models ?? {});
-      const active = state.selectedModelProfile ? `Active: ${state.selectedModelProfile}` : "Active: default model";
-      state.pushSystemLine(
-        [
-          active,
-          models.length
-            ? `Configured profiles: ${models.map(([name]) => name).join(", ")}`
-            : "No named model profiles configured.",
-          "Use /model <name> or /model default.",
-        ].join("\n"),
-      );
-      state.set({ panel: "chat", statusLine: "Model selection." });
+      await context.bridge.openModelPicker();
+      return;
+    }
+    if (requested === "add") {
+      const [model, profileName = model, ...extra] = args.slice(1);
+      if (!model || !profileName || extra.length > 0) {
+        state.set({ statusLine: "Usage: /model add <model-id> [profile]." });
+        return;
+      }
+      await context.bridge.addModelProfile(model, profileName);
       return;
     }
     await context.bridge.selectModel(requested === "default" || requested === "base" ? null : requested);
@@ -323,5 +293,5 @@ export async function runShellCommand(raw: string, context: CommandContext): Pro
     return;
   }
 
-  state.set({ pendingSkill: skill, panel: "chat", statusLine: `Skill ${skill.name} armed.` });
+  state.set({ pendingSkill: skill, panel: "chat", statusLine: "" });
 }

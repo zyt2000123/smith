@@ -1,4 +1,4 @@
-import { Box, Text } from "ink";
+import { Box, Text, useWindowSize } from "ink";
 
 import type { TokenDay, TokenStats } from "./api.js";
 import { ACCENT, INFO, MUTED, WARNING } from "./theme.js";
@@ -29,14 +29,15 @@ function Stat({ label, value }: { label: string; value: string | number }) {
 }
 
 function Tabs({ selected }: { selected: TokenTab }) {
+  const { columns } = useWindowSize();
   return (
-    <Box gap={2} marginBottom={1}>
+    <Box flexWrap="wrap" gap={2} marginBottom={1}>
       {TOKEN_TABS.map((tab) => (
         <Text key={tab} color={tab === selected ? ACCENT : MUTED} bold={tab === selected}>
           {TOKEN_TAB_LABELS[tab]}
         </Text>
       ))}
-      <Text color={MUTED}>←/→ switch · Esc back</Text>
+      <Text color={MUTED}>{columns < 64 ? "←/→ · Esc" : "←/→ switch · Esc back"}</Text>
     </Box>
   );
 }
@@ -80,9 +81,8 @@ function StatsView({ stats }: { stats: TokenStats }) {
           <Text color={MUTED}>{label.padEnd(3)} </Text>
           {weeks.map((week) => {
             const cell = week[row];
-            const weekKey = week.find((item) => item !== null)?.date ?? `empty-${dayKey}`;
             return (
-              <Text key={`${weekKey}-${dayKey}`} color={cell ? heatColor(cell.level) : HEAT_COLORS[0]}>
+              <Text key={`${week.key}-${dayKey}`} color={cell ? heatColor(cell.level) : HEAT_COLORS[0]}>
                 {cell ? "■" : "·"}
               </Text>
             );
