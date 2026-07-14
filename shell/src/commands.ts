@@ -17,12 +17,14 @@ type CommandContext = {
   bridge: NodeBridge;
   exit: () => void;
   getState: () => AppStore;
+  workingDir?: string;
 };
 
 type CommandHandler = (args: string[], context: CommandContext) => Promise<void> | void;
 
 const HELP_TEXT = [
   "- `/new` — start a fresh session and keep the current session in history",
+  "- `/init` — create a project .smith/SMITH.md instruction template",
   "- `/clear` — delete the current session and start fresh",
   "- `/compress` — summarize and persist the active session context",
   "- `/model` — discover relay models and configure the primary or review model",
@@ -53,6 +55,14 @@ export function buildSlashItems(_skills: SkillSummary[]): SlashItem[] {
       title: "/new",
       command: "/new",
       description: "New session; keep history.",
+      category: "Commands",
+    },
+    {
+      id: "init",
+      kind: "command",
+      title: "/init",
+      command: "/init",
+      description: "Create a project instruction template.",
       category: "Commands",
     },
     {
@@ -196,6 +206,24 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
   "/exit": (_args, context) => context.exit(),
   "/new": async (_args, context) => {
     context.bridge.startNewSession();
+  },
+  "/init": async (args, context) => {
+    const state = context.getState();
+    if (args.length > 0) {
+      state.set({ statusLine: "Usage: /init" });
+      return;
+    }
+
+    try {
+      const result = await context.bridge.initializeProject(context.workingDir ?? process.cwd());
+      state.set({
+        statusLine: result.created
+          ? `Created ${result.path}. Add your project instructions.`
+          : `Already exists: ${result.path} (not changed).`,
+      });
+    } catch {
+      state.set({ statusLine: "Project initialization failed. Review the project path and permissions." });
+    }
   },
   "/config": (_args, context) => openConfig(context),
   "/approve": async (_args, context) => {

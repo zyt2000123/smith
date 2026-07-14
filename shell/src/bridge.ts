@@ -13,6 +13,7 @@ import {
   ensureAgentProfile,
   getLlmConfig,
   getTokenStats,
+  initializeProjectInstructions,
   type LlmConfigInput,
   listMcpServers,
   listMessages,
@@ -334,6 +335,12 @@ export class NodeBridge {
     } finally {
       this.s.set({ inputLocked: false });
     }
+  }
+
+  async initializeProject(workingDir: string) {
+    const { baseUrl } = this.s;
+    if (!baseUrl) throw new Error("Shell is not ready yet.");
+    return initializeProjectInstructions(baseUrl, workingDir);
   }
 
   async openTokenStats(): Promise<void> {

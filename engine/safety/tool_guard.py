@@ -11,7 +11,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from engine.safety.fact_gate import _is_read_only_shell
 from engine.tool.interface import ToolCall, ToolDefinition
 
 
@@ -68,7 +67,7 @@ class FileGuard:
     _SENSITIVE_DIRS = frozenset({".git"})
 
     def __init__(self, allowed_dirs: list[Path] | None = None):
-        if allowed_dirs:
+        if allowed_dirs is not None:
             self._allowed = [p.resolve() for p in allowed_dirs]
         else:
             self._allowed = [Path.home().resolve(), Path("/tmp").resolve(), Path.cwd().resolve()]
@@ -182,12 +181,16 @@ class SessionWhitelist:
     def __init__(self) -> None:
         self._allowed_tools: set[str] = set()
         self._allowed_paths: set[str] = set()
+        self._allowed_files: set[str] = set()
 
     def allow_tool(self, tool_name: str) -> None:
         self._allowed_tools.add(tool_name)
 
     def allow_path(self, path: str) -> None:
         self._allowed_paths.add(str(Path(path).resolve()))
+
+    def allow_file(self, path: str) -> None:
+        self._allowed_files.add(str(Path(path).resolve()))
 
     def is_tool_allowed(self, tool_name: str) -> bool:
         return tool_name in self._allowed_tools
@@ -197,6 +200,8 @@ class SessionWhitelist:
             resolved = Path(path).resolve()
         except (ValueError, OSError):
             return False
+        if str(resolved) in self._allowed_files:
+            return True
         for p in self._allowed_paths:
             base = Path(p)
             try:
@@ -209,6 +214,7 @@ class SessionWhitelist:
     def clear(self) -> None:
         self._allowed_tools.clear()
         self._allowed_paths.clear()
+        self._allowed_files.clear()
 
 
 # ── Shell path extraction (req #4: redirects + pipes) ───────
@@ -287,6 +293,16 @@ class ToolGuard:
         """Bind tool definitions after registry load so metadata-first checks apply."""
         self._tool_registry = definitions
 
+    def set_allowed_dirs(self, allowed_dirs: list[Path]) -> None:
+        """Replace the file boundary for the current request's project root."""
+        self.file_guard = FileGuard(allowed_dirs)
+
+    def allow_project_instruction_path(self, project_root: Path) -> Path:
+        """Whitelist only the canonical project instruction file for an explicit /init action."""
+        target = project_root.resolve() / ".smith" / "SMITH.md"
+        self.whitelist.allow_file(str(target))
+        return target
+
     def _resolve_path_metadata(self, tool_name: str) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
         """Return (path_args, list_path_args, is_write) for *tool_name*.
 
@@ -329,11 +345,20 @@ class ToolGuard:
 
         if tool_call.name == "shell":
             cmd = tool_call.arguments.get("command", "")
-            read_paths, write_paths = _extract_shell_paths(cmd)
-            for rp in read_paths:
-                paths_to_check.append((rp, False))
+            _, write_paths = _extract_shell_paths(cmd)
             for wp in write_paths:
-                paths_to_check.append((wp, True))
+                # A raw shell command cannot be safely parsed into a complete
+                # filesystem access list.  It is therefore always approved by
+                # the user (see the shell metadata), rather than pretending a
+                # partial regex enforces the project boundary.  Preserve the
+                # non-bypassable platform-runtime write protection for literal
+                # paths, which is independent of the project boundary.
+                try:
+                    candidate = Path(wp).expanduser().resolve()
+                except (ValueError, OSError):
+                    continue
+                if candidate.is_relative_to(_PLATFORM_DATA_ROOT):
+                    paths_to_check.append((wp, True))
 
         for p, writing in paths_to_check:
             result = self.file_guard.check_path(p, writing=writing)
@@ -374,13 +399,16 @@ class ToolGuard:
         return "policy" if tool_name in self._APPROVAL_TOOLS else "never"
 
     def _requires_approval(self, tool_call: ToolCall) -> bool:
+        # A shell command is opaque host execution.  The path extractor above
+        # intentionally does not claim to sandbox shell grammar, so even a
+        # command that looks read-only must be explicitly approved.
+        if tool_call.name == "shell":
+            return True
         policy = self._resolve_approval_policy(tool_call.name)
         if policy == "never":
             return False
         if policy == "always":
             return True
-        if tool_call.name == "shell":
-            return not _is_read_only_shell(str(tool_call.arguments.get("command") or ""))
         if tool_call.name == "git_ops":
             return str(tool_call.arguments.get("action") or "").lower() not in self._READ_ONLY_GIT_ACTIONS
         return True

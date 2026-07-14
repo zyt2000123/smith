@@ -53,3 +53,23 @@ def test_token_stats_route_returns_local_usage_dashboard_data() -> None:
     assert response.status_code == 200
     assert response.json()["total_tokens"] == 15
     assert response.json()["year"] == 2026
+
+
+def test_project_instruction_route_delegates_to_agent_service() -> None:
+    calls: list[str] = []
+
+    class FakeAgentService:
+        async def initialize_project_instructions(self, working_dir: str) -> dict:
+            calls.append(working_dir)
+            return {"path": "/workspace/project/.smith/SMITH.md", "created": True}
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_agent_service] = lambda: FakeAgentService()
+
+    with TestClient(app) as client:
+        response = client.put("/api/agent/project-instructions", json={"working_dir": "/workspace/project"})
+
+    assert response.status_code == 200
+    assert response.json() == {"path": "/workspace/project/.smith/SMITH.md", "created": True}
+    assert calls == ["/workspace/project"]

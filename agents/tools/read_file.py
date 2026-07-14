@@ -24,7 +24,8 @@ TOOL_META = {
             }
         },
         "required": ["path"]
-    }
+    },
+    "path_args": ["path"],
 }
 
 MAX_READ_BYTES = 50 * 1024  # 50KB preview budget per call

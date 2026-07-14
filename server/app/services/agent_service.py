@@ -17,6 +17,7 @@ from ..schemas.mcp import McpServerOut
 from .auto_task_service import AutoTaskService
 from .agent_profile_service import AgentProfileService
 from .profile_file_service import ProfileFileService
+from .project_instruction_service import ProjectInstructionService
 from .run_state_service import RunStateService
 from .session_service import SessionService
 from .skill_service import SkillService
@@ -48,6 +49,7 @@ class AgentService:
         run_state_service: RunStateService | Any | None = None,
         mcp_service: McpService | Any | None = None,
         token_stats_service: TokenStatsService | Any | None = None,
+        project_instruction_service: ProjectInstructionService | Any | None = None,
     ) -> None:
         agent_profile_repo = AgentProfileRepo()
         session_repo = SessionRepo()
@@ -70,6 +72,7 @@ class AgentService:
         self.stats_service = stats_service or StatsService()
         self.run_state_service = run_state_service or RunStateService()
         self.mcp_service = mcp_service or McpService()
+        self.project_instruction_service = project_instruction_service or ProjectInstructionService()
 
     async def ensure_profile(self) -> AgentProfileOut:
         from ..schemas.agent_profile import AgentProfileCreate
@@ -210,6 +213,10 @@ class AgentService:
     async def update_file(self, filename: str, content: str) -> dict:
         await self._profile_id()
         return await self.profile_file_service.update_file(filename, content)
+
+    async def initialize_project_instructions(self, working_dir: str) -> dict:
+        result = await self.project_instruction_service.initialize(working_dir)
+        return result.model_dump()
 
     async def get_stats(self) -> dict:
         return await self.stats_service.get_agent_stats(await self._profile_id())

@@ -644,13 +644,15 @@ async def react_event_loop(
         round_had_failure = False
         round_had_preflight = False
         for tc in response.tool_calls:
-            call = ToolCall(
-                id=tc.id,
-                name=tc.name,
-                arguments=tc.arguments,
-                idempotency_key=tc.id,
+            call = tool_registry.normalize_call(
+                ToolCall(
+                    id=tc.id,
+                    name=tc.name,
+                    arguments=tc.arguments,
+                    idempotency_key=tc.id,
+                )
             )
-            yield ExecutionEvent(EventType.TOOL_CALL_START, {"name": tc.name, "id": tc.id, "arguments": tc.arguments})
+            yield ExecutionEvent(EventType.TOOL_CALL_START, {"name": tc.name, "id": tc.id, "arguments": call.arguments})
 
             decision = policy.evaluate(call)
             if not decision.allowed:

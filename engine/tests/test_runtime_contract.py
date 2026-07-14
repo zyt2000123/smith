@@ -19,7 +19,9 @@ from engine.execution.run_state import RunStateStore, RunStatus
 from engine.execution.runtime import EngineRequest, RuntimeContext, RuntimeServices
 from engine.identity_catalog import IdentityCatalog
 from engine.llm.client import ChatResponse, ToolCallData
+from engine.safety.tool_guard import ToolGuard
 from engine.skill.registry import SkillRegistry
+from engine.tool.interface import ToolCall
 from engine.tool.registry import ToolRegistry
 
 
@@ -167,6 +169,60 @@ routes: []
         skill_registry=SkillRegistry(),
     )
     return runtime, services, llm
+
+
+def test_prepare_runtime_scopes_tool_paths_to_the_request_working_dir(tmp_path: Path) -> None:
+    async def run() -> tuple[ToolCall, ToolCall, ToolCall, ToolGuard]:
+        runtime, services, _ = _runtime(tmp_path)
+        project_dir = tmp_path / "OpenAI_project"
+        project_dir.mkdir()
+        services.tool_registry.register(
+            "write_file",
+            "",
+            {"type": "object", "properties": {"path": {"type": "string"}}},
+            lambda **_kwargs: "OK",
+            path_args=("path",),
+            is_write_tool=True,
+        )
+        services.tool_registry.register(
+            "shell",
+            "",
+            {"type": "object", "properties": {"cwd": {"type": "string"}}},
+            lambda **_kwargs: "OK",
+            path_args=("cwd",),
+        )
+        guard = ToolGuard(tmp_path / "missing-rules.json")
+        services.tool_guard = guard
+
+        await prepare_runtime(
+            EngineRequest(message="Inspect the project", working_dir=str(project_dir)),
+            runtime,
+            services,
+        )
+        write = services.tool_registry.normalize_call(
+            ToolCall(
+                id="write",
+                name="write_file",
+                arguments={"path": "app/main.py", "content": "x"},
+            )
+        )
+        shell = services.tool_registry.normalize_call(
+            ToolCall(id="shell", name="shell", arguments={"command": "test -d . 2>/dev/null"})
+        )
+        escaped = services.tool_registry.normalize_call(
+            ToolCall(id="escaped", name="write_file", arguments={"path": "../outside.txt", "content": "x"})
+        )
+        return write, shell, escaped, guard
+
+    write, shell, escaped, guard = asyncio.run(run())
+
+    assert write.arguments["path"] == str(
+        (tmp_path / "OpenAI_project" / "app" / "main.py").resolve()
+    )
+    assert shell.arguments["cwd"] == str((tmp_path / "OpenAI_project").resolve())
+    assert guard.check(write).allowed
+    assert guard.check(shell).allowed
+    assert not guard.check(escaped).allowed
 
 
 def test_prepare_runtime_binds_memory_ops_but_keeps_it_hidden(tmp_path: Path) -> None:

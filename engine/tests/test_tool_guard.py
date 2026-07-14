@@ -231,6 +231,35 @@ def test_session_tool_whitelist_does_not_bypass_sensitive_paths(tmp_path: Path):
     assert result.needs_confirmation
 
 
+def test_project_instruction_whitelist_allows_only_smith_md(tmp_path: Path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    guard = ToolGuard(tmp_path / "missing-rules.json", allowed_dirs=[])
+    smith_file = project_root / ".smith" / "SMITH.md"
+
+    assert not guard.check(
+        ToolCall(id="t", name="write_file", arguments={"path": str(smith_file), "content": "rules"})
+    ).allowed
+
+    assert guard.allow_project_instruction_path(project_root) == smith_file
+    result = guard.check(
+        ToolCall(id="t", name="write_file", arguments={"path": str(smith_file), "content": "rules"})
+    )
+    assert result.allowed
+    assert result.approval_required
+
+    assert not guard.check(
+        ToolCall(id="t", name="write_file", arguments={"path": str(project_root / "README.md"), "content": "no"})
+    ).allowed
+    assert not guard.check(
+        ToolCall(
+            id="t",
+            name="write_file",
+            arguments={"path": str(smith_file / "escaped.md"), "content": "no"},
+        )
+    ).allowed
+
+
 def test_write_tool_requests_approval_after_hard_guard_passes(tmp_path: Path):
     guard = ToolGuard(tmp_path / "missing-rules.json", allowed_dirs=[tmp_path])
 

@@ -23,6 +23,8 @@ TOOL_META = {
         },
         "required": ["path", "old_string", "new_string"],
     },
+    "path_args": ["path"],
+    "is_write_tool": True,
 }
 
 

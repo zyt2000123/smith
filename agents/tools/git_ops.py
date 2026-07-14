@@ -60,6 +60,8 @@ TOOL_META = {
         },
         "required": ["action"],
     },
+    "path_args": ["cwd", "path"],
+    "list_path_args": ["files"],
 }
 
 MAX_OUTPUT = 10 * 1024  # 10KB

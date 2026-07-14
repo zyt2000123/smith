@@ -341,8 +341,14 @@ async def prepare_runtime(
     route = route_task(request.message, catalog, identity_id=request.identity_id)
     identity = route.identity
     state_dir = _identity_state_dir(runtime, identity)
+    wd = (
+        Path(request.working_dir).expanduser().resolve()
+        if request.working_dir
+        else Path.cwd().resolve()
+    )
 
     services.tool_registry.load_providers(runtime.agents_dir / "tools")
+    services.tool_registry.bind_working_directory(wd)
     _bind_memory_ops_tool(services, state_dir)
     profile_config = await _load_profile_config(runtime)
     await _register_mcp_tools(profile_config, runtime, services)
@@ -358,6 +364,8 @@ async def prepare_runtime(
 
     # 工具全部注册后把定义绑给守卫，metadata-first 安全检查才能生效。
     if services.tool_guard is not None:
+        if request.working_dir:
+            services.tool_guard.set_allowed_dirs([wd])
         services.tool_guard.bind_definitions(services.tool_registry.definitions())
 
     from common.config import BUILTIN_SKILLS_DIR, PATHS
@@ -378,7 +386,6 @@ async def prepare_runtime(
         include_durable=False,
     )
     assembler = PromptAssembler()
-    wd = Path(request.working_dir) if request.working_dir else Path.cwd()
     system_prompt = assembler.assemble(
         runtime.profile_dir, services.tool_registry, services.skill_registry,
         _runtime_prompt_context(runtime, identity), retrieved_memory=retrieved,

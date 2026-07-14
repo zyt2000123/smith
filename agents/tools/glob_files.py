@@ -17,6 +17,7 @@ TOOL_META = {
         },
         "required": ["pattern"],
     },
+    "path_args": ["path"],
 }
 
 MAX_RESULTS = 200
