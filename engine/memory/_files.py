@@ -40,15 +40,17 @@ def contains_secret(text: str) -> bool:
 _INJECTION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?i)ignore\s+(?:all\s+)?previous\s+instructions"),
     re.compile(r"(?i)you\s+(?:are|must)\s+now\s+(?:a|an|the)?\s*\w+"),
-    re.compile(r"(?i)^system\s*:", re.MULTILINE),
+    re.compile(r"(?i)(?:^|\s)system\s*:"),
     re.compile(r"(?i)new\s+(?:system\s+)?(?:role|instruction|policy)"),
     re.compile(r"(?i)override\s+(?:your|the|all)\s+(?:instructions|rules|policy)"),
+    re.compile(r"忽略(?:之前|上面|先前)(?:的)?(?:所有|全部)?(?:指令|指示|规则|提示)"),
 ]
 
 
 def contains_injection(text: str) -> bool:
     """Deterministic heuristic for prompt-injection payloads in memory content."""
-    return any(p.search(text) for p in _INJECTION_PATTERNS)
+    normalized = re.sub(r"\s+", " ", text).strip()
+    return any(p.search(normalized) for p in _INJECTION_PATTERNS)
 
 
 def sanitize_memory_text(text: str) -> tuple[str, int, int]:
@@ -58,16 +60,19 @@ def sanitize_memory_text(text: str) -> tuple[str, int, int]:
     lines.  Line-level removal preserves unrelated user-authored context while
     ensuring a known unsafe fragment cannot survive into the prompt layer.
     """
+    lines = text.splitlines()
     clean: list[str] = []
     secrets_removed = 0
     injections_removed = 0
-    for line in text.splitlines():
+    for line in lines:
         if contains_secret(line):
             secrets_removed += 1
         elif contains_injection(line):
             injections_removed += 1
         else:
             clean.append(line)
+    if contains_injection(text) and injections_removed == 0:
+        return "", secrets_removed, 1
     return "\n".join(clean), secrets_removed, injections_removed
 
 

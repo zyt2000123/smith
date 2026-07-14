@@ -1,0 +1,402 @@
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from datetime import date, datetime, timedelta, timezone
+import json
+from pathlib import Path
+from typing import Any
+
+import aiosqlite
+
+from common.config import AGENT_DIR
+
+from ..infrastructure.database import get_app_db
+
+DbProvider = Callable[[], Awaitable[aiosqlite.Connection]]
+
+
+class TokenStatsService:
+    """Persist and aggregate Agent-Smith's local token usage events."""
+
+    def __init__(
+        self,
+        db_provider: DbProvider = get_app_db,
+        *,
+        trace_root: Path | None = None,
+    ) -> None:
+        self._db_provider = db_provider
+        self._trace_root = Path(trace_root or AGENT_DIR)
+
+    @staticmethod
+    def _non_negative_int(value: object) -> int:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, (int, float)) and value >= 0:
+            return int(value)
+        return 0
+
+    async def record_usage(
+        self,
+        *,
+        session_id: str,
+        run_id: str | None,
+        project_name: str,
+        project_path: str,
+        model: str,
+        usage: dict[str, Any] | None,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        if not isinstance(usage, dict):
+            return
+
+        input_tokens = self._non_negative_int(usage.get("input_tokens"))
+        output_tokens = self._non_negative_int(usage.get("output_tokens"))
+        total_tokens = self._non_negative_int(usage.get("total_tokens"))
+        if total_tokens == 0:
+            total_tokens = input_tokens + output_tokens
+        if total_tokens == 0:
+            return
+
+        db = await self._db_provider()
+        await db.execute(
+            """
+            INSERT INTO token_usage_events (
+                session_id, run_id, project_name, project_path, model,
+                input_tokens, output_tokens, total_tokens, occurred_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                run_id,
+                project_name.strip(),
+                project_path.strip(),
+                model.strip() or "unknown",
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                (occurred_at or datetime.now(timezone.utc)).isoformat(),
+            ),
+        )
+        await db.commit()
+
+    async def sync_from_traces(self) -> int:
+        """Import exact token events from durable run traces, once per trace record.
+
+        Trace values that were redacted by older versions are ignored because they
+        are not trustworthy numeric usage data. New traces preserve these metrics
+        while continuing to redact secrets.
+        """
+        runs_dir = self._trace_root / "runs"
+        traces_dir = self._trace_root / "traces"
+        if not runs_dir.is_dir() or not traces_dir.is_dir():
+            return await self._sync_message_estimates(await self._db_provider())
+
+        run_sessions: dict[str, str] = {}
+        for path in runs_dir.glob("*.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            run_id = payload.get("run_id") or path.stem
+            session_id = payload.get("session_id")
+            if isinstance(run_id, str) and isinstance(session_id, str) and session_id:
+                run_sessions[run_id] = session_id
+
+        if not run_sessions:
+            return await self._sync_message_estimates(await self._db_provider())
+
+        db = await self._db_provider()
+        imported = 0
+        for path in traces_dir.glob("*.jsonl"):
+            run_id = path.stem
+            session_id = run_sessions.get(run_id)
+            if not session_id:
+                continue
+            project_path = ""
+            model = "unknown"
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line_number, line in enumerate(lines, start=1):
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                event_type = record.get("type")
+                data = record.get("data")
+                if not isinstance(data, dict):
+                    continue
+                if event_type == "run_started":
+                    candidate = data.get("project_path")
+                    if isinstance(candidate, str):
+                        project_path = candidate.strip()
+                    continue
+                if event_type == "raw_response_event":
+                    if data.get("type") != "response.created":
+                        continue
+                    response_data = data.get("data")
+                    candidate = response_data.get("model") if isinstance(response_data, dict) else None
+                    if isinstance(candidate, str) and candidate.strip():
+                        model = candidate.strip()
+                    continue
+                if event_type != "token_usage":
+                    continue
+
+                input_tokens = self._non_negative_int(data.get("input_tokens"))
+                output_tokens = self._non_negative_int(data.get("output_tokens"))
+                total_tokens = self._non_negative_int(data.get("total_tokens"))
+                if total_tokens == 0:
+                    total_tokens = input_tokens + output_tokens
+                if total_tokens == 0:
+                    continue
+
+                timestamp = self._parse_timestamp(record.get("timestamp"))
+                source_key = f"{run_id}:{record.get('seq', line_number)}"
+                cursor = await db.execute(
+                    """
+                    INSERT OR IGNORE INTO token_usage_events (
+                        session_id, run_id, source_key, project_name, project_path, model,
+                        input_tokens, output_tokens, total_tokens, occurred_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        run_id,
+                        source_key,
+                        Path(project_path).name if project_path else "",
+                        project_path,
+                        model,
+                        input_tokens,
+                        output_tokens,
+                        total_tokens,
+                        (timestamp or datetime.now(timezone.utc)).isoformat(),
+                    ),
+                )
+                imported += max(cursor.rowcount, 0)
+        await db.commit()
+        return imported + await self._sync_message_estimates(db)
+
+    async def _sync_message_estimates(self, db: aiosqlite.Connection) -> int:
+        """Fill the first dashboard from local transcripts when exact usage is absent.
+
+        This is intentionally marked by a ``message:`` source key. It is a local
+        text-token estimate, not provider billing usage, and is replaced for a
+        session as soon as an exact usage event exists for that session.
+        """
+        try:
+            exact_sessions = await db.execute_fetchall(
+                """
+                SELECT DISTINCT session_id
+                FROM token_usage_events
+                WHERE source_key IS NULL OR source_key NOT LIKE 'message:%'
+                """
+            )
+            if exact_sessions:
+                placeholders = ",".join("?" for _ in exact_sessions)
+                await db.execute(
+                    "DELETE FROM token_usage_events "
+                    "WHERE source_key LIKE 'message:%' AND session_id IN (" + placeholders + ")",
+                    [row["session_id"] for row in exact_sessions],
+                )
+
+            rows = await db.execute_fetchall(
+                """
+                SELECT m.id, m.session_id, m.role, m.content, m.created_at
+                FROM messages m
+                JOIN sessions s ON s.id=m.session_id
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM token_usage_events e
+                    WHERE e.session_id=m.session_id
+                      AND (e.source_key IS NULL OR e.source_key NOT LIKE 'message:%')
+                )
+                ORDER BY m.created_at ASC
+                """
+            )
+        except aiosqlite.OperationalError:
+            # Keep the service usable with a minimal/custom database in tests or
+            # during a partially completed schema migration.
+            return 0
+
+        try:
+            import tiktoken
+
+            encoding = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            encoding = None
+
+        imported = 0
+        for row in rows:
+            content = str(row["content"] or "")
+            if not content.strip():
+                continue
+            if encoding is not None:
+                try:
+                    token_count = len(encoding.encode(content, disallowed_special=()))
+                except Exception:
+                    token_count = max(1, len(content) // 4)
+            else:
+                token_count = max(1, len(content) // 4)
+            input_tokens = token_count if row["role"] != "assistant" else 0
+            output_tokens = token_count if row["role"] == "assistant" else 0
+            cursor = await db.execute(
+                """
+                INSERT OR IGNORE INTO token_usage_events (
+                    session_id, run_id, source_key, project_name, project_path, model,
+                    input_tokens, output_tokens, total_tokens, occurred_at
+                ) VALUES (?, NULL, ?, '', '', 'local-estimate', ?, ?, ?, ?)
+                """,
+                (
+                    row["session_id"],
+                    f"message:{row['id']}",
+                    input_tokens,
+                    output_tokens,
+                    token_count,
+                    str(row["created_at"] or datetime.now(timezone.utc).isoformat()),
+                ),
+            )
+            imported += max(cursor.rowcount, 0)
+        await db.commit()
+        return imported
+
+    @staticmethod
+    def _parse_timestamp(value: object) -> datetime | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+    async def get_stats(self, agent_id: str, year: int | None = None) -> dict[str, Any]:
+        selected_year = year or datetime.now(timezone.utc).year
+        start = date(selected_year, 1, 1)
+        end = date(selected_year + 1, 1, 1)
+        db = await self._db_provider()
+        rows = await db.execute_fetchall(
+            """
+            SELECT e.session_id, e.model, e.input_tokens, e.output_tokens,
+                   e.total_tokens, e.occurred_at, e.source_key
+            FROM token_usage_events e
+            JOIN sessions s ON s.id = e.session_id
+            WHERE s.agent_id=?
+              AND substr(e.occurred_at, 1, 10) >= ?
+              AND substr(e.occurred_at, 1, 10) < ?
+            ORDER BY e.occurred_at ASC
+            """,
+            (agent_id, start.isoformat(), end.isoformat()),
+        )
+
+        daily: dict[str, dict[str, Any]] = {}
+        models: dict[str, dict[str, Any]] = {}
+        hour_totals: dict[int, int] = {}
+        total_input = 0
+        total_output = 0
+        total_tokens = 0
+        sessions: set[str] = set()
+        estimated = False
+
+        for row in rows:
+            day = str(row["occurred_at"])[:10]
+            model = str(row["model"] or "unknown")
+            estimated = estimated or str(row["source_key"] or "").startswith("message:")
+            input_tokens = self._non_negative_int(row["input_tokens"])
+            output_tokens = self._non_negative_int(row["output_tokens"])
+            event_total = self._non_negative_int(row["total_tokens"])
+            if event_total == 0:
+                event_total = input_tokens + output_tokens
+
+            day_stat = daily.setdefault(
+                day,
+                {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "sessions": set()},
+            )
+            day_stat["input_tokens"] += input_tokens
+            day_stat["output_tokens"] += output_tokens
+            day_stat["total_tokens"] += event_total
+            day_stat["sessions"].add(str(row["session_id"]))
+
+            model_stat = models.setdefault(
+                model,
+                {"model": model, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "sessions": set()},
+            )
+            model_stat["input_tokens"] += input_tokens
+            model_stat["output_tokens"] += output_tokens
+            model_stat["total_tokens"] += event_total
+            model_stat["sessions"].add(str(row["session_id"]))
+
+            total_input += input_tokens
+            total_output += output_tokens
+            total_tokens += event_total
+            sessions.add(str(row["session_id"]))
+
+            try:
+                hour = int(str(row["occurred_at"])[11:13])
+            except (TypeError, ValueError):
+                hour = None
+            if hour is not None and 0 <= hour <= 23:
+                hour_totals[hour] = hour_totals.get(hour, 0) + event_total
+
+        daily_output: list[dict[str, Any]] = []
+        cursor = start
+        while cursor < end:
+            key = cursor.isoformat()
+            value = daily.get(key, {})
+            daily_output.append(
+                {
+                    "date": key,
+                    "input_tokens": int(value.get("input_tokens", 0)),
+                    "output_tokens": int(value.get("output_tokens", 0)),
+                    "total_tokens": int(value.get("total_tokens", 0)),
+                    "sessions": len(value.get("sessions", set())),
+                }
+            )
+            cursor += timedelta(days=1)
+
+        active_dates = [date.fromisoformat(item["date"]) for item in daily_output if item["total_tokens"] > 0]
+        current_streak, longest_streak = self._streaks(active_dates)
+        model_output = [
+            {
+                "model": item["model"],
+                "input_tokens": item["input_tokens"],
+                "output_tokens": item["output_tokens"],
+                "total_tokens": item["total_tokens"],
+                "sessions": len(item["sessions"]),
+            }
+            for item in sorted(models.values(), key=lambda value: (-value["total_tokens"], value["model"]))
+        ]
+
+        return {
+            "year": selected_year,
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "total_tokens": total_tokens,
+            "session_count": len(sessions),
+            "active_days": len(active_dates),
+            "current_streak": current_streak,
+            "longest_streak": longest_streak,
+            "favorite_model": model_output[0]["model"] if model_output else None,
+            "peak_hour": max(hour_totals, key=hour_totals.get) if hour_totals else None,
+            "daily": daily_output,
+            "models": model_output,
+            "estimated": estimated,
+        }
+
+    @staticmethod
+    def _streaks(active_dates: list[date]) -> tuple[int, int]:
+        if not active_dates:
+            return 0, 0
+        ordered = sorted(set(active_dates))
+        longest = current = 1
+        for previous, item in zip(ordered, ordered[1:]):
+            if item == previous + timedelta(days=1):
+                current += 1
+            else:
+                current = 1
+            longest = max(longest, current)
+        return current, longest

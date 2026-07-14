@@ -59,6 +59,7 @@ _ROUTE_FIELDS = (
     "provider",
     "stream",
     "max_output_tokens",
+    "context_window",
 )
 
 
@@ -110,6 +111,14 @@ def build_llm_client(config: dict) -> LLMPort:
     ):
         raise YamlConfigError("LLM max_output_tokens must be a positive integer")
 
+    context_window = config.get("context_window")
+    if context_window is not None and (
+        isinstance(context_window, bool)
+        or not isinstance(context_window, int)
+        or context_window <= 0
+    ):
+        raise YamlConfigError("LLM context_window must be a positive integer")
+
     timeout = config.get("timeout")
     if timeout is None:
         timeouts = None
@@ -146,6 +155,7 @@ def build_llm_client(config: dict) -> LLMPort:
         stream=stream,
         timeouts=resolved_timeouts,
         max_output_tokens=max_output_tokens,
+        context_window=context_window,
     ))
 
 
@@ -210,6 +220,7 @@ def _resolve_timeout(
 def resolve_llm_config(
     session_override: dict[str, Any] | None = None,
     usage: LLMUsage | str = LLMUsage.INTERACTIVE,
+    model_profile: str | None = None,
 ) -> dict[str, Any]:
     """Return the selected LLM route after merging config levels.
 
@@ -222,6 +233,9 @@ def resolve_llm_config(
 
     ``llm.routes`` may override the base config for ``interactive``, ``gate``,
     or ``background``.  Omitted routes inherit the base model unchanged.
+    ``model_profile`` selects a named entry from ``llm.models`` for the
+    interactive route; the named profile has precedence over the route/base
+    model fields while timeout profiles remain shared.
     """
     selected_usage = _as_usage(usage)
     env_defaults: dict[str, Any] = {}
@@ -249,16 +263,29 @@ def resolve_llm_config(
     if not isinstance(llm, dict):
         raise YamlConfigError("LLM configuration must be a mapping")
 
+    selected_profile: dict[str, Any] = {}
+    if model_profile is not None:
+        if not isinstance(model_profile, str) or not model_profile.strip():
+            raise YamlConfigError("LLM model profile must be a non-empty string")
+        models = _mapping(llm.get("models"), "LLM models")
+        profile = models.get(model_profile)
+        if not isinstance(profile, dict):
+            raise YamlConfigError(f"Unknown LLM model profile: {model_profile}")
+        selected_profile = profile
+
     routes = _mapping(llm.get("routes"), "LLM routes")
     route = _mapping(routes.get(selected_usage.value), f"LLM route {selected_usage.value!r}")
     defaults: dict[str, Any] = {
         "provider": "",
         "stream": True,
         "max_output_tokens": None,
+        "context_window": None,
     }
     selected = {
         field: route[field] if field in route else llm.get(field, defaults.get(field, ""))
         for field in _ROUTE_FIELDS
     }
+    if selected_profile:
+        selected.update({field: selected_profile[field] for field in _ROUTE_FIELDS if field in selected_profile})
     selected["timeout"] = _resolve_timeout(llm, selected_usage, route)
     return selected

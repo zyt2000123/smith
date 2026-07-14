@@ -359,6 +359,40 @@ def test_mcp_connect_rejects_unsupported_protocol_version():
     assert closed
 
 
+def test_mcp_connect_closes_transport_when_initialize_fails():
+    class FailingInitializeTransport:
+        label = "failing-initialize"
+
+        def __init__(self):
+            self.closed = False
+
+        async def connect(self):
+            pass
+
+        async def send_request(self, method, params):
+            raise RuntimeError("initialize failed")
+
+        async def send_notification(self, method, params):
+            raise AssertionError("initialized notification should not be sent")
+
+        async def close(self):
+            self.closed = True
+
+    async def run():
+        transport = FailingInitializeTransport()
+        client = MCPClient(transport=transport)
+        try:
+            await client.connect()
+        except RuntimeError as exc:
+            return str(exc), transport.closed
+        raise AssertionError("initialize failure was swallowed")
+
+    message, closed = asyncio.run(run())
+
+    assert message == "initialize failed"
+    assert closed
+
+
 def test_mcp_registration_rejects_non_ascii_tool_names():
     class FakeClient:
         async def list_tools(self):

@@ -15,6 +15,8 @@ class LLMPort(Protocol):
 
     stream: bool
     capabilities: ProviderCapabilities
+    context_window: int
+    context_window_declared: bool
 
     async def chat(
         self,

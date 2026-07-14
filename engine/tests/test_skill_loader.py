@@ -64,3 +64,18 @@ def test_get_agent_skill_dir_rejects_path_traversal(tmp_path: Path):
 
     assert registry.get_agent_skill_dir("installed") == skills_dir / "installed"
     assert registry.get_agent_skill_dir("../outside") is None
+
+
+def test_agent_skill_override_is_reported_as_agent_skill(tmp_path: Path):
+    builtin_dir = tmp_path / "builtin"
+    agent_dir = tmp_path / "agent"
+    _write_skill(builtin_dir, "shared", "---\nname: shared\n---\nBuiltin")
+    _write_skill(agent_dir, "shared", "---\nname: shared\n---\nAgent")
+
+    registry = SkillRegistry()
+    registry.load_builtin(builtin_dir)
+    registry.load_agent_skills(agent_dir)
+
+    assert not registry.is_builtin("shared")
+    assert registry.get_agent_skill_dir("shared") == agent_dir / "shared"
+    assert registry.list_summaries()[0]["source"] == "agent"

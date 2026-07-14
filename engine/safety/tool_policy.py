@@ -26,6 +26,7 @@ class ToolPolicyDecision:
     reason: str = ""
     level: PermissionLevel = PermissionLevel.READ
     needs_confirmation: bool = False
+    approval_required: bool = False
     challenged: bool = False
 
     @property
@@ -57,6 +58,14 @@ class _ToolGuardAdapter:
 
     def check_policy(self, call: ToolCall) -> ToolPolicyDecision:
         result = self._guard.check(call)
+        if result.approval_required:
+            return ToolPolicyDecision(
+                allowed=False,
+                reason=result.reason,
+                level=result.level,
+                needs_confirmation=True,
+                approval_required=True,
+            )
         return ToolPolicyDecision(
             allowed=result.allowed,
             reason=result.reason,
@@ -110,19 +119,36 @@ class ToolPolicy:
 
     def evaluate(self, call: ToolCall) -> ToolPolicyDecision:
         level = PermissionLevel.READ
+        deferred_approval: ToolPolicyDecision | None = None
         for checker in self._checkers:
             decision = checker.check_policy(call)
             if not decision.allowed:
+                # Fact-forcing challenges deliberately take precedence over a
+                # later user approval.  The first attempt must establish the
+                # requested facts; only the retry may pause for approval.
+                if decision.approval_required:
+                    deferred_approval = ToolPolicyDecision(
+                        allowed=False,
+                        reason=decision.reason,
+                        level=decision.level if decision.level != PermissionLevel.READ else level,
+                        needs_confirmation=decision.needs_confirmation,
+                        approval_required=True,
+                        challenged=decision.challenged,
+                    )
+                    continue
                 return ToolPolicyDecision(
                     allowed=False,
                     reason=decision.reason,
                     level=decision.level if decision.level != PermissionLevel.READ else level,
                     needs_confirmation=decision.needs_confirmation,
+                    approval_required=decision.approval_required,
                     challenged=decision.challenged,
                 )
             # Carry forward the most specific permission level seen so far.
             if _LEVEL_ORDER.get(decision.level, 0) > _LEVEL_ORDER.get(level, 0):
                 level = decision.level
+        if deferred_approval is not None:
+            return deferred_approval
         return ToolPolicyDecision(allowed=True, level=level)
 
     def begin_round(self) -> None:

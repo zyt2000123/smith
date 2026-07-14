@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import inspect
 import logging
 import re
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
 
 from .interface import ToolCall, ToolDefinition, ToolResult
 from .truncation import truncate_output
+
+if TYPE_CHECKING:
+    from engine.execution.tool_ledger import ToolExecutionLedger
 
 _TOOL_ALIASES = {
     "websearch": "web_search",
@@ -16,6 +21,10 @@ _TOOL_ALIASES = {
 # Values mirror engine.safety.tool_guard.PermissionLevel; kept as literals so
 # the tool layer does not import the safety layer (which imports tool).
 _VALID_PERMISSION_LEVELS = frozenset({"read", "write", "execute", "destructive"})
+_VALID_APPROVAL_POLICIES = frozenset({"never", "policy", "always"})
+_VALID_SIDE_EFFECTS = frozenset({"none", "write", "external", "destructive"})
+_VALID_CONCURRENCY = frozenset({"safe", "serial"})
+_VALID_EXECUTION_ENVIRONMENTS = frozenset({"host", "sandbox", "either"})
 log = logging.getLogger(__name__)
 
 
@@ -37,6 +46,7 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, tuple[ToolDefinition, Callable]] = {}
         self._enabled: set[str] | None = None
+        self._execution_ledger: ToolExecutionLedger | None = None
 
     def register(
         self,
@@ -49,7 +59,14 @@ class ToolRegistry:
         list_path_args: Sequence[str] = (),
         is_write_tool: bool = False,
         permission_level: str = "",
+        approval_policy: str = "never",
         read_actions: Iterable[str] = (),
+        timeout_seconds: float | None = None,
+        retryable: bool = False,
+        side_effect: str | None = None,
+        idempotent: bool = False,
+        concurrency: str = "safe",
+        execution_environment: str = "host",
     ) -> None:
         if name in self._tools:
             raise ValueError(f"Duplicate tool registered: {name}")
@@ -58,15 +75,51 @@ class ToolRegistry:
                 f"Tool {name} has invalid permission_level: {permission_level!r} "
                 f"(expected one of {sorted(_VALID_PERMISSION_LEVELS)})"
             )
+        if approval_policy not in _VALID_APPROVAL_POLICIES:
+            raise ValueError(
+                f"Tool {name} has invalid approval_policy: {approval_policy!r} "
+                f"(expected one of {sorted(_VALID_APPROVAL_POLICIES)})"
+            )
+        if timeout_seconds is not None:
+            if (
+                isinstance(timeout_seconds, bool)
+                or not isinstance(timeout_seconds, (int, float))
+                or timeout_seconds <= 0
+            ):
+                raise ValueError(f"Tool {name} timeout_seconds must be a positive number")
+            timeout_seconds = float(timeout_seconds)
+        if not isinstance(retryable, bool):
+            raise ValueError(f"Tool {name} retryable must be a boolean")
+        resolved_side_effect = side_effect or ("write" if is_write_tool else "none")
+        if resolved_side_effect not in _VALID_SIDE_EFFECTS:
+            raise ValueError(
+                f"Tool {name} side_effect must be one of {sorted(_VALID_SIDE_EFFECTS)}"
+            )
+        if concurrency not in _VALID_CONCURRENCY:
+            raise ValueError(
+                f"Tool {name} concurrency must be one of {sorted(_VALID_CONCURRENCY)}"
+            )
+        if execution_environment not in _VALID_EXECUTION_ENVIRONMENTS:
+            raise ValueError(
+                f"Tool {name} execution_environment must be one of "
+                f"{sorted(_VALID_EXECUTION_ENVIRONMENTS)}"
+            )
         defn = ToolDefinition(
             name=name,
             description=description,
             parameters=parameters,
             path_args=tuple(path_args),
             list_path_args=tuple(list_path_args),
-            is_write_tool=bool(is_write_tool),
+            is_write_tool=bool(is_write_tool or resolved_side_effect != "none"),
             permission_level=permission_level,
+            approval_policy=approval_policy,
             read_actions=frozenset(read_actions),
+            timeout_seconds=timeout_seconds,
+            retryable=retryable,
+            side_effect=resolved_side_effect,
+            idempotent=bool(idempotent),
+            concurrency=concurrency,
+            execution_environment=execution_environment,
         )
         self._tools[name] = (defn, func)
 
@@ -76,7 +129,7 @@ class ToolRegistry:
         Each file should define a TOOL_META dict and an execute function.
         TOOL_META keys: name, description, parameters (JSON Schema dict).
         Optional security metadata keys: path_args, list_path_args,
-        is_write_tool, permission_level, read_actions — propagated onto the
+        is_write_tool, permission_level, approval_policy, read_actions — propagated onto the
         ToolDefinition so safety modules can use them instead of hardcoded
         lookup tables.
         """
@@ -114,7 +167,14 @@ class ToolRegistry:
                         list_path_args=_meta_str_tuple(meta, "list_path_args", py_file),
                         is_write_tool=bool(meta.get("is_write_tool", False)),
                         permission_level=permission_level,
+                        approval_policy=meta.get("approval_policy", "never"),
                         read_actions=frozenset(_meta_str_tuple(meta, "read_actions", py_file)),
+                        timeout_seconds=meta.get("timeout_seconds"),
+                        retryable=meta.get("retryable", False),
+                        side_effect=meta.get("side_effect"),
+                        idempotent=meta.get("idempotent", False),
+                        concurrency=meta.get("concurrency", "safe"),
+                        execution_environment=meta.get("execution_environment", "host"),
                     )
             except Exception:
                 log.exception("Failed to load tool provider: %s", py_file)
@@ -172,36 +232,114 @@ class ToolRegistry:
         self._tools[tool_name] = (defn, wrapper(func))
         return True
 
+    def bind_execution_ledger(self, ledger: "ToolExecutionLedger | None") -> None:
+        """Bind a per-run ledger used to protect side-effecting tools."""
+        self._execution_ledger = ledger
+
+    async def _invoke(
+        self,
+        func: Callable,
+        arguments: dict,
+        timeout_seconds: float | None,
+    ) -> Any:
+        if timeout_seconds is None:
+            result = func(**arguments)
+            return await result if inspect.isawaitable(result) else result
+
+        if inspect.iscoroutinefunction(func):
+            return await asyncio.wait_for(func(**arguments), timeout_seconds)
+        return await asyncio.wait_for(asyncio.to_thread(func, **arguments), timeout_seconds)
+
+    @staticmethod
+    def _finalize_result(result: ToolResult, tool_name: str) -> ToolResult:
+        return ToolResult(
+            call_id=result.call_id,
+            content=truncate_output(result.content, tool_name=tool_name),
+            is_error=result.is_error,
+            error_kind=result.error_kind,
+            retryable=result.retryable,
+            timed_out=result.timed_out,
+            side_effect_status=result.side_effect_status,
+            metadata=dict(result.metadata),
+        )
+
     async def execute(self, call: ToolCall) -> ToolResult:
         tool_name = _canonical_tool_name(call.name)
 
         entry = self._tools.get(tool_name)
         if entry is None:
-            return ToolResult(call_id=call.id, content=f"Unknown tool: {call.name}", is_error=True)
+            return ToolResult(
+                call_id=call.id,
+                content=f"Unknown tool: {call.name}",
+                is_error=True,
+                error_kind="unknown_tool",
+            )
 
         if self._enabled is not None and tool_name not in self._enabled:
-            return ToolResult(call_id=call.id, content=f"Tool disabled: {tool_name}", is_error=True)
+            return ToolResult(
+                call_id=call.id,
+                content=f"Tool disabled: {tool_name}",
+                is_error=True,
+                error_kind="tool_disabled",
+            )
 
-        _, func = entry
+        defn, func = entry
+        ledger = self._execution_ledger if defn.side_effect != "none" else None
+        idempotency_key = call.idempotency_key or call.id
+        claimed = False
+        if ledger is not None:
+            decision = ledger.begin(
+                call_id=call.id,
+                tool_name=tool_name,
+                idempotency_key=idempotency_key,
+            )
+            if decision.result is not None:
+                return decision.result
+            claimed = decision.claimed
+
         try:
-            import asyncio
-            if asyncio.iscoroutinefunction(func):
-                content = await func(**call.arguments)
-            else:
-                content = func(**call.arguments)
+            content = await self._invoke(func, call.arguments, defn.timeout_seconds)
+            content_text = str(content)
+            is_error = _looks_like_tool_error(content_text)
             result = ToolResult(
                 call_id=call.id,
-                content=str(content),
-                is_error=_looks_like_tool_error(str(content)),
+                content=content_text,
+                is_error=is_error,
+                error_kind="provider_error" if is_error else None,
+                retryable=defn.retryable if is_error else False,
+                side_effect_status=(
+                    "unknown" if is_error and defn.side_effect != "none"
+                    else "completed" if defn.side_effect != "none"
+                    else "none"
+                ),
+            )
+        except asyncio.TimeoutError:
+            result = ToolResult(
+                call_id=call.id,
+                content=f"Tool timed out after {defn.timeout_seconds:g}s",
+                is_error=True,
+                error_kind="timeout",
+                retryable=defn.retryable,
+                timed_out=True,
+                side_effect_status="unknown" if defn.side_effect != "none" else "none",
             )
         except Exception as exc:
-            result = ToolResult(call_id=call.id, content=str(exc), is_error=True)
+            result = ToolResult(
+                call_id=call.id,
+                content=str(exc),
+                is_error=True,
+                error_kind="exception",
+                retryable=defn.retryable,
+                side_effect_status="unknown" if defn.side_effect != "none" else "none",
+            )
 
-        result = ToolResult(
-            call_id=result.call_id,
-            content=truncate_output(result.content, tool_name=tool_name),
-            is_error=result.is_error,
-        )
+        result = self._finalize_result(result, tool_name)
+        if ledger is not None and claimed:
+            ledger.finish(
+                call_id=call.id,
+                idempotency_key=idempotency_key,
+                result=result,
+            )
         return result
 
     def list_tools(self) -> list[ToolDefinition]:

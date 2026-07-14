@@ -124,6 +124,7 @@ def test_explicit_output_limit_is_forwarded_without_changing_openai_default() ->
         "base_url": "https://openai.test/v1",
         "model": "model",
         "max_output_tokens": 123,
+        "context_window": 1_000_000,
     })
     captured: dict[str, object] = {}
     client.adapter._http.send = _openai_fake_send(captured)  # type: ignore[attr-defined, assignment]
@@ -134,6 +135,7 @@ def test_explicit_output_limit_is_forwarded_without_changing_openai_default() ->
 
     assert response.text == "ok"
     assert captured["body"]["max_tokens"] == 123
+    assert client.context_window == 1_000_000
 
 
 def test_openai_adapter_omits_output_limit_when_not_configured() -> None:

@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from engine.safety.fact_gate import _is_read_only_shell
 from engine.tool.interface import ToolCall, ToolDefinition
 
 
@@ -49,6 +50,9 @@ class GuardResult:
     reason: str = ""
     level: PermissionLevel = PermissionLevel.READ
     needs_confirmation: bool = False
+    # True when the call passed hard safety checks but must wait for a user
+    # approval before the provider is invoked.
+    approval_required: bool = False
     # True when the only problem is that the path sits outside the allowed
     # directories — the one block a session whitelist may override.  Sensitive
     # blocks (.ssh, .env writes, .git, …) keep this False and are never
@@ -261,6 +265,8 @@ class ToolGuard:
         "git_ops": ("files",),
     }
     _WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+    _APPROVAL_TOOLS = frozenset({"write_file", "edit_file", "git_ops", "shell"})
+    _READ_ONLY_GIT_ACTIONS = frozenset({"status", "diff", "discover"})
 
     def __init__(
         self,
@@ -353,13 +359,35 @@ class ToolGuard:
                 pass
         return TOOL_PERMISSIONS.get(tool_name, PermissionLevel.EXECUTE)
 
+    def _resolve_approval_policy(self, tool_name: str) -> str:
+        """Resolve explicit metadata first, then preserve legacy tool safety."""
+        defn = self._tool_registry.get(tool_name)
+        if defn is not None:
+            if defn.approval_policy != "never":
+                return defn.approval_policy
+            if (
+                defn.is_write_tool
+                or defn.side_effect != "none"
+                or defn.permission_level in {"write", "execute", "destructive"}
+            ):
+                return "policy"
+        return "policy" if tool_name in self._APPROVAL_TOOLS else "never"
+
+    def _requires_approval(self, tool_call: ToolCall) -> bool:
+        policy = self._resolve_approval_policy(tool_call.name)
+        if policy == "never":
+            return False
+        if policy == "always":
+            return True
+        if tool_call.name == "shell":
+            return not _is_read_only_shell(str(tool_call.arguments.get("command") or ""))
+        if tool_call.name == "git_ops":
+            return str(tool_call.arguments.get("action") or "").lower() not in self._READ_ONLY_GIT_ACTIONS
+        return True
+
     def check(self, tool_call: ToolCall) -> GuardResult:
         level = self._resolve_permission_level(tool_call.name)
-
-        if self.whitelist.is_tool_allowed(tool_call.name):
-            result = GuardResult(allowed=True, level=level)
-            self.audit.record(tool_call.name, tool_call.arguments, result, whitelisted=True)
-            return result
+        tool_whitelisted = self.whitelist.is_tool_allowed(tool_call.name)
 
         file_result = self._check_file_paths(tool_call)
         if file_result is not None:
@@ -397,6 +425,17 @@ class ToolGuard:
                     self.audit.record(tool_call.name, tool_call.arguments, result, rule_id=rule.get("id"))
                     return result
 
-        result = GuardResult(allowed=True, level=level)
-        self.audit.record(tool_call.name, tool_call.arguments, result)
+        approval_required = self._requires_approval(tool_call)
+        result = GuardResult(
+            allowed=True,
+            level=level,
+            reason=f"Approval required for {tool_call.name}" if approval_required else "",
+            approval_required=approval_required,
+        )
+        self.audit.record(
+            tool_call.name,
+            tool_call.arguments,
+            result,
+            whitelisted=tool_whitelisted,
+        )
         return result

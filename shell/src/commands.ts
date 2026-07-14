@@ -2,7 +2,6 @@ import type { SkillSummary } from "./api.js";
 import type { NodeBridge } from "./bridge.js";
 import { createSetupDraft } from "./setup.js";
 import type { AppStore } from "./store.js";
-import { clearTerminal } from "./term.js";
 
 export type SlashItem = {
   id: string;
@@ -23,14 +22,19 @@ type CommandContext = {
 type CommandHandler = (args: string[], context: CommandContext) => Promise<void> | void;
 
 const HELP_TEXT = [
-  "- `/new` — fresh session",
+  "- `/new` — start a fresh session and keep the current session in history",
+  "- `/clear` — delete the current session and start fresh",
+  "- `/compress` — summarize and persist the active session context",
+  "- `/model [name|default]` — select a configured model profile",
   "- `/config` — edit LLM config",
   "- `/sessions` — recent sessions",
-  "- `/skills` — inspect skills",
+  "- `/token` — local token usage dashboard",
+  "- `/skill [name] [prompt]` / `/skills` — inspect or run a standard SKILL.md skill",
+  "- `/mcp` — inspect configured MCP servers and tools",
   "- `/resume <id>` — resume session",
-  "- `/compact` / `/transcript` — switch view",
-  "- `/retry` — retry startup",
-  "- `/home` — welcome · `/exit` — quit",
+  "- `/compact` — switch to compact view; Ctrl+O toggles compact/transcript",
+  "- `/approve` / `/deny` — resolve the pending high-risk tool approval",
+  "- `/exit` — quit",
 ].join("\n");
 
 export function buildSlashItems(skills: SkillSummary[]): SlashItem[] {
@@ -44,15 +48,46 @@ export function buildSlashItems(skills: SkillSummary[]): SlashItem[] {
       category: "Commands",
     },
     {
-      id: "retry",
+      id: "approve",
       kind: "command",
-      title: "/retry",
-      command: "/retry",
-      description: "Retry startup.",
+      title: "/approve",
+      command: "/approve",
+      description: "Allow the pending tool call.",
+      category: "Commands",
+    },
+    {
+      id: "deny",
+      kind: "command",
+      title: "/deny",
+      command: "/deny",
+      description: "Reject the pending tool call.",
       category: "Commands",
     },
     { id: "exit", kind: "command", title: "/exit", command: "/exit", description: "Quit Smith.", category: "Commands" },
-    { id: "new", kind: "command", title: "/new", command: "/new", description: "Fresh session.", category: "Commands" },
+    {
+      id: "new",
+      kind: "command",
+      title: "/new",
+      command: "/new",
+      description: "New session; keep history.",
+      category: "Commands",
+    },
+    {
+      id: "compress",
+      kind: "command",
+      title: "/compress",
+      command: "/compress",
+      description: "Persist a context summary for this session.",
+      category: "Commands",
+    },
+    {
+      id: "model",
+      kind: "command",
+      title: "/model",
+      command: "/model",
+      description: "Select a configured model profile.",
+      category: "Commands",
+    },
     {
       id: "config",
       kind: "command",
@@ -70,6 +105,14 @@ export function buildSlashItems(skills: SkillSummary[]): SlashItem[] {
       category: "Commands",
     },
     {
+      id: "token",
+      kind: "command",
+      title: "/token",
+      command: "/token",
+      description: "Local token usage dashboard.",
+      category: "Commands",
+    },
+    {
       id: "skills",
       kind: "command",
       title: "/skills",
@@ -78,11 +121,27 @@ export function buildSlashItems(skills: SkillSummary[]): SlashItem[] {
       category: "Commands",
     },
     {
+      id: "skill",
+      kind: "command",
+      title: "/skill",
+      command: "/skill",
+      description: "Inspect or run a SKILL.md skill.",
+      category: "Commands",
+    },
+    {
+      id: "mcp",
+      kind: "command",
+      title: "/mcp",
+      command: "/mcp",
+      description: "Inspect MCP servers and tools.",
+      category: "Commands",
+    },
+    {
       id: "clear",
       kind: "command",
       title: "/clear",
       command: "/clear",
-      description: "Clear conversation.",
+      description: "Delete current session.",
       category: "Commands",
     },
     {
@@ -91,14 +150,6 @@ export function buildSlashItems(skills: SkillSummary[]): SlashItem[] {
       title: "/compact",
       command: "/compact",
       description: "Compact view.",
-      category: "Commands",
-    },
-    {
-      id: "transcript",
-      kind: "command",
-      title: "/transcript",
-      command: "/transcript",
-      description: "Verbose view.",
       category: "Commands",
     },
   ];
@@ -121,10 +172,8 @@ export function filterSlash(items: SlashItem[], input: string): SlashItem[] {
   if (!input.startsWith("/")) return [];
 
   const query = input.slice(1).trim().toLowerCase();
-  if (!query) return items.slice(0, 12);
-  return items
-    .filter((item) => `${item.command} ${item.title} ${item.description}`.toLowerCase().includes(query))
-    .slice(0, 12);
+  if (!query) return items;
+  return items.filter((item) => `${item.command} ${item.title} ${item.description}`.toLowerCase().includes(query));
 }
 
 export function parseSkill(raw: string, skills: SkillSummary[]): { skill: SkillSummary; prompt: string } | null {
@@ -140,8 +189,7 @@ function openConfig(context: CommandContext): void {
   const draft = createSetupDraft(state.config);
   state.set({
     mode: "setup",
-    // Reopen the same small setup form shown to new users. Values are read
-    // from the saved server config, so opening /config never resets them.
+    // Keep /config on the five-field setup flow; advanced routing remains available to the runtime.
     setupFlow: "initial",
     setupIndex: 0,
     setupDraft: draft,
@@ -174,39 +222,79 @@ async function resumeSession(args: string[], context: CommandContext): Promise<v
 const COMMAND_HANDLERS: Record<string, CommandHandler> = {
   // process.exit 由 index.tsx 的 waitUntilExit() 在 Ink 卸载后统一触发
   "/exit": (_args, context) => context.exit(),
-  "/quit": (_args, context) => context.exit(),
-  "/new": (_args, context) => {
-    clearTerminal();
-    context.getState().resetChat();
+  "/new": async (_args, context) => {
+    context.bridge.startNewSession();
   },
   "/config": (_args, context) => openConfig(context),
-  "/retry": async (_args, context) => {
-    const state = context.getState();
-    if (state.busy) {
-      state.set({ statusLine: "Cancel the current task before retrying startup." });
-      return;
-    }
-    state.set({ mode: "boot", statusLine: "Retrying Smith startup…", welcomeNotice: null });
-    await context.bridge.boot();
+  "/approve": async (_args, context) => {
+    await context.bridge.resolveApproval(true);
+  },
+  "/deny": async (_args, context) => {
+    await context.bridge.resolveApproval(false);
   },
   "/skills": (_args, context) => {
     const state = context.getState();
     state.set({ panel: "skills", statusLine: `${state.skills.length} skill(s).` });
   },
+  "/skill": async (args, context) => {
+    const state = context.getState();
+    if (args.length === 0) {
+      state.set({ panel: "skills", statusLine: `${state.skills.length} skill(s).` });
+      return;
+    }
+    const skill = state.skills.find((candidate) => candidate.name === args[0]);
+    if (!skill) {
+      state.set({ statusLine: `Unknown skill: ${args[0]}` });
+      return;
+    }
+    const prompt = args.slice(1).join(" ").trim();
+    if (prompt) {
+      await context.bridge.sendMessage(prompt, skill.name);
+      return;
+    }
+    state.set({ pendingSkill: skill, panel: "chat", statusLine: `Skill ${skill.name} armed.` });
+  },
+  "/mcp": async (_args, context) => {
+    await context.bridge.refreshMcpServers();
+    const state = context.getState();
+    state.set({ panel: "mcp", statusLine: `${state.mcpServers.length} MCP server(s).` });
+  },
+  "/model": async (args, context) => {
+    const state = context.getState();
+    const requested = args[0];
+    if (!requested) {
+      const models = Object.entries(state.config?.models ?? {});
+      const active = state.selectedModelProfile ? `Active: ${state.selectedModelProfile}` : "Active: default model";
+      state.pushSystemLine(
+        [
+          active,
+          models.length
+            ? `Configured profiles: ${models.map(([name]) => name).join(", ")}`
+            : "No named model profiles configured.",
+          "Use /model <name> or /model default.",
+        ].join("\n"),
+      );
+      state.set({ panel: "chat", statusLine: "Model selection." });
+      return;
+    }
+    await context.bridge.selectModel(requested === "default" || requested === "base" ? null : requested);
+  },
+  "/compress": async (_args, context) => {
+    await context.bridge.compressCurrentSession();
+  },
   "/sessions": (_args, context) => {
     const state = context.getState();
     state.set({ panel: "sessions", statusLine: `${state.sessions.length} session(s).` });
   },
+  "/token": async (_args, context) => {
+    await context.bridge.openTokenStats();
+  },
   "/compact": (_args, context) =>
     context.getState().set({ viewMode: "compact", panel: "chat", statusLine: "Compact view." }),
-  "/transcript": (_args, context) =>
-    context.getState().set({ viewMode: "transcript", panel: "chat", statusLine: "Transcript view." }),
-  "/clear": (_args, context) => {
-    clearTerminal();
-    context.getState().clearChat();
+  "/clear": async (_args, context) => {
+    await context.bridge.clearCurrentSession();
   },
   "/resume": resumeSession,
-  "/home": (_args, context) => context.getState().set({ panel: "welcome" }),
   "/help": (_args, context) => {
     const state = context.getState();
     state.pushSystemLine(HELP_TEXT);

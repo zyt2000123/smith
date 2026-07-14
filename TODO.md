@@ -13,6 +13,14 @@
 - [ ] 完成架构设计并取得确认
 - [ ] 编写实施计划
 
+## 可靠性内核首批进展（2026-07-14）
+
+- [x] Rich Tool Contract 基础字段、结构化工具错误、超时与旧 `TOOL_META` 兼容
+- [x] RunState 恢复入口与副作用工具 SQLite 幂等账本
+- [x] 本地 JSONL Trace Store，支持脱敏、截断且写入失败不阻断主任务
+- [x] 自动任务租约、并发 claim、指数退避重试与重试计数迁移
+- [ ] 完整审批恢复协议、取消语义、Eval Harness 与 Context/Session/Memory 完整分离
+
 ## 设计评审发现（2026-07-10 · engine 宏观 + 内核深查）
 
 > 图解与证据：https://claude.ai/code/artifact/e1368e55-bf8d-4f39-a805-0a72434e2865 （R1–R8 对应评审页 P1–P8）。

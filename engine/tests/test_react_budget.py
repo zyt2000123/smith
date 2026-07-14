@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import asyncio
 
-from engine.execution.agent_loop import _react_event_loop, _react_loop, _react_stream_loop
+from engine.execution.react_loop import (
+    react_event_loop as _react_event_loop,
+    react_loop as _react_loop,
+    react_stream_loop as _react_stream_loop,
+)
 from engine.execution.events import EventType
+from engine.execution.react_loop import FailedAgentRunError, IncompleteAgentRunError
 from engine.llm.client import ChatResponse, ToolCallData
 from engine.llm.events import ProviderEvent, ProviderEventType
 from engine.react_budget import (
@@ -13,8 +18,6 @@ from engine.react_budget import (
     MAX_FAILED_TOOL_RECOVERY_ITERS,
     MAX_IDENTICAL_TOOL_ERRORS,
     MAX_PREFLIGHT_CHALLENGE_ITERS,
-    PREFLIGHT_BUDGET_MESSAGE,
-    TOOL_FAILURE_BUDGET_MESSAGE,
 )
 from engine.safety.fact_gate import FactGate, FactGateContext
 from engine.skill.executor import execute_skill
@@ -621,6 +624,13 @@ def test_react_event_loop_emits_token_usage():
         "output_tokens": 7,
         "total_tokens": 18,
     }
+    context_events = [event for event in events if event.type == EventType.CONTEXT_USAGE]
+    assert context_events[-1].data == {
+        "context_tokens": 11,
+        "context_window": 256_000,
+        "context_percent": 0,
+        "estimated": False,
+    }
 
 
 def test_react_event_loop_compacts_large_conversation_before_answering():
@@ -637,7 +647,7 @@ def test_react_event_loop_compacts_large_conversation_before_answering():
             llm,
             [
                 {"role": "system", "content": "system"},
-                {"role": "user", "content": "x" * 300_000},
+                {"role": "user", "content": "x" * 400_000},
             ],
             _registry(),
             max_iters=1,
@@ -649,6 +659,8 @@ def test_react_event_loop_compacts_large_conversation_before_answering():
 
     assert len(llm.chat_calls) >= 2
     assert "Summarize our conversation above" in llm.chat_calls[0]["messages"][-1]["content"]
+    assert [event.type for event in events].count(EventType.CONTEXT_COMPRESSION_START) == 1
+    assert [event.type for event in events].count(EventType.CONTEXT_COMPRESSION_END) == 1
     text = "".join(
         event.data.get("text", "")
         for event in events
@@ -703,9 +715,6 @@ def test_react_loop_failed_tool_recovery_budget_forces_text_finalization():
 # ---------------------------------------------------------------------------
 # P0 regression: text adapters must propagate all terminal states
 # ---------------------------------------------------------------------------
-
-from engine.execution.react_loop import FailedAgentRunError, IncompleteAgentRunError
-
 
 def test_react_event_loop_marks_empty_final_after_successful_tool_incomplete():
     async def run():

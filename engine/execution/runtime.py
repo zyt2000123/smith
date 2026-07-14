@@ -56,6 +56,10 @@ class RuntimeServices:
     mcp_clients: list[Any] = field(default_factory=list)
     hooks: HookManager | None = None
     owns_llm_clients: bool = True
+    _memory_lifecycle_hook: Any | None = field(default=None, init=False, repr=False)
+    _memory_lifecycle_hook_key: tuple[int, int, bool, int] | None = field(
+        default=None, init=False, repr=False,
+    )
 
     async def close(self) -> None:
         # 逐资源隔离：第一个 close 抛异常不许掐断其余资源的清理，

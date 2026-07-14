@@ -33,3 +33,21 @@ test("token usage tracks the current turn separately from the session total", ()
   assert.equal(store.getState().turnTokenUsage.total_tokens, 80);
   assert.equal(store.getState().tokenUsage.total_tokens, 280);
 });
+
+test("context usage replaces the HUD value and compression toggles input state", () => {
+  const store = createAppStore();
+
+  store.getState().applyEvent({
+    type: "context_usage",
+    context_tokens: 128_000,
+    context_window: 256_000,
+    context_percent: 50,
+    estimated: false,
+  });
+  assert.equal(store.getState().contextUsage.context_percent, 50);
+
+  store.getState().applyEvent({ type: "compression", active: true });
+  assert.equal(store.getState().compressing, true);
+  store.getState().applyEvent({ type: "compression", active: false });
+  assert.equal(store.getState().compressing, false);
+});

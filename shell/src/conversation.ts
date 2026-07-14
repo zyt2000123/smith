@@ -1,5 +1,5 @@
 import { createToolActivity, type ToolActivity } from "./activity.js";
-import type { Session, SkillSummary, TokenUsage } from "./api.js";
+import { CONTEXT_DISPLAY_WINDOW, type ContextUsage, type Session, type SkillSummary, type TokenUsage } from "./api.js";
 import type { QueuedMessage } from "./queue.js";
 import type { TranscriptEntry } from "./transcript-state.js";
 
@@ -12,6 +12,7 @@ export type EmptyConversation = {
   toolActivity: ToolActivity;
   turnTokenUsage: TokenUsage;
   tokenUsage: TokenUsage;
+  contextUsage: ContextUsage;
   pendingSkill: SkillSummary | null;
   queuedMessages: QueuedMessage[];
   welcomeNotice: { text: string; tone: "info" | "error" } | null;
@@ -27,6 +28,12 @@ export function createEmptyConversation(panel: ConversationPanel, statusLine: st
     toolActivity: createToolActivity(),
     turnTokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
     tokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+    contextUsage: {
+      context_tokens: 0,
+      context_window: CONTEXT_DISPLAY_WINDOW,
+      context_percent: 0,
+      estimated: true,
+    },
     pendingSkill: null,
     queuedMessages: [],
     welcomeNotice: null,

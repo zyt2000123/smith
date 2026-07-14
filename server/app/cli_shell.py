@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -54,5 +55,7 @@ def _launch_shell(argv: Sequence[str] | None = None) -> int:
 
     shell_args = _extract_shell_argv(argv) or []
     command = ["node", str(entry), *shell_args]
-    completed = subprocess.run(command, cwd=_repo_root(), check=False)
+    env = os.environ.copy()
+    env.setdefault("SMITH_PROJECT_CWD", str(Path.cwd()))
+    completed = subprocess.run(command, cwd=_repo_root(), env=env, check=False)
     return int(completed.returncode)

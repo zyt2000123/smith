@@ -1,5 +1,6 @@
 """task_router 单测：YAML 身份目录路由 + Evaluation-Sensitive 检测。"""
 
+import sys
 from pathlib import Path
 
 from engine.execution.task_router import detect_eval_sensitive, route_task

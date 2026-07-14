@@ -283,3 +283,22 @@ def test_shared_runtime_defers_heavy_memory_maintenance(tmp_path: Path) -> None:
     handler = services.hooks._handlers[0]
     assert handler.maintenance.defer_maintenance is True
     assert handler.maintenance.llm is background
+
+
+def test_memory_hook_rebinds_when_runtime_dependencies_change() -> None:
+    first = StaticLLM()
+    second = StaticLLM()
+    services = RuntimeServices(
+        llm=StaticLLM(),  # type: ignore[arg-type]
+        tool_registry=ToolRegistry(),
+        skill_registry=SkillRegistry(),
+        background_llm=first,  # type: ignore[arg-type]
+    )
+
+    _ensure_memory_lifecycle_hooks(services)
+    services.background_llm = second  # type: ignore[assignment]
+    _ensure_memory_lifecycle_hooks(services)
+
+    assert services.hooks is not None
+    assert len(services.hooks._handlers) == 1
+    assert services.hooks._handlers[0].maintenance.llm is second

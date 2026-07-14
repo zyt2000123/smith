@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 TriggerType = Literal["manual", "cron", "interval"]
 
@@ -12,9 +12,12 @@ class AutoTaskCreate(BaseModel):
     trigger_config: str = ""
     instruction: str
     enabled: bool = True
+    max_retries: int = 2
 
     @model_validator(mode="after")
     def _validate_trigger_config(self) -> "AutoTaskCreate":
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
         if self.trigger_type == "cron" and not self.trigger_config.strip():
             raise ValueError("trigger_config is required for cron trigger_type")
         if self.trigger_type == "interval":
@@ -37,6 +40,14 @@ class AutoTaskUpdate(BaseModel):
     trigger_config: str | None = None
     instruction: str | None = None
     enabled: bool | None = None
+    max_retries: int | None = None
+
+    @field_validator("max_retries")
+    @classmethod
+    def _validate_max_retries(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("max_retries must be non-negative")
+        return value
 
 
 class AutoTaskOut(BaseModel):
@@ -52,6 +63,9 @@ class AutoTaskOut(BaseModel):
     last_run_at: str | None = None
     next_run_at: str | None = None
     run_count: int
+    retry_count: int = 0
+    max_retries: int = 2
+    lease_until: str | None = None
     created_at: str
 
 

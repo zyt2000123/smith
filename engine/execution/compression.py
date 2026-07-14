@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from engine.llm.contracts import DEFAULT_CONTEXT_WINDOW
+
 if TYPE_CHECKING:
     from engine.llm.port import LLMPort
 
@@ -14,6 +16,9 @@ PRUNE_PROTECT_TURNS = 2
 PRUNE_PROTECT_THRESHOLD_CHARS = 8000
 PRUNE_MIN_CHARS = 2000
 CONTEXT_TRIGGER_RATIO = 0.7
+DEFAULT_CONTEXT_LIMIT = DEFAULT_CONTEXT_WINDOW
+CONTEXT_DISPLAY_WINDOW = 256_000
+CONTEXT_COMPACTION_TRIGGER = 128_000
 
 COMPACT_SYSTEM_PROMPT = """\
 You are summarizing a conversation for an AI assistant that will lose all prior context.
@@ -107,8 +112,33 @@ def _conversation_tokens(conversation: list[dict]) -> int:
     )
 
 
-def needs_compaction(conversation: list[dict], context_limit: int = 120000) -> bool:
-    return _conversation_tokens(conversation) > context_limit * CONTEXT_TRIGGER_RATIO
+def needs_compaction(
+    conversation: list[dict],
+    context_limit: int = DEFAULT_CONTEXT_LIMIT,
+    *,
+    trigger_ratio: float = CONTEXT_TRIGGER_RATIO,
+) -> bool:
+    return _conversation_tokens(conversation) >= context_limit * trigger_ratio
+
+
+def context_limit_for_llm(llm: object | None) -> int:
+    """Use the selected route's declared model window with a safe fallback."""
+    context_window = getattr(llm, "context_window", None)
+    if isinstance(context_window, bool) or not isinstance(context_window, int) or context_window <= 0:
+        return DEFAULT_CONTEXT_LIMIT
+    return context_window
+
+
+def compaction_policy_for_llm(llm: object | None) -> tuple[int, float]:
+    """Return the selected window and the hard automatic-compaction trigger.
+
+    The shell displays context against a stable 256k reference window. To
+    keep the actual request from growing beyond the commonly supported 128k
+    range, automatic compaction starts at 128k when the selected route does
+    not declare a smaller window. A smaller declared window remains the hard
+    safety limit for that route.
+    """
+    return min(context_limit_for_llm(llm), CONTEXT_COMPACTION_TRIGGER), 1.0
 
 
 async def compress(conversation: list[dict], llm: "LLMPort | None" = None) -> list[dict]:
@@ -117,8 +147,14 @@ async def compress(conversation: list[dict], llm: "LLMPort | None" = None) -> li
     Returns the conversation list (mutated in-place for prune, replaced for compact).
     """
     prune_tool_outputs(conversation)
-    if llm is not None and needs_compaction(conversation):
-        return await compact_history(conversation, llm)
+    if llm is not None:
+        context_limit, trigger_ratio = compaction_policy_for_llm(llm)
+        if needs_compaction(
+            conversation,
+            context_limit=context_limit,
+            trigger_ratio=trigger_ratio,
+        ):
+            return await compact_history(conversation, llm)
     return conversation
 
 

@@ -249,10 +249,17 @@ async def save_conversation_memory(
     had_tools: bool,
     *,
     learning_signals: list[str] | None = None,
+    turn_status: str = "completed",
+    turn_reason: str | None = None,
     compile_maintenance: MemoryMaintenance | None = None,
     dream_maintenance: MemoryMaintenance | None = None,
 ) -> None:
-    """Append useful work/learning evidence and schedule memory maintenance."""
+    """Append useful work/learning evidence and schedule memory maintenance.
+
+    Incomplete turns are recorded as ``partial_work`` so the next run can see
+    useful tool-backed progress without treating an unfinished reply as a
+    completed project fact.
+    """
     explicit_signal = _detect_learning_signal(user_msg)
     stable_signals = [
         sanitize_event_value(signal)
@@ -272,14 +279,19 @@ async def save_conversation_memory(
 
     entries: list[dict] = []
     if had_tools:
-        entries.append({
+        work_entry = {
             "task": bounded_task,
             "summary": bounded_summary,
             "timestamp": now,
-            "kind": "work",
+            "kind": "work" if turn_status == "completed" else "partial_work",
             "scope": "project",
-            "evidence": "tool_result",
-        })
+            "evidence": "tool_result" if turn_status == "completed" else "partial_tool_result",
+        }
+        if turn_status != "completed":
+            work_entry["status"] = sanitize_event_value(turn_status)
+            if turn_reason:
+                work_entry["reason"] = sanitize_event_value(turn_reason)
+        entries.append(work_entry)
     if explicit_signal is not None or stable_signals:
         kind, scope = explicit_signal or ("pattern", "user")
         signal_entry = {

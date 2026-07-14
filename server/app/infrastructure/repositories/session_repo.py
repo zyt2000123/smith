@@ -11,7 +11,7 @@ class SessionRepo:
     async def list_by_agent(self, agent_id: str) -> list[dict]:
         db = await get_app_db()
         rows = await db.execute_fetchall(
-            "SELECT s.id, s.agent_id, s.identity_id, s.title, s.created_at, "
+            "SELECT s.id, s.agent_id, s.identity_id, s.model_profile, s.title, s.created_at, "
             "  (SELECT content FROM messages m WHERE m.session_id=s.id ORDER BY m.created_at DESC LIMIT 1) as last_message_preview, "
             "  (SELECT created_at FROM messages m WHERE m.session_id=s.id ORDER BY m.created_at DESC LIMIT 1) as last_message_at, "
             "  (SELECT count(*) FROM messages m WHERE m.session_id=s.id) as message_count "
@@ -27,19 +27,26 @@ class SessionRepo:
             result.append(d)
         return result
 
-    async def create(self, agent_id: str, title: str, identity_id: str | None = None) -> dict:
+    async def create(
+        self,
+        agent_id: str,
+        title: str,
+        identity_id: str | None = None,
+        model_profile: str | None = None,
+    ) -> dict:
         db = await get_app_db()
         sid = uuid.uuid4().hex[:12]
         now = datetime.now(timezone.utc).isoformat()
         await db.execute(
-            "INSERT INTO sessions (id, agent_id, identity_id, title, created_at) VALUES (?,?,?,?,?)",
-            (sid, agent_id, identity_id, title, now),
+            "INSERT INTO sessions (id, agent_id, identity_id, model_profile, title, created_at) VALUES (?,?,?,?,?,?)",
+            (sid, agent_id, identity_id, model_profile, title, now),
         )
         await db.commit()
         return {
             "id": sid,
             "agent_id": agent_id,
             "identity_id": identity_id,
+            "model_profile": model_profile,
             "title": title,
             "created_at": now,
         }
@@ -55,7 +62,7 @@ class SessionRepo:
     async def get_owned(self, session_id: str, agent_id: str) -> dict | None:
         db = await get_app_db()
         rows = await db.execute_fetchall(
-            "SELECT id, agent_id, identity_id, title, created_at FROM sessions WHERE id=? AND agent_id=?",
+            "SELECT id, agent_id, identity_id, model_profile, title, created_at FROM sessions WHERE id=? AND agent_id=?",
             (session_id, agent_id),
         )
         return dict(rows[0]) if rows else None
@@ -83,6 +90,16 @@ class SessionRepo:
         )
         return bool(rows)
 
+    async def delete_owned(self, session_id: str, agent_id: str) -> bool:
+        """Delete a session only when it belongs to the requesting agent."""
+        db = await get_app_db()
+        cursor = await db.execute(
+            "DELETE FROM sessions WHERE id=? AND agent_id=?",
+            (session_id, agent_id),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
+
     async def get_recent_messages(self, session_id: str, limit: int) -> list[dict]:
         """Fetch the last N messages in chronological order (DB-side LIMIT)."""
         db = await get_app_db()
@@ -92,6 +109,38 @@ class SessionRepo:
             (session_id, limit),
         )
         return [dict(r) for r in rows]
+
+    async def get_context(self, session_id: str) -> dict:
+        db = await get_app_db()
+        rows = await db.execute_fetchall(
+            "SELECT context_summary, context_summary_cutoff FROM sessions WHERE id=?",
+            (session_id,),
+        )
+        return dict(rows[0]) if rows else {"context_summary": "", "context_summary_cutoff": 0}
+
+    async def set_context(self, session_id: str, summary: str, cutoff: int) -> None:
+        db = await get_app_db()
+        await db.execute(
+            "UPDATE sessions SET context_summary=?, context_summary_cutoff=? WHERE id=?",
+            (summary, cutoff, session_id),
+        )
+        await db.commit()
+
+    async def update_model_profile(
+        self,
+        session_id: str,
+        agent_id: str,
+        model_profile: str | None,
+    ) -> dict | None:
+        db = await get_app_db()
+        cursor = await db.execute(
+            "UPDATE sessions SET model_profile=? WHERE id=? AND agent_id=?",
+            (model_profile, session_id, agent_id),
+        )
+        await db.commit()
+        if cursor.rowcount != 1:
+            return None
+        return await self.get_owned(session_id, agent_id)
 
     async def get_messages(self, session_id: str, limit: int = 0, offset: int = 0) -> list[dict]:
         db = await get_app_db()

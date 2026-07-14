@@ -1,4 +1,5 @@
-import { mermaidToAscii } from "mermaid-ascii";
+import { renderMermaidASCII } from "beautiful-mermaid";
+import stringWidth from "string-width";
 
 export type MarkdownSegment =
   | { type: "markdown"; text: string }
@@ -14,8 +15,19 @@ type OpenFence = {
 };
 
 const FENCE_PATTERN = /^( {0,3})(`{3,}|~{3,})\s*([^\s`~]+)?\s*$/;
-const NODE_PATTERN =
-  /([A-Za-z_][\w-]*)\s*(\(\((?:\\.|[^)])*\)\)|\(\[(?:\\.|[^)])*\]\)|\[(?:\\.|[^\]])*\]|\{(?:\\.|[^}])*\}|\((?:\\.|[^)])*\))/g;
+const PLACEHOLDER_START = 0xe000;
+const MAX_INLINE_EDGE_LABEL_WIDTH = 24;
+const EDGE_ANNOTATION_WIDTH = 80;
+
+type NormalizedFlowchart = {
+  text: string;
+  annotations: string[];
+};
+
+type EncodedDiagram = {
+  text: string;
+  restore: (rendered: string) => string | null;
+};
 
 function pushMarkdown(segments: MarkdownSegment[], lines: string[]): void {
   const text = lines.join("\n");
@@ -76,92 +88,155 @@ export function splitMermaidBlocks(markdown: string): MarkdownSegment[] {
   return splitMarkdownBlocks(markdown);
 }
 
-function unquote(value: string): string {
-  const trimmed = value.trim();
-  if (
-    trimmed.length >= 2 &&
-    ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))
-  ) {
-    return trimmed.slice(1, -1);
+function normalizeDiagramText(value: string): string {
+  return value
+    .replace(/<br\s*\/?\s*>/gi, " / ")
+    .replace(/\\n/g, " / ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function graphemes(value: string): string[] {
+  if (typeof Intl.Segmenter === "function") {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+    return Array.from(segmenter.segment(value), ({ segment }) => segment);
   }
-  return trimmed;
-}
-
-function nodeLabel(shape: string): string {
-  let body = shape;
-  if (shape.startsWith("((") && shape.endsWith("))")) body = shape.slice(2, -2);
-  else if (shape.startsWith("([") && shape.endsWith("])")) body = shape.slice(2, -2);
-  else body = shape.slice(1, -1);
-
-  return unquote(body).replace(/\\n/g, " / ").replace(/\s+/g, " ").trim();
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return Array.from(value);
 }
 
 /**
- * mermaid-ascii intentionally supports a small flowchart grammar. Normalize
- * Mermaid's node-shape syntax to labels first so terminal output shows
- * `Start` instead of the source token `A[Start]`.
+ * Mermaid ASCII renderers measure labels with String.length, while terminals measure
+ * their visual width in cells. Expand wide graphemes to one-cell placeholders
+ * for layout, then restore the original graphemes after drawing.
  */
-function normalizeFlowchart(source: string): string | null {
-  const lines = source.split(/\r?\n/);
+function encodeTerminalWidths(source: string): EncodedDiagram {
+  const encodedByGrapheme = new Map<string, { token: string; value: string }>();
+  const replacements = new Map<string, { token: string; value: string }>();
+  let nextCodePoint = PLACEHOLDER_START;
+  let encoded = "";
+
+  for (const grapheme of graphemes(source)) {
+    const width = stringWidth(grapheme);
+    if (width <= 1) {
+      encoded += grapheme;
+      continue;
+    }
+
+    let replacement = encodedByGrapheme.get(grapheme);
+    if (!replacement) {
+      let placeholder = String.fromCodePoint(nextCodePoint++);
+      while (source.includes(placeholder) || replacements.has(placeholder)) {
+        placeholder = String.fromCodePoint(nextCodePoint++);
+      }
+
+      replacement = {
+        token: placeholder.repeat(width),
+        value: grapheme,
+      };
+      encodedByGrapheme.set(grapheme, replacement);
+      replacements.set(placeholder, replacement);
+    }
+
+    encoded += replacement.token;
+  }
+
+  return {
+    text: encoded,
+    restore: (rendered) => {
+      let restored = rendered;
+      for (const { token, value } of replacements.values()) {
+        restored = restored.replaceAll(token, value);
+      }
+      return [...replacements.keys()].some((placeholder) => restored.includes(placeholder)) ? null : restored;
+    },
+  };
+}
+
+function extractLongEdgeLabels(source: string): { text: string; annotations: string[] } {
+  const annotations: string[] = [];
+  const text = source.replace(/-->\|((?:\\.|[^|])*)\|/g, (_match: string, rawLabel: string) => {
+    const label = normalizeDiagramText(rawLabel);
+    if (stringWidth(label) <= MAX_INLINE_EDGE_LABEL_WIDTH) return `-->|${label}|`;
+
+    annotations.push(label);
+    return "-->";
+  });
+
+  return { text, annotations };
+}
+
+function wrapTerminalText(value: string, maxWidth: number): string[] {
+  const lines: string[] = [];
+  let line = "";
+  let width = 0;
+
+  for (const grapheme of graphemes(value)) {
+    const graphemeWidth = stringWidth(grapheme);
+    if (line && width + graphemeWidth > maxWidth) {
+      lines.push(line.trimEnd());
+      line = "";
+      width = 0;
+    }
+    if (!line && grapheme === " ") continue;
+    line += grapheme;
+    width += graphemeWidth;
+  }
+
+  if (line) lines.push(line.trimEnd());
+  return lines;
+}
+
+/**
+ * The terminal renderer intentionally supports a small flowchart grammar. Keep
+ * Mermaid node IDs and shapes intact so the renderer can preserve the graph
+ * structure and lay out CJK labels correctly.
+ */
+function normalizeFlowchart(source: string): NormalizedFlowchart | null {
+  const extracted = extractLongEdgeLabels(source);
+  const lines = extracted.text.split(/\r?\n/);
   const firstIndex = lines.findIndex((line) => line.trim().length > 0 && !line.trim().startsWith("%%"));
   if (firstIndex < 0) return null;
 
   const direction = lines[firstIndex]?.trim().match(/^(graph|flowchart)\s+(TD|LR)$/i);
   if (!direction) return null;
 
-  const definitions = new Map<string, string>();
-  for (const line of lines) {
-    for (const match of line.matchAll(NODE_PATTERN)) {
-      const id = match[1];
-      const shape = match[2];
-      const label = nodeLabel(shape);
-      if (id && label) definitions.set(id, label);
-    }
-  }
-
-  const ids = [...definitions.keys()].sort((left, right) => right.length - left.length);
-  let placeholderId = 0;
-  const placeholders = new Map<string, string>();
-  const placeholderFor = (id: string): string => {
-    const token = `__SMITH_MERMAID_NODE_${placeholderId++}__`;
-    placeholders.set(token, definitions.get(id) ?? id);
-    return token;
+  return {
+    text: lines
+      .map((line, index) =>
+        index === firstIndex ? `${direction[1].toLowerCase()} ${direction[2].toUpperCase()}` : line,
+      )
+      .join("\n"),
+    annotations: extracted.annotations,
   };
-
-  const normalized = lines.map((line, index) => {
-    if (index === firstIndex) return `${direction[1].toLowerCase()} ${direction[2].toUpperCase()}`;
-
-    let result = line.replace(NODE_PATTERN, (_match, id: string) => placeholderFor(id));
-    for (const id of ids) {
-      result = result.replace(new RegExp(`\\b${escapeRegExp(id)}\\b`, "g"), () => placeholderFor(id));
-    }
-    return result;
-  });
-
-  return normalized.join("\n").replace(/__SMITH_MERMAID_NODE_\d+__/g, (token) => placeholders.get(token) ?? token);
 }
 
 /** Returns a terminal diagram, or null when the input is not supported. */
 export function renderMermaidDiagram(source: string): string | null {
   const normalized = normalizeFlowchart(source);
   if (!normalized) return null;
+  const encoded = encodeTerminalWidths(normalized.text);
 
   const previousDebug = console.debug;
   console.debug = () => undefined;
   try {
-    const output = mermaidToAscii(normalized, {
+    const output = renderMermaidASCII(encoded.text, {
       useAscii: process.env.SMITH_ASCII_DIAGRAMS === "1",
+      colorMode: "none",
     });
     const compact = output
       .trimEnd()
       .split("\n")
       .map((line) => line.trimEnd())
       .join("\n");
-    return compact || null;
+    const restored = compact ? encoded.restore(compact) : null;
+    if (!restored) return null;
+
+    if (normalized.annotations.length === 0) return restored;
+
+    const annotations = normalized.annotations
+      .flatMap((annotation) => wrapTerminalText(`↳ ${annotation}`, EDGE_ANNOTATION_WIDTH))
+      .join("\n");
+    return annotations ? `${restored}\n\n${annotations}` : restored;
   } catch {
     return null;
   } finally {

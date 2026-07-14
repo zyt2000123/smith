@@ -19,6 +19,10 @@ class FakeSessionRepo:
     def __init__(self) -> None:
         self.saved_messages: list[tuple[str, str, str]] = []
         self.identity_id: str | None = None
+        self.messages: list[dict] = []
+        self.context_summary = ""
+        self.context_summary_cutoff = 0
+        self.deleted_sessions: list[tuple[str, str]] = []
 
     async def exists(self, session_id: str, agent_id: str) -> bool:
         return True
@@ -30,6 +34,7 @@ class FakeSessionRepo:
             "identity_id": self.identity_id,
             "title": "Test session",
             "created_at": "2026-07-07T00:00:00Z",
+            "model_profile": None,
         }
 
     async def claim_identity(self, session_id: str, agent_id: str, identity_id: str) -> bool:
@@ -39,10 +44,24 @@ class FakeSessionRepo:
         return True
 
     async def get_messages(self, session_id: str, limit: int = 0, offset: int = 0) -> list[dict]:
-        return []
+        return self.messages[offset:] if limit == 0 else self.messages[offset : offset + limit]
 
     async def get_recent_messages(self, session_id: str, limit: int) -> list[dict]:
         return []
+
+    async def get_context(self, session_id: str) -> dict:
+        return {
+            "context_summary": self.context_summary,
+            "context_summary_cutoff": self.context_summary_cutoff,
+        }
+
+    async def set_context(self, session_id: str, summary: str, cutoff: int) -> None:
+        self.context_summary = summary
+        self.context_summary_cutoff = cutoff
+
+    async def delete_owned(self, session_id: str, agent_id: str) -> bool:
+        self.deleted_sessions.append((session_id, agent_id))
+        return True
 
     async def add_message(self, session_id: str, role: str, content: str) -> dict:
         self.saved_messages.append((session_id, role, content))
@@ -118,6 +137,22 @@ async def test_stream_message_forwards_skill_name_and_blocked_flag(monkeypatch: 
             "reason": "permission denied",
         })
         yield SimpleNamespace(type=SimpleNamespace(value="tool_call_result"), data={
+            "id": "tool-approval",
+            "blocked": True,
+            "approval_required": True,
+            "approval_id": "approval-1",
+                "name": "shell",
+                "level": "execute",
+                "reason": "Approval required for shell",
+                "arguments": {"command": "git status"},
+                "presentation": {
+                    "title": "Run a shell command",
+                    "summary": "Execute the requested command",
+                    "details": [{"label": "Command", "value": "git status"}],
+                    "reason": "This command may change files or system state.",
+                },
+        })
+        yield SimpleNamespace(type=SimpleNamespace(value="tool_call_result"), data={
             "id": "tool-2",
             "preflight": True,
             "blocked": False,
@@ -153,11 +188,100 @@ async def test_stream_message_forwards_skill_name_and_blocked_flag(monkeypatch: 
     assert blocked_payload["error"] is True
     assert blocked_payload["summary"] == "permission denied"
 
-    preflight_payload = json.loads(tool_events[1]["data"])
+    approval_tool_payload = json.loads(
+        next(event for event in tool_events if json.loads(event["data"])["id"] == "tool-approval")["data"]
+    )
+    assert approval_tool_payload["summary"] == "Execute the requested command"
+
+    approval_events = [event for event in events if event["event"] == "approval_required"]
+    assert len(approval_events) == 1
+    approval_payload = json.loads(approval_events[0]["data"])
+    assert approval_payload == {
+        "run_id": None,
+        "approval_id": "approval-1",
+            "tool": "shell",
+            "level": "execute",
+            "reason": "Approval required for shell",
+            "arguments": {"command": "git status"},
+            "presentation": {
+                "title": "Run a shell command",
+                "summary": "Execute the requested command",
+                "details": [{"label": "Command", "value": "git status"}],
+                "reason": "This command may change files or system state.",
+            },
+        }
+
+    preflight_payload = json.loads(next(event for event in tool_events if json.loads(event["data"])["preflight"])["data"])
     assert preflight_payload["preflight"] is True
     assert preflight_payload["blocked"] is False
     assert preflight_payload["error"] is False
     assert preflight_payload["summary"] == "present facts and retry"
+
+
+@pytest.mark.asyncio
+async def test_stream_message_persists_token_usage_with_project_and_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+
+    class Recorder:
+        async def record_usage(self, **kwargs):
+            captured.update(kwargs)
+
+    def fake_build_engine_runtime(agent_id: str, name: str, *, session_id: str | None = None):
+        return (
+            SimpleNamespace(agent_id=agent_id, agent_name=name, session_id=session_id),
+            SimpleNamespace(llm=SimpleNamespace(model="gpt-test")),
+        )
+
+    async def fake_engine_reply_events(request, runtime, services):
+        yield SimpleNamespace(
+            type=SimpleNamespace(value="run_started"),
+            data={"run_id": "run-1"},
+        )
+        yield SimpleNamespace(
+            type=SimpleNamespace(value="token_usage"),
+            data={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+        yield SimpleNamespace(
+            type=SimpleNamespace(value="run_finished"),
+            data={"run_id": "run-1", "status": "completed"},
+        )
+
+    monkeypatch.setattr(session_service_module, "build_engine_runtime", fake_build_engine_runtime)
+    monkeypatch.setattr(
+        session_service_module,
+        "engine_run_stream_with_runtime",
+        _fake_run(fake_engine_reply_events),
+    )
+
+    events = [
+        event
+        async for event in SessionService(
+            FakeSessionRepo(),
+            FakeAgentProfileRepo(),
+            token_stats_service=Recorder(),
+        ).stream_message(
+            "smith-id",
+            "sess-1",
+            "hello",
+            working_dir="/tmp/Agent-Smith",
+        )
+    ]
+
+    assert captured == {
+        "session_id": "sess-1",
+        "run_id": "run-1",
+        "project_name": "Agent-Smith",
+        "project_path": "/tmp/Agent-Smith",
+        "model": "gpt-test",
+        "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+    }
+    assert json.loads(next(event for event in events if event["event"] == "token_usage")["data"]) == {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+    }
 
 
 @pytest.mark.asyncio
@@ -185,6 +309,64 @@ async def test_first_message_auto_selects_and_pins_identity(tmp_path: Path) -> N
     assert selected == "legal"
     assert follow_up == "legal"
     assert repo.identity_id == "legal"
+
+
+@pytest.mark.asyncio
+async def test_compress_session_persists_llm_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = FakeSessionRepo()
+    repo.messages = [
+        {"id": "u1", "session_id": "sess-1", "role": "user", "content": "goal", "created_at": "1"},
+        {"id": "a1", "session_id": "sess-1", "role": "assistant", "content": "done", "created_at": "2"},
+        {"id": "u2", "session_id": "sess-1", "role": "user", "content": "next", "created_at": "3"},
+        {"id": "a2", "session_id": "sess-1", "role": "assistant", "content": "answer", "created_at": "4"},
+    ]
+
+    class FakeLlm:
+        async def chat(self, messages):
+            return SimpleNamespace(text="<context_summary>dense summary</context_summary>", finish_reason="stop")
+
+    def fake_build_engine_runtime(agent_id: str, name: str, *, session_id: str | None = None):
+        return SimpleNamespace(agent_id=agent_id, agent_name=name, session_id=session_id), SimpleNamespace(llm=FakeLlm())
+
+    monkeypatch.setattr(session_service_module, "build_engine_runtime", fake_build_engine_runtime)
+
+    result = await SessionService(repo, FakeAgentProfileRepo()).compress_session("smith-id", "sess-1")
+
+    assert result.summary == "<context_summary>dense summary</context_summary>"
+    assert result.message_count == 4
+    assert repo.context_summary == result.summary
+    assert repo.context_summary_cutoff == 4
+
+
+@pytest.mark.asyncio
+async def test_recent_history_uses_saved_summary_and_only_post_cutoff_messages() -> None:
+    repo = FakeSessionRepo()
+    repo.context_summary = "old work is complete"
+    repo.context_summary_cutoff = 2
+    repo.messages = [
+        {"role": "user", "content": "old goal"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "new question"},
+        {"role": "assistant", "content": "new answer"},
+    ]
+
+    history = await SessionService(repo, FakeAgentProfileRepo())._recent_history("sess-1")
+
+    assert history == [
+        {"role": "user", "content": "[Session context summary]\nold work is complete"},
+        {"role": "user", "content": "new question"},
+        {"role": "assistant", "content": "new answer"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_session_requires_owned_session_and_deletes_it() -> None:
+    repo = FakeSessionRepo()
+    service = SessionService(repo, FakeAgentProfileRepo())
+
+    await service.delete_session("smith-id", "sess-1")
+
+    assert repo.deleted_sessions == [("sess-1", "smith-id")]
 
 
 @pytest.mark.asyncio

@@ -48,7 +48,11 @@ class LLMGate:
 
         # Pre-filter passed — now verify semantically with LLM
         if not self._llm:
-            return result  # no LLM available, trust the pre-filter
+            return GateResult(
+                "fail",
+                "LLM verification unavailable",
+                retry_hint="Retry after the gate LLM becomes available.",
+            )
 
         try:
             prompt = self._prompt_template.format(output=output[:2000])
@@ -60,12 +64,20 @@ class LLMGate:
             if text.startswith("FAIL"):
                 reason = text[5:].strip(": ")
                 return GateResult("fail", f"LLM verification: {reason}", retry_hint=reason)
+            if text == "PASS":
+                return result
+            return GateResult(
+                "fail",
+                "LLM verification returned an invalid verdict",
+                retry_hint="Retry the semantic verification.",
+            )
         except Exception:
-            # fail-open 是刻意选择（gate LLM 挂了不阻塞主流程），
-            # 但退化必须留痕，否则语义校验静默失效永远无人发现。
             logger.warning(
-                "gate LLM verification failed; falling back to pre-filter verdict",
+                "gate LLM verification failed; failing the gate",
                 exc_info=True,
             )
-
-        return result
+            return GateResult(
+                "fail",
+                "LLM verification failed",
+                retry_hint="Retry after the gate LLM becomes available.",
+            )

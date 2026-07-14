@@ -3,7 +3,7 @@ import { Box, Text, useWindowSize } from "ink";
 import { Fragment, memo, type ReactNode, useEffect, useState } from "react";
 
 import type { ToolActivity } from "./activity.js";
-import type { TokenUsage } from "./api.js";
+import type { ContextUsage, TokenUsage } from "./api.js";
 import { BORDER, ERROR, GIT, MODEL, MUTED, PROJECT, SESSION, SUCCESS, WARNING } from "./theme.js";
 import type { TranscriptViewMode } from "./transcript-state.js";
 
@@ -251,9 +251,15 @@ function buildHeaderParts(options: {
   turnCount: number;
   viewMode: TranscriptViewMode;
   tokenUsage: TokenUsage;
+  contextUsage: ContextUsage;
 }): HudPart[] {
+  const contextPercent = Math.max(0, Math.min(100, Math.round(options.contextUsage.context_percent)));
   const parts: HudPart[] = [
     [{ text: `[${options.model || "-"}]`, color: MODEL }],
+    [
+      { text: "context ", color: MUTED },
+      { text: `${contextPercent}%`, color: WARNING },
+    ],
     [{ text: options.projectName || "-", color: PROJECT }],
   ];
 
@@ -290,10 +296,8 @@ export const StatusHud = memo(function StatusHud(options: {
   sessionId?: string;
   turnCount: number;
   viewMode: TranscriptViewMode;
-  busy: boolean;
-  runStartedAt: number | null;
-  turnTokenUsage: TokenUsage;
   tokenUsage: TokenUsage;
+  contextUsage: ContextUsage;
   toolActivity: ToolActivity;
 }) {
   const { columns } = useWindowSize();
@@ -307,9 +311,6 @@ export const StatusHud = memo(function StatusHud(options: {
       {withUniqueKeys(headerLines, lineKey).map(({ item: line, key }) => (
         <HudLine key={`header-${key}`} parts={line} />
       ))}
-      {options.busy && options.runStartedAt !== null ? (
-        <RunProgress startedAt={options.runStartedAt} tokenUsage={options.turnTokenUsage} />
-      ) : null}
       {withUniqueKeys(activityLines, lineKey).map(({ item: line, key }) => (
         <HudLine key={`activity-${key}`} parts={line} separator=" | " />
       ))}
@@ -331,7 +332,29 @@ export function formatElapsed(startedAt: number | null, now = Date.now()): strin
   return minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
 }
 
-function RunProgress({ startedAt, tokenUsage }: { startedAt: number | null; tokenUsage: TokenUsage }) {
+export function buildRunProgressParts(
+  startedAt: number | null,
+  tokenUsage: TokenUsage,
+  now = Date.now(),
+): HudSegment[] {
+  const parts: HudSegment[] = [
+    { text: "  ", color: MUTED },
+    { text: "working ", color: MUTED },
+    { text: `(${formatElapsed(startedAt, now)}`, color: MUTED },
+  ];
+
+  if (tokenUsage.total_tokens > 0) {
+    parts.push(
+      { text: " · ↓ ", color: MUTED },
+      { text: `${formatTokenCount(tokenUsage.total_tokens)} tokens`, color: MUTED },
+    );
+  }
+
+  parts.push({ text: ")", color: MUTED });
+  return parts;
+}
+
+export function RunProgress({ startedAt, tokenUsage }: { startedAt: number | null; tokenUsage: TokenUsage }) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -341,16 +364,11 @@ function RunProgress({ startedAt, tokenUsage }: { startedAt: number | null; toke
 
   return (
     <Box>
-      <Text color={WARNING}>● </Text>
-      <Text color={MUTED}>working </Text>
-      <Text color={MUTED}>({formatElapsed(startedAt, now)}</Text>
-      {tokenUsage.total_tokens > 0 ? (
-        <>
-          <Text color={MUTED}> · ↓ </Text>
-          <Text color={WARNING}>{formatTokenCount(tokenUsage.total_tokens)} tokens</Text>
-        </>
-      ) : null}
-      <Text color={MUTED}>)</Text>
+      {buildRunProgressParts(startedAt, tokenUsage, now).map((part) => (
+        <Text key={segmentKey(part)} color={part.color}>
+          {part.text}
+        </Text>
+      ))}
     </Box>
   );
 }

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictBool
+
+
+class ApprovalDecision(BaseModel):
+    approval_id: str = Field(min_length=1, max_length=128)
+    approved: StrictBool
 
 
 class RunStateOut(BaseModel):
@@ -17,3 +22,7 @@ class RunStateOut(BaseModel):
     current_tool: str | None = None
     reason: str | None = None
     error: str | None = None
+    approval_id: str | None = None
+    approval_tool: str | None = None
+    approval_level: str | None = None
+    approval_reason: str | None = None

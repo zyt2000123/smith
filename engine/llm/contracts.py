@@ -12,6 +12,8 @@ from typing import Any
 import httpx
 
 GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+# Conservative fallback when a model/route does not declare its real window.
+DEFAULT_CONTEXT_WINDOW = 128_000
 
 
 class LLMError(RuntimeError):
@@ -77,6 +79,7 @@ class LLMProviderConfig:
     stream: bool = True
     timeouts: LLMTimeouts = field(default_factory=LLMTimeouts)
     max_output_tokens: int | None = None
+    context_window: int | None = None
 
 
 @dataclass(frozen=True)

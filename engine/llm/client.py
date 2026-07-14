@@ -22,6 +22,8 @@ class ProviderClient:
         self.stream = stream
         self.provider = adapter.provider
         self.capabilities = adapter.capabilities
+        self.context_window = adapter.context_window
+        self.context_window_declared = adapter.context_window_declared
 
     @property
     def adapter(self) -> ProviderAdapter:

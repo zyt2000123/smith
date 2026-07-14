@@ -11,6 +11,7 @@ import httpx
 
 from ..contracts import (
     ChatResponse,
+    DEFAULT_CONTEXT_WINDOW,
     LLMProviderConfig,
     LLMRequest,
     LLMResponseError,
@@ -43,6 +44,8 @@ class OpenAIAdapter(HTTPAdapterMixin):
         self.model = config.model
         self.timeouts = config.timeouts
         self.max_output_tokens = config.max_output_tokens
+        self.context_window_declared = config.context_window is not None
+        self.context_window = config.context_window or DEFAULT_CONTEXT_WINDOW
         self._http = httpx.AsyncClient(
             base_url=self.base_url,
             headers={"Authorization": f"Bearer {self.api_key}"},

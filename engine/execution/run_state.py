@@ -61,9 +61,9 @@ _ALLOWED_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
         RunStatus.CANCELLED,
     }),
     RunStatus.COMPLETED: frozenset({RunStatus.COMPLETED}),
-    RunStatus.INCOMPLETE: frozenset({RunStatus.INCOMPLETE}),
-    RunStatus.FAILED: frozenset({RunStatus.FAILED}),
-    RunStatus.CANCELLED: frozenset({RunStatus.CANCELLED}),
+    RunStatus.INCOMPLETE: frozenset({RunStatus.INCOMPLETE, RunStatus.RUNNING}),
+    RunStatus.FAILED: frozenset({RunStatus.FAILED, RunStatus.RUNNING}),
+    RunStatus.CANCELLED: frozenset({RunStatus.CANCELLED, RunStatus.RUNNING}),
 }
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -97,6 +97,10 @@ class RunState:
     current_tool: str | None = None
     reason: str | None = None
     error: str | None = None
+    approval_id: str | None = None
+    approval_tool: str | None = None
+    approval_level: str | None = None
+    approval_reason: str | None = None
 
     def transition(
         self,
@@ -154,6 +158,10 @@ class RunState:
             "current_tool": self.current_tool,
             "reason": self.reason,
             "error": self.error,
+            "approval_id": self.approval_id,
+            "approval_tool": self.approval_tool,
+            "approval_level": self.approval_level,
+            "approval_reason": self.approval_reason,
         }
 
     @classmethod
@@ -185,6 +193,10 @@ class RunState:
             current_tool=_bounded_text(data.get("current_tool")),
             reason=_bounded_text(data.get("reason")),
             error=_bounded_text(data.get("error")),
+            approval_id=_bounded_text(data.get("approval_id")),
+            approval_tool=_bounded_text(data.get("approval_tool")),
+            approval_level=_bounded_text(data.get("approval_level")),
+            approval_reason=_bounded_text(data.get("approval_reason")),
         )
 
 
@@ -221,6 +233,65 @@ class RunStateStore:
             agent_id=_bounded_text(agent_id) or "unknown",
             session_id=_bounded_text(session_id),
             identity_id=_bounded_text(identity_id),
+        )
+        self.save(state)
+        return state
+
+    def resume(self, run_id: str) -> RunState:
+        """Resume a recoverable run without allowing completed work to rerun."""
+        state = self._require(run_id)
+        if state.status not in {
+            RunStatus.INCOMPLETE,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }:
+            raise RunStateTransitionError(
+                f"Run {run_id!r} is not resumable from {state.status.value!r}"
+            )
+        state.transition(RunStatus.RUNNING, reason="resumed")
+        state.record_event("run_resumed")
+        self.save(state)
+        return state
+
+    def request_approval(
+        self,
+        run_id: str,
+        *,
+        approval_id: str,
+        tool_name: str,
+        level: str,
+        reason: str,
+    ) -> RunState:
+        state = self._require(run_id)
+        if state.status is not RunStatus.RUNNING:
+            raise RunStateTransitionError(
+                f"Run {run_id!r} cannot request approval from {state.status.value!r}"
+            )
+        state.approval_id = _bounded_text(approval_id)
+        state.approval_tool = _bounded_text(tool_name)
+        state.approval_level = _bounded_text(level)
+        state.approval_reason = _bounded_text(reason)
+        state.record_event("approval_required", clear_tool=True)
+        state.transition(RunStatus.WAITING_APPROVAL, reason=reason)
+        self.save(state)
+        return state
+
+    def resolve_approval(self, run_id: str, approval_id: str, *, approved: bool) -> RunState:
+        state = self._require(run_id)
+        if state.status is not RunStatus.WAITING_APPROVAL:
+            raise RunStateTransitionError(
+                f"Run {run_id!r} is not waiting for approval"
+            )
+        if state.approval_id != approval_id:
+            raise RunStateError("Approval request does not match the pending run")
+        state.approval_id = None
+        state.approval_tool = None
+        state.approval_level = None
+        state.approval_reason = None
+        state.record_event("approval_granted" if approved else "approval_denied")
+        state.transition(
+            RunStatus.RUNNING,
+            reason="approval_granted" if approved else "approval_denied",
         )
         self.save(state)
         return state

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,8 +15,11 @@ from .routers import (
     config,
 )
 from .services.scheduler import run_scheduler
+from .services.token_stats_service import TokenStatsService
 
 from .services.engine_runtime import close_shared_llm_clients, load_runtime_identity_catalog
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -23,6 +27,10 @@ async def lifespan(app: FastAPI):
     get_local_token()
     await get_app_db()
     load_runtime_identity_catalog(force=True)
+    try:
+        await TokenStatsService().sync_from_traces()
+    except Exception:
+        logger.warning("failed to sync token statistics during startup", exc_info=True)
     scheduler_task = asyncio.create_task(run_scheduler())
     yield
     scheduler_task.cancel()
@@ -39,7 +47,7 @@ app = FastAPI(title="Agent-Smith Server", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 

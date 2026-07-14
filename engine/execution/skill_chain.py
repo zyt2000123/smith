@@ -19,14 +19,23 @@ logger = logging.getLogger(__name__)
 GATE_REGISTRY: dict[str, Callable[[], Gate]] = {}
 CONDITION_REGISTRY: dict[str, Callable[[dict], bool]] = {}
 
-_LOADED_CONTENT_DIRS: set[Path] = set()
+
+@dataclass(frozen=True)
+class GateContent:
+    """Gate and condition factories loaded from one agents directory."""
+
+    gates: dict[str, Callable[[], Gate]]
+    conditions: dict[str, Callable[[dict], bool]]
+
+
+_CONTENT_CACHE: dict[Path, GateContent] = {}
 
 
 class GateContentError(ValueError):
     """Raised when gate/condition content files are invalid."""
 
 
-def load_gate_content(agents_dir: Path) -> None:
+def load_gate_content(agents_dir: Path) -> GateContent:
     """Populate the gate/condition registries from content directories.
 
     Scans ``<agents_dir>/gates/**/*.py`` for module-level ``GATES`` mappings
@@ -35,11 +44,26 @@ def load_gate_content(agents_dir: Path) -> None:
     surface at startup, not as a confusing "unknown gate" at pipeline parse.
     """
     root = agents_dir.resolve()
-    if root in _LOADED_CONTENT_DIRS:
-        return
-    _scan_content_dir(root / "gates", "GATES", GATE_REGISTRY)
-    _scan_content_dir(root / "conditions", "CONDITIONS", CONDITION_REGISTRY)
-    _LOADED_CONTENT_DIRS.add(root)
+    content = _CONTENT_CACHE.get(root)
+    if content is None:
+        gates: dict[str, Callable[[], Gate]] = {}
+        conditions: dict[str, Callable[[dict], bool]] = {}
+        _scan_content_dir(root / "gates", "GATES", gates)
+        _scan_content_dir(root / "conditions", "CONDITIONS", conditions)
+        content = GateContent(gates=gates, conditions=conditions)
+        _CONTENT_CACHE[root] = content
+
+    # Keep the historical module-level lookup API working for callers that do
+    # not pass an explicit content scope. Runtime pipeline loading passes the
+    # returned registries explicitly, so another project cannot overwrite an
+    # already selected project's factories. The legacy view is first-wins for
+    # duplicate names, while duplicate names within one project still fail in
+    # _scan_content_dir above.
+    for key, factory in content.gates.items():
+        GATE_REGISTRY.setdefault(key, factory)
+    for key, condition in content.conditions.items():
+        CONDITION_REGISTRY.setdefault(key, condition)
+    return content
 
 
 def _scan_content_dir(content_dir: Path, attr: str, registry: dict) -> None:
@@ -75,13 +99,19 @@ def _scan_content_dir(content_dir: Path, attr: str, registry: dict) -> None:
             registry[key] = factory
 
 
-def _resolve_gate(gate_key: str, path: Path, where: str) -> Gate:
-    if gate_key not in GATE_REGISTRY:
+def _resolve_gate(
+    gate_key: str,
+    path: Path,
+    where: str,
+    registry: dict[str, Callable[[], Gate]] | None = None,
+) -> Gate:
+    gates = GATE_REGISTRY if registry is None else registry
+    if gate_key not in gates:
         raise ValueError(
             f"{path.name}: unknown gate {gate_key!r} in {where}; "
-            f"valid gates: {', '.join(sorted(GATE_REGISTRY))}"
+            f"valid gates: {', '.join(sorted(gates))}"
         )
-    gate_factory = GATE_REGISTRY[gate_key]
+    gate_factory = gates[gate_key]
     return gate_factory() if callable(gate_factory) else gate_factory
 
 
@@ -110,7 +140,13 @@ class SkillChain:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_yaml(cls, path: Path) -> SkillChain | None:
+    def from_yaml(
+        cls,
+        path: Path,
+        *,
+        gate_registry: dict[str, Callable[[], Gate]] | None = None,
+        condition_registry: dict[str, Callable[[dict], bool]] | None = None,
+    ) -> SkillChain | None:
         """Build a SkillChain from a pipeline YAML definition file."""
         if not path.is_file():
             return None
@@ -128,24 +164,31 @@ class SkillChain:
             return None
 
         nodes: list[SkillNode] = []
-        for step in steps:
+        conditions = CONDITION_REGISTRY if condition_registry is None else condition_registry
+        for index, step in enumerate(steps):
             if not isinstance(step, dict):
-                continue
+                raise ValueError(f"{path.name}: steps[{index}] must be a mapping")
             skill_name = step.get("skill")
             if not isinstance(skill_name, str) or not skill_name:
-                continue
+                raise ValueError(f"{path.name}: steps[{index}].skill must be a non-empty string")
             gate_key = step.get("gate", "rubric")
-            gate = _resolve_gate(gate_key, path, f"step {skill_name!r}")
+            if not isinstance(gate_key, str) or not gate_key:
+                raise ValueError(f"{path.name}: steps[{index}].gate must be a non-empty string")
+            gate = _resolve_gate(gate_key, path, f"step {skill_name!r}", gate_registry)
 
             condition = None
             cond_key = step.get("condition")
             if cond_key is not None:
-                if cond_key not in CONDITION_REGISTRY:
+                if not isinstance(cond_key, str) or not cond_key:
+                    raise ValueError(
+                        f"{path.name}: steps[{index}].condition must be a non-empty string"
+                    )
+                if cond_key not in conditions:
                     raise ValueError(
                         f"{path.name}: unknown condition {cond_key!r} in step {skill_name!r}; "
-                        f"valid conditions: {', '.join(sorted(CONDITION_REGISTRY))}"
+                        f"valid conditions: {', '.join(sorted(conditions))}"
                     )
-                condition = CONDITION_REGISTRY[cond_key]
+                condition = conditions[cond_key]
 
             nodes.append(SkillNode(skill_name=skill_name, gate=gate, condition=condition))
 
@@ -164,20 +207,32 @@ class SkillChain:
             for key in base_keys:
                 if not isinstance(key, str):
                     raise ValueError(f"{path.name}: base_gate entries must be strings")
-                base_gates.append(_resolve_gate(key, path, "base_gates"))
+                base_gates.append(_resolve_gate(key, path, "base_gates", gate_registry))
 
         backtrack = data.get("backtrack")
-        backtrack_map = dict(backtrack) if isinstance(backtrack, dict) else {}
+        if backtrack is not None and not isinstance(backtrack, dict):
+            raise ValueError(f"{path.name}: backtrack must be a mapping")
+        backtrack_map = dict(backtrack or {})
         return cls(nodes=nodes, backtrack_map=backtrack_map, base_gates=base_gates)
 
     @classmethod
-    def load_pipelines(cls, pipelines_dir: Path) -> dict[str, "SkillChain"]:
+    def load_pipelines(
+        cls,
+        pipelines_dir: Path,
+        *,
+        gate_registry: dict[str, Callable[[], Gate]] | None = None,
+        condition_registry: dict[str, Callable[[dict], bool]] | None = None,
+    ) -> dict[str, "SkillChain"]:
         """Load all pipeline YAML files from a directory, keyed by route name."""
         result: dict[str, SkillChain] = {}
         if not pipelines_dir.is_dir():
             return result
         for yaml_file in sorted(pipelines_dir.glob("*.yaml")):
-            chain = cls.from_yaml(yaml_file)
+            chain = cls.from_yaml(
+                yaml_file,
+                gate_registry=gate_registry,
+                condition_registry=condition_registry,
+            )
             if chain is None:
                 continue
             try:

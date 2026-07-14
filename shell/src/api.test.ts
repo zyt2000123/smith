@@ -16,6 +16,25 @@ test("SSE decoder exposes the run id when execution starts", () => {
   });
 });
 
+test("SSE decoder exposes context usage and compression state", () => {
+  assert.deepEqual(
+    decodeSseEvent(
+      'event: context_usage\ndata: {"context_tokens":128000,"context_window":256000,"context_percent":50,"estimated":false}',
+    ),
+    {
+      type: "context_usage",
+      context_tokens: 128000,
+      context_window: 256000,
+      context_percent: 50,
+      estimated: false,
+    },
+  );
+  assert.deepEqual(decodeSseEvent('event: compression\ndata: {"active":true}'), {
+    type: "compression",
+    active: true,
+  });
+});
+
 test("request timeout signals abort and identify timeout rather than user cancellation", async () => {
   const request = createTimeoutSignal(5);
   try {
@@ -51,6 +70,44 @@ test("SSE decoder retains a tool preflight result", () => {
     blocked: false,
     preflight: true,
     summary: "facts first",
+  });
+});
+
+test("SSE decoder exposes a user approval request with redacted arguments", () => {
+  const event = decodeSseEvent(
+    'event: approval_required\ndata: {"run_id":"run-1","approval_id":"approval-1","tool":"shell","level":"execute","reason":"Approval required","arguments":{"command":"git status"}}',
+  );
+
+  assert.deepEqual(event, {
+    type: "approval_required",
+    runId: "run-1",
+    approvalId: "approval-1",
+    tool: "shell",
+    level: "execute",
+    reason: "Approval required",
+    arguments: { command: "git status" },
+  });
+});
+
+test("SSE decoder preserves an optional structured approval presentation", () => {
+  const event = decodeSseEvent(
+    'event: approval_required\ndata: {"run_id":"run-1","approval_id":"approval-1","tool":"git_ops","level":"write","reason":"Approval required for git_ops","arguments":{"action":"commit"},"presentation":{"title":"Commit Git changes","summary":"Create a Git commit","details":[{"label":"Action","value":"commit"}],"reason":"This changes repository history."}}',
+  );
+
+  assert.deepEqual(event, {
+    type: "approval_required",
+    runId: "run-1",
+    approvalId: "approval-1",
+    tool: "git_ops",
+    level: "write",
+    reason: "Approval required for git_ops",
+    arguments: { action: "commit" },
+    presentation: {
+      title: "Commit Git changes",
+      summary: "Create a Git commit",
+      details: [{ label: "Action", value: "commit" }],
+      reason: "This changes repository history.",
+    },
   });
 });
 

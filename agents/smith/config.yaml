@@ -12,6 +12,8 @@ knowledge:
 tools:
   enabled:
     - read_file
+    - read_pdf
+    - render_pdf_page
     - write_file
     - edit_file
     - list_dir

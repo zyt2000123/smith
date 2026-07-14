@@ -4,6 +4,7 @@ import type { SetupDraft, SetupFlow } from "./store.js";
 export const PROVIDER_PRESETS = {
   openai: { base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
   anthropic: { base_url: "https://api.anthropic.com", model: "claude-sonnet-4-20250514" },
+  gemini: { base_url: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-2.5-flash" },
 } as const;
 
 const LLM_USAGES = ["interactive", "gate", "background"] as const satisfies readonly LlmUsage[];
@@ -19,6 +20,7 @@ export const SETUP_FIELDS = [
   "review_model",
   "max_output_tokens",
   "routes",
+  "models",
   "interactive_api_key",
   "gate_api_key",
   "background_api_key",
@@ -38,6 +40,7 @@ const SETUP_FIELD_LABELS: Record<SetupField, string> = {
   max_output_tokens: "max output tokens (blank=keep, -=provider default)",
   api_key: "API key",
   routes: "route overrides (JSON)",
+  models: "named model profiles (JSON)",
   interactive_api_key: "interactive route API key",
   gate_api_key: "gate route API key",
   background_api_key: "background route API key",
@@ -87,6 +90,17 @@ function jsonForTimeoutProfiles(config: LlmConfig | null): string {
   return JSON.stringify(config.timeout_profiles);
 }
 
+function jsonForModels(config: LlmConfig | null): string {
+  if (!config?.models || Object.keys(config.models).length === 0) return "";
+  const models = Object.fromEntries(
+    Object.entries(config.models).map(([name, profile]) => {
+      const { has_api_key: _hasApiKey, ...publicProfile } = profile;
+      return [name, publicProfile];
+    }),
+  );
+  return JSON.stringify(models);
+}
+
 export function createSetupDraft(config: LlmConfig | null): SetupDraft {
   return {
     provider: config?.provider || "openai",
@@ -96,6 +110,7 @@ export function createSetupDraft(config: LlmConfig | null): SetupDraft {
     max_output_tokens: config?.max_output_tokens?.toString() ?? "",
     api_key: "",
     routes: jsonForRouteOverrides(config),
+    models: jsonForModels(config),
     interactive_api_key: "",
     gate_api_key: "",
     background_api_key: "",
@@ -205,6 +220,9 @@ function parseRouteInput(value: unknown, usage: LlmUsage): LlmRouteInput | null 
       case "max_output_tokens":
         route.max_output_tokens = parseOptionalPositiveInteger(override, `routes.${usage}.max_output_tokens`);
         break;
+      case "context_window":
+        route.context_window = parseOptionalPositiveInteger(override, `routes.${usage}.context_window`);
+        break;
       case "timeout_profile":
         route.timeout_profile =
           override === null ? null : parseUsage(String(override), `routes.${usage}.timeout_profile`);
@@ -227,6 +245,17 @@ function parseRoutes(value: string): Partial<Record<LlmUsage, LlmRouteInput | nu
     routes[usage] = parseRouteInput(override, usage);
   }
   return routes;
+}
+
+function parseModels(value: string): Record<string, LlmRouteInput | null> | undefined {
+  const parsed = parseOptionalObject(value, "Named model profiles");
+  if (!parsed) return undefined;
+  const models: Record<string, LlmRouteInput | null> = {};
+  for (const [name, override] of Object.entries(parsed)) {
+    if (!name.trim()) throw new Error("Named model profile names must be non-empty.");
+    models[name] = parseRouteInput(override, "interactive");
+  }
+  return models;
 }
 
 function parseTimeoutProfile(value: unknown, usage: LlmUsage): LlmTimeoutProfileInput | null {
@@ -277,17 +306,26 @@ function routeForUsage(routes: Partial<Record<LlmUsage, LlmRouteInput | null>>, 
 /** Build the API patch while keeping all secret fields out of the JSON editor. */
 export function buildLlmConfigInput(draft: SetupDraft): LlmConfigInput {
   const reviewModel = draft.review_model.trim();
+  const routes = parseRoutes(draft.routes) ?? {};
+  const timeoutProfiles = parseTimeoutProfiles(draft.timeout_profiles);
+  const models = parseModels(draft.models);
+  const maxOutputTokens = parseMaxOutputTokens(draft.max_output_tokens);
 
   const input: LlmConfigInput = {
     provider: draft.provider.trim(),
     base_url: draft.base_url.trim(),
     model: draft.model.trim(),
-    // The terminal exposes only the five essential fields. Saving it removes
-    // legacy advanced route and timeout overrides.
-    routes: reviewModel ? { gate: { model: reviewModel } } : {},
-    timeout_profiles: {},
   };
+  if (reviewModel) routeForUsage(routes, "gate").model = reviewModel;
+  input.routes = routes;
+  input.timeout_profiles = timeoutProfiles ?? {};
+  if (models !== undefined) input.models = models;
+  if (maxOutputTokens !== undefined) input.max_output_tokens = maxOutputTokens;
   const primaryApiKey = secretPatch(draft.api_key);
   if (primaryApiKey !== undefined) input.api_key = primaryApiKey;
+  for (const [usage, field] of ROUTE_SECRET_FIELDS) {
+    const secret = secretPatch(draft[field]);
+    if (secret !== undefined) routeForUsage(routes, usage).api_key = secret;
+  }
   return input;
 }
