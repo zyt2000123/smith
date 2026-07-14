@@ -15,14 +15,18 @@ function skill(name: string) {
   };
 }
 
-test("slash filtering keeps every command and skill for scrolling", () => {
+test("slash filtering keeps only general commands", () => {
   const skills = Array.from({ length: 8 }, (_, index) => skill(`skill-${index + 1}`));
   const items = filterSlash(buildSlashItems(skills), "/");
 
-  assert.equal(items.length, 23);
-  assert.deepEqual(
-    items.slice(-8).map((item) => item.command),
-    skills.map((item) => `/${item.name}`),
+  assert.equal(items.length, 13);
+  assert.equal(
+    items.some((item) => item.command === "/approve" || item.command === "/deny"),
+    false,
+  );
+  assert.equal(
+    items.some((item) => item.kind === "skill"),
+    false,
   );
 });
 
@@ -82,7 +86,7 @@ test("clear keeps the current session when deletion fails", async () => {
   assert.equal(store.getState().currentSession?.id, "session-1");
 });
 
-test("model, compress, skill, and mcp commands use bridge contracts", async () => {
+test("model commands add relay-sharing profiles and use bridge contracts", async () => {
   const store = createAppStore();
   store.getState().set({
     config: {
@@ -101,18 +105,48 @@ test("model, compress, skill, and mcp commands use bridge contracts", async () =
   });
   const calls: string[] = [];
   const bridge = {
+    addModelProfile: async (model: string, name: string) => calls.push(`add:${name}:${model}`),
     selectModel: async (name: string | null) => calls.push(`model:${name}`),
     compressCurrentSession: async () => calls.push("compress"),
     refreshMcpServers: async () => calls.push("mcp"),
     openTokenStats: async () => calls.push("token"),
   } as unknown as NodeBridge;
 
+  await runShellCommand("/model add GLM-5.2 fast", { bridge, exit: () => {}, getState: store.getState });
   await runShellCommand("/model relay-fast", { bridge, exit: () => {}, getState: store.getState });
   await runShellCommand("/compress", { bridge, exit: () => {}, getState: store.getState });
   await runShellCommand("/mcp", { bridge, exit: () => {}, getState: store.getState });
   await runShellCommand("/token", { bridge, exit: () => {}, getState: store.getState });
 
-  assert.deepEqual(calls, ["model:relay-fast", "compress", "mcp", "token"]);
+  assert.deepEqual(calls, ["add:fast:GLM-5.2", "model:relay-fast", "compress", "mcp", "token"]);
+});
+
+test("model opens the relay model picker", async () => {
+  const store = createAppStore();
+  store.getState().set({
+    config: {
+      configured: true,
+      has_api_key: true,
+      provider: "openai",
+      base_url: "https://relay.example/v1",
+      model: "default-model",
+      max_output_tokens: null,
+      routes: {},
+      timeout_profiles: {},
+      models: {},
+    },
+  });
+
+  let opened = 0;
+  const bridge = {
+    openModelPicker: async () => {
+      opened += 1;
+    },
+  } as unknown as NodeBridge;
+
+  await runShellCommand("/model", { bridge, exit: () => {}, getState: store.getState });
+
+  assert.equal(opened, 1);
 });
 
 test("config reopens the five-field form with saved values intact", async () => {

@@ -51,3 +51,25 @@ test("context usage replaces the HUD value and compression toggles input state",
   store.getState().applyEvent({ type: "compression", active: false });
   assert.equal(store.getState().compressing, false);
 });
+
+test("terminal approval notices are removed when a run terminates", () => {
+  const store = createAppStore();
+  store.getState().pushTurn("run it");
+  store.getState().applyEvent({
+    type: "approval_required",
+    runId: "run-1",
+    approvalId: "approval-1",
+    tool: "shell",
+    level: "execute",
+    reason: "Approval required",
+    arguments: { command: "npm test" },
+  });
+
+  store.getState().applyEvent({ type: "done", status: "failed" });
+
+  assert.equal(store.getState().pendingApproval, null);
+  assert.equal(
+    store.getState().transcript.some((entry) => entry.kind === "system"),
+    false,
+  );
+});

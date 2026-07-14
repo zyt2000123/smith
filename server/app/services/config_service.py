@@ -4,6 +4,7 @@ import math
 from collections.abc import Mapping
 from typing import Any, NoReturn
 
+import httpx
 from fastapi import HTTPException
 
 from common.config import DATA_DIR
@@ -212,6 +213,47 @@ class ConfigService:
             "models": self._public_models(models),
             "timeout_profiles": {usage: dict(profile) for usage, profile in timeout_profiles.items()},
         }
+
+    async def list_relay_models(self) -> dict[str, list[str]]:
+        """Discover OpenAI-compatible model IDs without exposing relay credentials."""
+        cfg = self._load_config()
+        llm = self._mapping(cfg.get("llm"), "llm configuration")
+        routes = self._mapping(llm.get("routes"), "llm.routes")
+        interactive = self._mapping(routes.get("interactive"), "llm.routes.interactive")
+
+        def effective(field: str) -> object:
+            return interactive[field] if field in interactive else llm.get(field)
+
+        api_key = self._string_or_empty(effective("api_key")).strip()
+        base_url = self._string_or_empty(effective("base_url")).strip().rstrip("/")
+        if not api_key or not base_url:
+            self._invalid("interactive LLM route needs an API key and base URL to list relay models")
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
+                response = await client.get(f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"})
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail="Unable to list models from the configured relay") from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail="Configured relay returned an invalid model list") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise HTTPException(status_code=502, detail="Configured relay returned an invalid model list")
+
+        models = sorted(
+            {
+                model_id.strip()
+                for item in payload["data"]
+                if isinstance(item, dict)
+                for model_id in [item.get("id")]
+                if isinstance(model_id, str) and model_id.strip()
+            },
+            key=str.casefold,
+        )
+        return {"models": models}
 
     def _apply_string_patch(
         self,

@@ -16,6 +16,11 @@ test("clearing a conversation removes the armed skill and all HUD state", () => 
     estimated: true,
   });
   assert.deepEqual(conversation.transcript, []);
+  assert.equal(conversation.inputLocked, false);
+  assert.equal(conversation.busy, false);
+  assert.equal(conversation.compressing, false);
+  assert.equal(conversation.runStartedAt, null);
+  assert.equal(conversation.historyIndex, -1);
   assert.deepEqual(conversation.toolActivity, {
     calls: {},
     running: {},

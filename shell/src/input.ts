@@ -10,6 +10,7 @@ import {
   SKILLS_PANEL_VISIBLE_ITEMS,
   SLASH_MENU_VISIBLE_ITEMS,
 } from "./list-navigation.js";
+import { advanceModelPicker, moveModelPicker } from "./model-picker.js";
 import { fieldValue, isEditableSetupField, nextSetupIndex, setSetupField, setupFieldAt } from "./setup.js";
 import type { AppStore, Mode, Panel } from "./store.js";
 import { TOKEN_TABS } from "./token-stats.js";
@@ -20,6 +21,7 @@ export type ShellInputOptions = {
   setupFlow: AppStore["setupFlow"];
   busy: boolean;
   compressing: boolean;
+  inputLocked: boolean;
   viewMode: TranscriptViewMode;
   slashMenuOpen: boolean;
   slashItems: SlashItem[];
@@ -64,9 +66,10 @@ function handleSetupInput(key: Key, options: ShellInputOptions): void {
   }
 }
 
-function handleCtrlC(input: string, key: Key, options: ShellInputOptions): boolean {
+export function handleCtrlC(input: string, key: Key, options: ShellInputOptions): boolean {
   if (!key.ctrl || input !== "c") return false;
 
+  if (options.compressing || options.inputLocked) return true;
   if (options.busy && options.bridge.cancelRequest()) return true;
 
   options.exit();
@@ -140,7 +143,7 @@ export function handleSkillsSelection(key: Key, options: ShellInputOptions): boo
     panel: "chat",
     inputValue: "",
     pendingSkill: selected,
-    statusLine: `Skill ${selected.name} armed.`,
+    statusLine: "",
   });
   return true;
 }
@@ -161,6 +164,8 @@ export function handleApprovalInput(key: Key, options: ShellInputOptions): boole
   const state = options.getState();
   if (!state.pendingApproval) return false;
 
+  if (key.tab) return true;
+
   if (key.upArrow || key.leftArrow || key.downArrow || key.rightArrow) {
     if (state.approvalResolving) return true;
     const direction = key.upArrow || key.leftArrow ? -1 : 1;
@@ -174,6 +179,36 @@ export function handleApprovalInput(key: Key, options: ShellInputOptions): boole
   }
   if (!key.return) return false;
   if (!state.approvalResolving) void options.bridge.resolveApproval(state.approvalIndex === 0);
+  return true;
+}
+
+export function handleModelPickerInput(key: Key, options: ShellInputOptions): boolean {
+  const state = options.getState();
+  const picker = state.modelPicker;
+  if (!picker) return false;
+
+  if (key.tab) return true;
+  if (key.escape) {
+    state.set({ modelPicker: null, statusLine: "Model change cancelled." });
+    return true;
+  }
+
+  const navigation = navigationFromKey(key);
+  if (navigation) {
+    state.set({ modelPicker: moveModelPicker(picker, navigation) });
+    return true;
+  }
+  if (!key.return) return false;
+
+  const next = advanceModelPicker(picker);
+  if (next.selection) {
+    void options.bridge.applyDiscoveredModel(next.selection.model, next.selection.target);
+    return true;
+  }
+  state.set({
+    modelPicker: next.picker,
+    statusLine: next.picker ? "Choose where to configure this model." : "Model change cancelled.",
+  });
   return true;
 }
 
@@ -241,11 +276,12 @@ function cyclePanel(key: Key, options: ShellInputOptions): void {
 
 function routeInput(input: string, key: Key, options: ShellInputOptions): void {
   if (handleCtrlC(input, key, options)) return;
-  if (options.compressing) return;
+  if (options.compressing || options.inputLocked) return;
   if (options.mode === "setup") {
     handleSetupInput(key, options);
     return;
   }
+  if (handleModelPickerInput(key, options)) return;
   if (handleApprovalInput(key, options)) return;
   if (handleViewToggle(input, key, options)) return;
   if (handleQueuedEdit(key, options)) return;

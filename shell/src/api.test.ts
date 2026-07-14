@@ -60,6 +60,41 @@ test("SSE decoder preserves an incomplete terminal status", () => {
   assert.deepEqual(event, { type: "done", id: "message-1", status: "incomplete" });
 });
 
+test("SSE decoding accepts CR-only line endings", () => {
+  assert.deepEqual(decodeSseEvent('event: done\rdata: {"id":"message-1"}'), {
+    type: "done",
+    id: "message-1",
+    status: "completed",
+  });
+});
+
+test("streamMessage ignores events after the first terminal event", async () => {
+  const originalFetch = globalThis.fetch;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(
+        new TextEncoder().encode('event: done\ndata: {"id":"message-1"}\n\nevent: message\ndata: {"text":"stale"}\n\n'),
+      );
+    },
+  });
+
+  globalThis.fetch = async () =>
+    new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+
+  try {
+    const events = [];
+    for await (const event of streamMessage("http://127.0.0.1:8140", "session-1", "hello", { timeoutMs: 1_000 })) {
+      events.push(event);
+    }
+    assert.deepEqual(events, [{ type: "done", id: "message-1", status: "completed" }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("SSE decoder retains a tool preflight result", () => {
   const event = decodeSseEvent('event: tool_result\ndata: {"id":"tool-1","preflight":true,"summary":"facts first"}');
 

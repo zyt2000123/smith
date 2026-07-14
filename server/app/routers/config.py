@@ -91,6 +91,11 @@ async def get_llm_config(svc: ConfigService = Depends(get_config_service)):
     return svc.get_llm_config()
 
 
+@router.get("/llm/models")
+async def list_relay_models(svc: ConfigService = Depends(get_config_service)):
+    return await svc.list_relay_models()
+
+
 @router.post("/llm")
 async def set_llm_config(body: LLMConfig, svc: ConfigService = Depends(get_config_service)):
     return svc.set_llm_config(updates=body.model_dump(exclude_unset=True))

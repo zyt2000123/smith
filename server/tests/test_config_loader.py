@@ -181,6 +181,34 @@ llm:
     assert selected["api_key"] == "relay-key"
 
 
+def test_resolve_llm_config_profile_can_reuse_the_default_relay(tmp_path, monkeypatch) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "config.yaml").write_text(
+        """
+llm:
+  provider: openai
+  api_key: relay-key
+  base_url: https://relay.example/v1
+  model: default-model
+  models:
+    glm-5-2:
+      model: GLM-5.2
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_config, "DATA_DIR", data_dir)
+    monkeypatch.setattr(model_config, "SMITH_PROFILE_DIR", tmp_path / "missing-smith")
+    monkeypatch.setattr(model_config, "AGENT_DIR", tmp_path / "missing-agent")
+
+    selected = model_config.resolve_llm_config(model_profile="glm-5-2")
+
+    assert selected["provider"] == "openai"
+    assert selected["api_key"] == "relay-key"
+    assert selected["base_url"] == "https://relay.example/v1"
+    assert selected["model"] == "GLM-5.2"
+
+
 def test_build_engine_runtime_selects_interactive_gate_and_background_clients(monkeypatch) -> None:
     selected_usages: list[model_config.LLMUsage] = []
     clients: list[object] = []

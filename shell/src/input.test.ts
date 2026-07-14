@@ -5,13 +5,16 @@ import type { Key } from "ink";
 import { NodeBridge } from "./bridge.js";
 import {
   handleApprovalInput,
+  handleCtrlC,
   handleEscape,
+  handleModelPickerInput,
   handleQueuedEdit,
   handleSkillsNavigation,
   handleSkillsSelection,
   handleSlashNavigation,
   type ShellInputOptions,
 } from "./input.js";
+import { createModelPicker } from "./model-picker.js";
 import { createAppStore } from "./store.js";
 
 function escapeKey(): Key {
@@ -32,6 +35,7 @@ function inputOptions(bridge: NodeBridge, store: ReturnType<typeof createAppStor
     setupFlow: "initial",
     busy: true,
     compressing: false,
+    inputLocked: false,
     viewMode: "compact",
     slashMenuOpen: false,
     slashItems: [],
@@ -100,7 +104,7 @@ test("enter arms the selected skill and returns to chat", () => {
   assert.equal(handleSkillsSelection(returnKey(), options), true);
   assert.equal(store.getState().panel, "chat");
   assert.equal(store.getState().pendingSkill?.name, "research");
-  assert.equal(store.getState().statusLine, "Skill research armed.");
+  assert.equal(store.getState().statusLine, "");
 });
 
 test("approval options move with arrows and Enter resolves the selected option", async () => {
@@ -136,6 +140,47 @@ test("approval options move with arrows and Enter resolves the selected option",
   assert.deepEqual(decisions, [false, true]);
 });
 
+test("model picker confirms the selected review model only after choosing its role", async () => {
+  const store = createAppStore();
+  const selected: Array<{ model: string; target: string }> = [];
+  const bridge = {
+    applyDiscoveredModel: async (model: string, target: string) => {
+      selected.push({ model, target });
+    },
+  } as unknown as NodeBridge;
+  const options = inputOptions(bridge, store);
+  store.getState().set({ modelPicker: createModelPicker(["GLM-5.2"]) });
+
+  assert.equal(handleModelPickerInput(returnKey(), options), true);
+  assert.equal(store.getState().modelPicker?.step, "target");
+
+  assert.equal(handleModelPickerInput({ downArrow: true } as Key, options), true);
+  assert.equal(handleModelPickerInput(returnKey(), options), true);
+  assert.equal(store.getState().modelPicker?.step, "confirm");
+  assert.equal(store.getState().modelPicker?.target, "review");
+
+  assert.equal(handleModelPickerInput(returnKey(), options), true);
+  await Promise.resolve();
+  assert.deepEqual(selected, [{ model: "GLM-5.2", target: "review" }]);
+});
+
+test("model picker cancellation leaves the current config untouched", () => {
+  const store = createAppStore();
+  const options = inputOptions({} as NodeBridge, store);
+  store.getState().set({
+    modelPicker: {
+      step: "confirm",
+      models: ["GLM-5.2"],
+      selectedIndex: 1,
+      model: "GLM-5.2",
+      target: "primary",
+    },
+  });
+
+  assert.equal(handleModelPickerInput(returnKey(), options), true);
+  assert.equal(store.getState().modelPicker, null);
+});
+
 test("Escape cancels the pending approval instead of consuming queued input", () => {
   const store = createAppStore();
   let cancelled = false;
@@ -159,6 +204,37 @@ test("Escape cancels the pending approval instead of consuming queued input", ()
 
   assert.equal(handleApprovalInput(escapeKey(), options), true);
   assert.equal(cancelled, true);
+});
+
+test("Ctrl-C during compression does not exit the shell", () => {
+  const store = createAppStore();
+  let exited = false;
+  const options = inputOptions(new NodeBridge(store), store);
+  options.compressing = true;
+  options.exit = () => {
+    exited = true;
+  };
+
+  assert.equal(handleCtrlC("c", { ctrl: true } as Key, options), true);
+  assert.equal(exited, false);
+});
+
+test("approval input consumes Tab instead of switching panels", () => {
+  const store = createAppStore();
+  const options = inputOptions(new NodeBridge(store), store);
+  store.getState().set({
+    pendingApproval: {
+      runId: "run-1",
+      approvalId: "approval-1",
+      tool: "shell",
+      level: "execute",
+      reason: "Approval required",
+      arguments: { command: "npm test" },
+    },
+  });
+
+  assert.equal(handleApprovalInput({ tab: true } as Key, options), true);
+  assert.equal(store.getState().panel, "welcome");
 });
 
 test("escape removes queued messages from newest to oldest before cancelling", () => {

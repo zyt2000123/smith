@@ -56,7 +56,12 @@ export function approvalReason(approval: PendingApproval): string {
 }
 
 export function approvalDetails(approval: PendingApproval): ApprovalDetail[] {
-  if (approval.presentation?.details.length) return approval.presentation.details;
+  if (approval.presentation?.details.length) {
+    return approval.presentation.details.map((detail) => ({
+      label: oneLine(detail.label, 80),
+      value: oneLine(detail.value),
+    }));
+  }
 
   const entries = Object.entries(approval.arguments).filter(([, value]) => value !== undefined && value !== "");
   const ordered = [...entries].sort(([left], [right]) => {

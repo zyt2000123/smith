@@ -15,6 +15,13 @@ export type EmptyConversation = {
   contextUsage: ContextUsage;
   pendingSkill: SkillSummary | null;
   queuedMessages: QueuedMessage[];
+  inputLocked: boolean;
+  busy: boolean;
+  compressing: boolean;
+  runStartedAt: number | null;
+  historyIndex: number;
+  slashIndex: number;
+  skillsIndex: number;
   welcomeNotice: { text: string; tone: "info" | "error" } | null;
   panel: ConversationPanel;
   statusLine: string;
@@ -36,6 +43,13 @@ export function createEmptyConversation(panel: ConversationPanel, statusLine: st
     },
     pendingSkill: null,
     queuedMessages: [],
+    inputLocked: false,
+    busy: false,
+    compressing: false,
+    runStartedAt: null,
+    historyIndex: -1,
+    slashIndex: 0,
+    skillsIndex: 0,
     welcomeNotice: null,
     panel,
     statusLine,
