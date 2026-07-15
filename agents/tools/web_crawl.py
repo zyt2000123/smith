@@ -29,6 +29,7 @@ TOOL_META = {
             "max_depth": {"type": "integer", "default": 2, "description": "Maximum link depth (0-4)"},
             "include_sitemaps": {"type": "boolean", "default": True},
             "crawl_delay": {"type": "number", "default": 1.0, "description": "Minimum seconds between requests"},
+            "max_retries": {"type": "integer", "default": 2, "description": "Retries for transient request failures (0-3)"},
             "state_path": {"type": "string", "default": "", "description": "Optional JSON file for incremental state"},
             "render": {
                 "type": "string",
@@ -309,6 +310,23 @@ def _download(url: str, timeout: float) -> tuple[int, str, str, str]:
     raise ValueError("too many redirects")
 
 
+def _download_with_retries(
+    url: str,
+    timeout: float,
+    *,
+    retries: int,
+) -> tuple[int, str, str, str]:
+    """Retry only transient transport failures with a small bounded backoff."""
+    for attempt in range(retries + 1):
+        try:
+            return _download(url, timeout)
+        except (OSError, TimeoutError):
+            if attempt >= retries:
+                raise
+            time.sleep(0.25 * (attempt + 1))
+    raise RuntimeError("unreachable")
+
+
 async def _render_with_playwright(url: str, timeout: float = 30.0) -> str:
     """Render a public page in a short-lived, request-filtered browser context."""
     try:
@@ -392,6 +410,7 @@ def _crawl(
     max_depth: int,
     include_sitemaps: bool,
     crawl_delay: float,
+    max_retries: int,
     state_path: str,
     render: str,
 ) -> dict[str, Any]:
@@ -407,7 +426,9 @@ def _crawl(
     previous = _read_state(state_path)
     warnings: list[str] = []
     try:
-        robots_status, _, _, robots_text = _download(f"{root}/robots.txt", 15)
+        robots_status, _, _, robots_text = _download_with_retries(
+            f"{root}/robots.txt", 15, retries=max_retries
+        )
         policy = _parse_robots(robots_text) if robots_status == 200 else _RobotsPolicy((), None, ())
     except Exception as exc:
         raise ValueError(f"could not retrieve robots.txt: {exc}") from exc
@@ -420,7 +441,7 @@ def _crawl(
             if _origin(sitemap) != origin:
                 continue
             try:
-                status, _, kind, body = _download(sitemap, 15)
+                status, _, kind, body = _download_with_retries(sitemap, 15, retries=max_retries)
                 if status == 200 and ("xml" in kind or body.lstrip().startswith("<")):
                     for item in _parse_sitemap(body):
                         if _origin(item) == origin and item not in queued:
@@ -440,7 +461,9 @@ def _crawl(
         if pause > 0:
             time.sleep(pause)
         try:
-            status, final_url, content_type, body = _download(current, 30)
+            status, final_url, content_type, body = _download_with_retries(
+                current, 30, retries=max_retries
+            )
             last_request = time.monotonic()
         except Exception as exc:
             warnings.append(f"fetch failed: {current} ({exc})")
@@ -515,6 +538,7 @@ async def execute(
     max_depth: int = 2,
     include_sitemaps: bool = True,
     crawl_delay: float = 1.0,
+    max_retries: int = 2,
     state_path: str = "",
     render: str = "auto",
     output_format: str = "markdown",
@@ -527,6 +551,8 @@ async def execute(
         return "Error: max_depth must be an integer"
     if not isinstance(crawl_delay, (int, float)) or isinstance(crawl_delay, bool):
         return "Error: crawl_delay must be a number"
+    if isinstance(max_retries, bool) or not isinstance(max_retries, int):
+        return "Error: max_retries must be an integer"
     if output_format not in {"markdown", "json"}:
         return "Error: output_format must be 'markdown' or 'json'"
     if render not in {"auto", "never", "always"}:
@@ -541,6 +567,7 @@ async def execute(
             max_depth,
             include_sitemaps,
             max(0.0, float(crawl_delay)),
+            min(max(0, max_retries), 3),
             state_path,
             render,
         )
