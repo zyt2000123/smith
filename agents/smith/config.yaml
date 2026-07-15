@@ -22,5 +22,6 @@ tools:
     - shell
     - web_search
     - web_fetch
+    - web_crawl
     - git_ops
     - todo

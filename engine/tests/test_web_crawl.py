@@ -80,11 +80,11 @@ def test_sitemap_and_rss_parsers_return_normalized_public_urls():
 
 def test_change_detection_uses_content_hash_and_preserves_unchanged_records():
     crawler = _load_crawler()
-    previous = {"https://example.com/a": {"content_hash": "same"}}
+    previous = {"https://example.com/a": {"content_hash": crawler._content_hash("Body")}}
 
     unchanged = crawler._build_record("https://example.com/a", "Title", "Body", previous)
     changed = crawler._build_record("https://example.com/b", "Title", "Body", previous)
 
     assert not unchanged["changed"]
     assert changed["changed"]
-    assert unchanged["content_hash"] == "same"
+    assert unchanged["content_hash"] == crawler._content_hash("Body")

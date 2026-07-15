@@ -306,6 +306,7 @@ def _request_pinned(
     parsed: urllib.parse.ParseResult,
     infos: list[tuple[int, int, int, str, tuple]],
     timeout: int,
+    user_agent: str = "AgentSmith/1.0",
 ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
     host = parsed.hostname
     assert host is not None
@@ -334,7 +335,7 @@ def _request_pinned(
             connection.request(
                 "GET",
                 target,
-                headers={"Host": host_header, "User-Agent": "AgentSmith/1.0"},
+                headers={"Host": host_header, "User-Agent": user_agent},
             )
             return connection, connection.getresponse()
         except (OSError, ssl.SSLError) as exc:
