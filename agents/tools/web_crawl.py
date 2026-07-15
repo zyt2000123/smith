@@ -30,6 +30,12 @@ TOOL_META = {
             "include_sitemaps": {"type": "boolean", "default": True},
             "crawl_delay": {"type": "number", "default": 1.0, "description": "Minimum seconds between requests"},
             "state_path": {"type": "string", "default": "", "description": "Optional JSON file for incremental state"},
+            "render": {
+                "type": "string",
+                "enum": ["auto", "never", "always"],
+                "default": "auto",
+                "description": "Use an isolated browser for JavaScript pages only when needed, never, or always",
+            },
             "output_format": {"type": "string", "enum": ["markdown", "json"], "default": "markdown"},
         },
         "required": ["url"],
@@ -303,6 +309,59 @@ def _download(url: str, timeout: float) -> tuple[int, str, str, str]:
     raise ValueError("too many redirects")
 
 
+async def _render_with_playwright(url: str, timeout: float = 30.0) -> str:
+    """Render a public page in a short-lived, request-filtered browser context."""
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "browser rendering requires the optional 'playwright' dependency and Chromium"
+        ) from exc
+
+    fetch = _web_fetch_module()
+    validation = fetch._validate_url(url)
+    if validation:
+        raise ValueError(validation)
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=["--disable-quic", "--no-first-run"],
+        )
+        context = await browser.new_context(
+            accept_downloads=False,
+            user_agent=USER_AGENT,
+        )
+
+        async def guard_request(route, request):
+            request_validation = fetch._validate_url(request.url)
+            if request_validation:
+                await route.abort("blockedbyclient")
+                return
+            await route.continue_()
+
+        await context.route("**/*", guard_request)
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=int(timeout * 1000))
+            try:
+                await page.wait_for_load_state("networkidle", timeout=min(5_000, int(timeout * 1000)))
+            except Exception:
+                pass
+            # Bounded scrolling supports common lazy-loaded public pages without
+            # turning a single fetch into an unbounded crawl.
+            for _ in range(3):
+                before = await page.evaluate("document.body.scrollHeight")
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(350)
+                after = await page.evaluate("document.body.scrollHeight")
+                if after <= before:
+                    break
+            return await page.content()
+        finally:
+            await context.close()
+            await browser.close()
+
+
 def _read_state(path: str) -> dict[str, Any]:
     if not path:
         return {}
@@ -334,6 +393,7 @@ def _crawl(
     include_sitemaps: bool,
     crawl_delay: float,
     state_path: str,
+    render: str,
 ) -> dict[str, Any]:
     seed = _normalize_url(url)
     if not seed:
@@ -389,6 +449,18 @@ def _crawl(
             warnings.append(f"HTTP {status}: {final_url}")
             continue
         is_xml = "xml" in content_type or body.lstrip().startswith("<?xml")
+        should_render = render == "always" or (
+            render == "auto" and not is_xml and len(_web_fetch_module()._html_to_text(body)) < 400
+        )
+        if should_render:
+            try:
+                body = asyncio.run(_render_with_playwright(final_url, timeout=30))
+                content_type = "text/html"
+                is_xml = False
+            except Exception as exc:
+                if render == "always":
+                    raise ValueError(f"browser render failed for {final_url}: {exc}") from exc
+                warnings.append(f"browser render skipped: {final_url} ({exc})")
         if is_xml:
             links = _parse_feed(body)
             title = ""
@@ -444,6 +516,7 @@ async def execute(
     include_sitemaps: bool = True,
     crawl_delay: float = 1.0,
     state_path: str = "",
+    render: str = "auto",
     output_format: str = "markdown",
 ) -> str:
     if not isinstance(url, str):
@@ -456,11 +529,20 @@ async def execute(
         return "Error: crawl_delay must be a number"
     if output_format not in {"markdown", "json"}:
         return "Error: output_format must be 'markdown' or 'json'"
+    if render not in {"auto", "never", "always"}:
+        return "Error: render must be 'auto', 'never', or 'always'"
     max_pages = min(max(1, max_pages), MAX_PAGES)
     max_depth = min(max(0, max_depth), MAX_DEPTH)
     try:
         result = await asyncio.to_thread(
-            _crawl, url, max_pages, max_depth, include_sitemaps, max(0.0, float(crawl_delay)), state_path
+            _crawl,
+            url,
+            max_pages,
+            max_depth,
+            include_sitemaps,
+            max(0.0, float(crawl_delay)),
+            state_path,
+            render,
         )
     except Exception as exc:
         return f"Error: crawl failed: {exc}"
