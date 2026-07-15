@@ -29,6 +29,23 @@ async def register_mcp_tools(
     mcp_servers = profile_config.get("mcp_servers", [])
     if not isinstance(mcp_servers, list) or not mcp_servers:
         return
+    valid_servers = [server for server in mcp_servers if isinstance(server, dict)]
+    session_pool = services.mcp_session_pool if runtime.session_id else None
+    if session_pool is not None:
+        try:
+            servers = await session_pool.acquire(runtime.session_id, valid_servers)
+            services.mcp_clients.extend(server.client for server in servers)
+            from engine.mcp.client import register_mcp_tools_with_prefix
+            for server in servers:
+                await register_mcp_tools_with_prefix(
+                    services.tool_registry,
+                    server.client,
+                    prefix=server.prefix,
+                    tools=server.tools,
+                )
+        except Exception:
+            logger.exception("failed to register session MCP tools (agent=%s)", runtime.agent_id)
+        return
     try:
         from engine.mcp.client import (
             MCPClient,
@@ -37,10 +54,8 @@ async def register_mcp_tools(
     except Exception:
         logger.exception("failed to import MCP client (agent=%s)", runtime.agent_id)
         return
-    for srv in mcp_servers:
+    for srv in valid_servers:
         try:
-            if not isinstance(srv, dict):
-                continue
             transport = mcp_transport_from_config(srv)
             if transport is None:
                 continue

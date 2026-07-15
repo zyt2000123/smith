@@ -19,7 +19,7 @@ test("slash filtering keeps only general commands", () => {
   const skills = Array.from({ length: 8 }, (_, index) => skill(`skill-${index + 1}`));
   const items = filterSlash(buildSlashItems(skills), "/");
 
-  assert.equal(items.length, 15);
+  assert.equal(items.length, 14);
   assert.equal(
     items.some((item) => item.command === "/init"),
     true,
@@ -27,6 +27,14 @@ test("slash filtering keeps only general commands", () => {
   assert.equal(
     items.some((item) => item.command === "/resume"),
     true,
+  );
+  assert.equal(
+    items.some((item) => item.command === "/skills"),
+    true,
+  );
+  assert.equal(
+    items.some((item) => item.command === "/skill"),
+    false,
   );
   assert.equal(
     items.some((item) => item.command === "/approve" || item.command === "/deny"),

@@ -26,7 +26,7 @@ from common.yaml_utils import YamlConfigError
 from ..schemas.session import ContextCompressionOut, SessionOut, MessageOut
 from ..infrastructure.repositories.session_repo import SessionRepo
 from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
-from .engine_runtime import build_engine_runtime
+from .engine_runtime import build_engine_runtime, close_session_mcp_clients
 from .token_stats_service import TokenStatsService
 
 # Recent messages passed to the engine as short-term conversational context
@@ -220,6 +220,7 @@ class SessionService:
         deleted = await self.session_repo.delete_owned(session_id, agent_id)
         if not deleted:
             raise HTTPException(404, "Session not found")
+        await close_session_mcp_clients(session_id)
 
     async def compress_session(self, agent_id: str, session_id: str) -> ContextCompressionOut:
         session = await self.session_repo.get_owned(session_id, agent_id)

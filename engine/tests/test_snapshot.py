@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import engine.snapshot as snapshot_mod
-from engine.snapshot import _MAX_VERSIONS_PER_FILE, FileSnapshot
+from engine.snapshot import _MAX_VERSIONS_PER_FILE, FileSnapshot, get_snapshot
 
 
 @pytest.fixture()
@@ -78,3 +78,10 @@ def test_get_snapshot_reuses_session_instance(tmp_path: Path, monkeypatch):
     first = snapshot_mod.get_snapshot("s1")
     assert snapshot_mod.get_snapshot("s1") is first
     assert snapshot_mod.get_snapshot("s2") is not first
+
+
+def test_snapshot_rejects_traversal_session_ids():
+    with pytest.raises(ValueError):
+        FileSnapshot("../escape")
+    with pytest.raises(ValueError):
+        get_snapshot("..")

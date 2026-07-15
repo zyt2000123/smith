@@ -81,6 +81,19 @@ def _is_builtin(skill_name: str) -> bool:
     return os.path.isfile(os.path.join(_BUILTIN_SKILLS_DIR, safe, "SKILL.md"))
 
 
+def _is_safe_skill_name(skill_name: str) -> bool:
+    """Only accept a single path component; never silently normalize it."""
+    safe = Path(skill_name).name
+    return bool(skill_name) and safe == skill_name and safe not in {".", ".."}
+
+
+def _agent_skill_dir(agent_skills_dir: Path, skill_name: str) -> Path:
+    path = agent_skills_dir.resolve() / skill_name
+    if path.is_symlink() or not path.resolve(strict=False).is_relative_to(agent_skills_dir.resolve()):
+        raise ValueError("skill directory escapes agent skills root")
+    return path
+
+
 def _parse_frontmatter(raw: str) -> dict:
     """Extract YAML frontmatter from SKILL.md content."""
     if raw.startswith("---"):
@@ -113,7 +126,7 @@ def _list_all_skills(agent_id: str) -> list[dict]:
     if agent_skills_dir.is_dir():
         for child in sorted(agent_skills_dir.iterdir()):
             sf = child / "SKILL.md"
-            if sf.is_file():
+            if not child.is_symlink() and not sf.is_symlink() and sf.is_file():
                 meta = _parse_frontmatter(sf.read_text(encoding="utf-8"))
                 skills.append({
                     "name": meta.get("name", child.name),
@@ -127,14 +140,19 @@ def _list_all_skills(agent_id: str) -> list[dict]:
 
 def _get_skill_content(agent_id: str, skill_name: str) -> tuple[str, str]:
     """Return (content, source) for a skill. Checks agent first, then builtin."""
-    safe = Path(skill_name).name
+    if not _is_safe_skill_name(skill_name):
+        return "", ""
 
     # Agent-installed first
-    agent_path = _agent_skills_dir(agent_id) / safe / "SKILL.md"
-    if agent_path.is_file():
+    try:
+        agent_path = _agent_skill_dir(_agent_skills_dir(agent_id), skill_name) / "SKILL.md"
+    except ValueError:
+        agent_path = None
+    if agent_path is not None and not agent_path.is_symlink() and agent_path.is_file():
         return agent_path.read_text(encoding="utf-8"), "agent"
 
     # Builtin
+    safe = skill_name
     builtin_path = Path(_BUILTIN_SKILLS_DIR) / safe / "SKILL.md"
     if builtin_path.is_file():
         return builtin_path.read_text(encoding="utf-8"), "builtin"
@@ -202,6 +220,9 @@ async def execute(
     agent_skills_dir = _agent_skills_dir(agent_id)
     store = SkillStore(agent_skills_dir)
 
+    if skill_name is not None and not _is_safe_skill_name(skill_name):
+        return "Error: skill_name must be a single non-relative path component"
+
     # ------------------------------------------------------------------
     # list
     # ------------------------------------------------------------------
@@ -237,9 +258,10 @@ async def execute(
         if _is_builtin(skill_name):
             return f"Error: '{skill_name}' is a built-in skill name. Choose a different name."
 
-        safe = Path(skill_name).name
-        skill_dir = agent_skills_dir / safe
+        skill_dir = _agent_skill_dir(agent_skills_dir, skill_name)
         skill_file = skill_dir / "SKILL.md"
+        if skill_file.is_symlink():
+            return "Error: skill file must not be a symlink"
         if skill_file.is_file():
             return f"Error: skill '{skill_name}' already exists. Use 'edit' to modify it."
 
@@ -258,8 +280,9 @@ async def execute(
         if _is_builtin(skill_name):
             return "Error: built-in skills are read-only. Cannot edit."
 
-        safe = Path(skill_name).name
-        skill_file = agent_skills_dir / safe / "SKILL.md"
+        skill_file = _agent_skill_dir(agent_skills_dir, skill_name) / "SKILL.md"
+        if skill_file.is_symlink():
+            return "Error: skill file must not be a symlink"
         if not skill_file.is_file():
             return f"Error: skill '{skill_name}' not found in agent skills. Use 'create' first."
 
@@ -283,8 +306,9 @@ async def execute(
         if _is_builtin(skill_name):
             return "Error: built-in skills are read-only. Cannot patch."
 
-        safe = Path(skill_name).name
-        skill_file = agent_skills_dir / safe / "SKILL.md"
+        skill_file = _agent_skill_dir(agent_skills_dir, skill_name) / "SKILL.md"
+        if skill_file.is_symlink():
+            return "Error: skill file must not be a symlink"
         if not skill_file.is_file():
             return f"Error: skill '{skill_name}' not found in agent skills"
 

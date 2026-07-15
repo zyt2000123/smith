@@ -5,11 +5,19 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import re
 from pathlib import Path
 
 # ponytail: track() runs on every write_file/edit_file, so without a cap the
 # per-file version list (and backup files on disk) grow unbounded per session.
 _MAX_VERSIONS_PER_FILE = 20
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _safe_session_id(session_id: str) -> str:
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        raise ValueError("session_id must contain only letters, digits, underscores, or hyphens")
+    return session_id
 
 
 class FileSnapshot:
@@ -22,6 +30,7 @@ class FileSnapshot:
     """
 
     def __init__(self, session_id: str = "default"):
+        session_id = _safe_session_id(session_id)
         try:
             from common.config import DATA_DIR
             self._backup_dir = DATA_DIR / "snapshots" / session_id
@@ -102,6 +111,7 @@ _active_snapshots: dict[str, FileSnapshot] = {}
 
 
 def get_snapshot(session_id: str = "default") -> FileSnapshot:
+    session_id = _safe_session_id(session_id)
     if session_id not in _active_snapshots:
         _active_snapshots[session_id] = FileSnapshot(session_id)
     return _active_snapshots[session_id]

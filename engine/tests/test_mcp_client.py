@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import httpx
+import pytest
 
 from engine.tool.interface import ToolCall
 from engine.mcp.config import (
@@ -24,6 +25,7 @@ from engine.mcp.client import (
     register_mcp_tools_with_prefix,
 )
 from engine.tool.registry import ToolRegistry
+from engine.safety.tool_guard import ToolGuard
 
 
 SERVER = r'''
@@ -289,6 +291,65 @@ def test_streamable_http_transport_accepts_sse_request_response():
     assert asyncio.run(run()) == []
 
 
+def test_streamable_http_transport_rejects_oversized_json_response():
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        request_id = payload.get("id")
+        if payload.get("method") == "initialize":
+            return httpx.Response(200, json={
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"protocolVersion": "2025-11-25"},
+            })
+        if payload.get("method") == "notifications/initialized":
+            return httpx.Response(202)
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b"x" * (1024 * 1024 + 1),
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            client = MCPClient(transport=StreamableHTTPMCPTransport(
+                "https://mcp.example.test/mcp", http_client=http_client,
+            ))
+            await client.connect()
+            try:
+                await client.list_tools()
+            finally:
+                await client.close()
+
+    with pytest.raises(RuntimeError, match="exceeds maximum size"):
+        asyncio.run(run())
+
+
+def test_streamable_http_transport_rejects_oversized_notification_response():
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        request_id = payload.get("id")
+        if payload.get("method") == "initialize":
+            return httpx.Response(200, json={
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"protocolVersion": "2025-11-25"},
+            })
+        return httpx.Response(202, content=b"x" * (1024 * 1024 + 1))
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            client = MCPClient(transport=StreamableHTTPMCPTransport(
+                "https://mcp.example.test/mcp", http_client=http_client,
+            ))
+            try:
+                await client.connect()
+            finally:
+                await client.close()
+
+    with pytest.raises(RuntimeError, match="exceeds maximum size"):
+        asyncio.run(run())
+
+
 def test_mcp_config_supports_stdio_and_streamable_http_transports():
     stdio = _mcp_transport_from_config({"type": "stdio", "command": [sys.executable, "-V"]})
     http = _mcp_transport_from_config({
@@ -409,6 +470,30 @@ def test_mcp_registration_rejects_non_ascii_tool_names():
     assert asyncio.run(run()) == (1, ["mcp_docs_safe_tool"])
 
 
+def test_registered_mcp_tools_always_require_approval():
+    class FakeClient:
+        async def list_tools(self):
+            return [MCPTool("mutate_remote", "unknown remote operation", {})]
+
+        async def call_tool(self, name, arguments):
+            return name
+
+    async def run():
+        registry = ToolRegistry()
+        await register_mcp_tools(registry, FakeClient())
+        definition = registry.get("mcp_mutate_remote")
+        result = ToolGuard(
+            Path("missing-rules.json"), tool_registry=registry.definitions(),
+        ).check(ToolCall("call", "mcp_mutate_remote", {}))
+        return definition, result
+
+    definition, result = asyncio.run(run())
+    assert definition is not None
+    assert definition.side_effect == "external"
+    assert definition.concurrency == "serial"
+    assert result.approval_required
+
+
 def test_mcp_openai_schema_helper_sanitizes_tool_names():
     schemas = MCPClient([sys.executable, "-V"]).to_openai_schemas([
         MCPTool("safe-tool", "", {}),
@@ -468,6 +553,39 @@ def test_stdio_transport_serializes_concurrent_requests():
     assert asyncio.run(run()) == ["ok result"] * 5
 
 
+def test_stdio_transport_drains_server_stderr_before_response():
+    """A noisy MCP server must not block on its stderr pipe before replying."""
+    noisy_server = r'''
+import json
+import sys
+
+for line in sys.stdin:
+    message = json.loads(line)
+    request_id = message.get("id")
+    if request_id is None:
+        continue
+    sys.stderr.write("x" * (1024 * 1024))
+    sys.stderr.flush()
+    print(json.dumps({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}},
+    }), flush=True)
+'''
+
+    async def run():
+        with tempfile.TemporaryDirectory() as tmp:
+            server = Path(tmp) / "noisy_server.py"
+            server.write_text(noisy_server, encoding="utf-8")
+            client = MCPClient([sys.executable, str(server)])
+            try:
+                await asyncio.wait_for(client.connect(), timeout=2)
+            finally:
+                await client.close()
+
+    asyncio.run(run())
+
+
 def test_stdio_transport_waits_after_killing_timed_out_process():
     class FakeProcess:
         stdin = None
@@ -493,6 +611,40 @@ def test_stdio_transport_waits_after_killing_timed_out_process():
         return process.killed, process.calls
 
     assert asyncio.run(run()) == (True, 2)
+
+
+def test_stdio_transport_cancellation_kills_and_reaps_process():
+    class FakeProcess:
+        stdin = None
+
+        def __init__(self):
+            self.returncode = None
+            self.killed = False
+            self.wait_started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def wait(self):
+            self.wait_started.set()
+            await self.release.wait()
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+            self.release.set()
+
+    async def run():
+        transport = StdioMCPTransport(["fake"])
+        process = FakeProcess()
+        transport._process = process
+        closing = asyncio.create_task(transport.close())
+        await process.wait_started.wait()
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        return process.killed, transport._process
+
+    assert asyncio.run(run()) == (True, None)
 
 
 if __name__ == "__main__":

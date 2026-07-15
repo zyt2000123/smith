@@ -16,6 +16,7 @@ from engine.llm.port import LLMPort
 from engine.safety.tool_guard import ToolGuard
 from engine.skill.registry import SkillRegistry
 from engine.tool.registry import ToolRegistry
+from engine.mcp.session_pool import MCPClientSessionPool
 
 
 def _config_fingerprint(config: dict[str, Any]) -> str:
@@ -62,6 +63,7 @@ class LLMClientManager:
 
 
 _llm_client_manager = LLMClientManager()
+_mcp_client_session_pool = MCPClientSessionPool()
 
 
 def _single_line_runtime_value(value: object) -> str:
@@ -136,6 +138,8 @@ def build_engine_runtime(
         tool_registry=ToolRegistry(),
         skill_registry=SkillRegistry(),
         tool_guard=ToolGuard(SAFETY_RULES_PATH),
+        mcp_session_pool=_mcp_client_session_pool,
+        owns_mcp_clients=False,
         owns_llm_clients=False,
     )
     return runtime, services
@@ -157,5 +161,11 @@ def build_memory_maintenance_services() -> RuntimeServices:
 
 
 async def close_shared_llm_clients() -> None:
-    """Close process-scoped LLM clients during server shutdown."""
+    """Close process-scoped MCP and LLM clients during server shutdown."""
+    await _mcp_client_session_pool.close()
     await _llm_client_manager.close()
+
+
+async def close_session_mcp_clients(session_id: str) -> None:
+    """Release MCP resources when their owning conversation is deleted."""
+    await _mcp_client_session_pool.release(session_id)

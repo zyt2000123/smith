@@ -14,6 +14,6 @@ export const PROJECT = "#98c379";
 export const SESSION = "#61afef";
 export const GIT = "#c678dd";
 
-/** High-contrast treatment for the active option in terminal menus. */
-export const SELECTED_FOREGROUND = "#43d17b";
-export const SELECTED_BACKGROUND = "#173d29";
+/** High-contrast, brand-pink treatment for the active option in terminal menus. */
+export const SELECTED_FOREGROUND = ACCENT;
+export const SELECTED_BACKGROUND = "#3d1730";

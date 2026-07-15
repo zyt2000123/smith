@@ -231,6 +231,11 @@ class ToolRegistry:
             return names
         return [name for name in names if name in self._enabled]
 
+    def get(self, name: str) -> ToolDefinition | None:
+        """Return a tool's public contract for policy enforcement."""
+        entry = self._tools.get(_canonical_tool_name(name))
+        return entry[0] if entry is not None else None
+
     def wrap_tool(self, name: str, wrapper: Callable[[Callable], Callable]) -> bool:
         """Replace a tool handler while preserving its public definition."""
         tool_name = _canonical_tool_name(name)
