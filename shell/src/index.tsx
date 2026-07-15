@@ -36,7 +36,16 @@ import {
   setupFields,
 } from "./setup.js";
 import { type AppStore, createAppStore } from "./store.js";
-import { ACCENT, BORDER, ERROR, INFO, MUTED, WARNING } from "./theme.js";
+import {
+  ACCENT,
+  BORDER,
+  ERROR,
+  INFO,
+  MUTED,
+  SELECTED_BACKGROUND,
+  SELECTED_FOREGROUND,
+  WARNING,
+} from "./theme.js";
 import { TokenStatsPanel } from "./token-panel.js";
 import { TranscriptEntryView } from "./transcript.js";
 import { splitTranscript, type TranscriptEntry, type TranscriptViewMode } from "./transcript-state.js";
@@ -227,16 +236,17 @@ function SlashMenu({ items, selectedIndex }: { items: SlashItem[]; selectedIndex
           {visible.startIndex > 0 ? <Text color={MUTED}>↑ more</Text> : null}
           {visible.items.map((item, offset) => {
             const index = visible.startIndex + offset;
+            const selected = index === selectedIndex;
             const showCategory = item.category !== category;
             category = item.category;
             return (
               <Box key={item.id} flexDirection="column" marginTop={showCategory ? 1 : 0}>
                 {showCategory ? <Text color={MUTED}>{item.category}</Text> : null}
-                <Box>
-                  <Text color={index === selectedIndex ? ACCENT : INFO}>
-                    {index === selectedIndex ? ">" : " "} {item.command}
+                <Box width="100%" backgroundColor={selected ? SELECTED_BACKGROUND : undefined}>
+                  <Text color={selected ? SELECTED_FOREGROUND : INFO} bold={selected}>
+                    {selected ? ">" : " "} {item.command}
                   </Text>
-                  <Text color={MUTED}>{`  ${truncate(item.description, 60)}`}</Text>
+                  <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{`  ${truncate(item.description, 60)}`}</Text>
                 </Box>
               </Box>
             );
