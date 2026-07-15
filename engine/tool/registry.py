@@ -447,7 +447,13 @@ def _looks_like_tool_error(content: str) -> bool:
     """
 
     stripped = content.lstrip()
-    if stripped.startswith(("Error:", "[BLOCKED]", "Memory rejected:")):
+    if stripped.startswith((
+        "Error:",
+        "HTTP Error:",
+        "URL Error:",
+        "[BLOCKED]",
+        "Memory rejected:",
+    )):
         return True
 
     match = _EXIT_CODE_RE.match(stripped)

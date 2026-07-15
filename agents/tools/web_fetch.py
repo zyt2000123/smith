@@ -7,6 +7,7 @@ import http.client
 import ipaddress
 import re
 import socket
+import time
 import urllib.parse
 import ssl
 from html.parser import HTMLParser
@@ -39,7 +40,8 @@ TOOL_META = {
     "execution_environment": "host",
 }
 
-MAX_CHARS = 40_000
+MAX_RESPONSE_BYTES = 512 * 1024
+MAX_OUTPUT_CHARS = 40_000
 MAX_TIMEOUT = 60
 BLOCKED_SCHEMES = {"file", "ftp", "data"}
 BLOCKED_HOSTS = {"localhost"}
@@ -79,6 +81,15 @@ HTML_BLOCK_TAGS = {
     "ul",
 }
 HTML_SKIP_TAGS = {"script", "style", "svg", "noscript", "template"}
+ALLOWED_PORTS = {80, 443}
+ALLOWED_CONTENT_TYPES = (
+    "application/json",
+    "application/xml",
+    "application/xhtml+xml",
+    "application/ld+json",
+    "text/",
+)
+_FETCH_CONCURRENCY = asyncio.Semaphore(2)
 
 
 class _PlainTextExtractor(HTMLParser):
@@ -126,6 +137,8 @@ def _blocked_ip_reason(host: str) -> str | None:
         return "reserved address"
     if ip.is_unspecified:
         return "unspecified address"
+    if not ip.is_global:
+        return "non-public address"
     return None
 
 
@@ -138,6 +151,8 @@ def _validate_url(url: str) -> str | None:
         return "URL must start with http:// or https://"
     if not parsed.hostname:
         return "URL must include a hostname"
+    if parsed.username is not None or parsed.password is not None:
+        return "URLs containing credentials are not allowed"
 
     host = parsed.hostname.rstrip(".").lower()
     if host in BLOCKED_HOSTS or host.endswith(".localhost"):
@@ -148,7 +163,14 @@ def _validate_url(url: str) -> str | None:
         return f"host resolves to a blocked {reason}"
 
     try:
-        _safe_addresses(host, parsed.port or (443 if scheme == "https" else 80))
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except ValueError as exc:
+        return str(exc)
+    if port not in ALLOWED_PORTS:
+        return "only destination ports 80 and 443 are allowed"
+
+    try:
+        _safe_addresses(host, port)
     except (OSError, ValueError) as exc:
         return str(exc)
 
@@ -195,13 +217,21 @@ def _html_to_text(raw: str) -> str:
 
 
 async def execute(*, url: str, timeout: int = 30) -> str:
+    if not isinstance(url, str):
+        return "Error: url must be a string"
+    if isinstance(timeout, bool) or not isinstance(timeout, int):
+        return "Error: timeout must be an integer"
     timeout = min(max(1, timeout), MAX_TIMEOUT)
 
     validation_error = _validate_url(url)
     if validation_error:
         return f"Error: {validation_error}"
 
-    return await _fetch_plain(url, timeout)
+    async with _FETCH_CONCURRENCY:
+        try:
+            return await asyncio.wait_for(_fetch_plain(url, timeout), timeout=timeout)
+        except asyncio.TimeoutError:
+            return "URL Error: request timed out"
 
 
 async def _fetch_plain(url: str, timeout: int) -> str:
@@ -211,15 +241,22 @@ async def _fetch_plain(url: str, timeout: int) -> str:
 
 def _fetch_pinned(url: str, timeout: int) -> str:
     current_url = url
+    deadline = time.monotonic() + timeout
     for _ in range(6):
         parsed = urllib.parse.urlparse(current_url)
         host = parsed.hostname
         if host is None:
             return "URL Error: URL must include a hostname"
-        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        try:
+            port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        except ValueError as exc:
+            return f"URL Error: {exc}"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "URL Error: request timed out"
         try:
             infos = _safe_addresses(host, port)
-            connection, response = _request_pinned(parsed, infos, timeout)
+            connection, response = _request_pinned(parsed, infos, remaining)
         except (OSError, ValueError, ssl.SSLError, http.client.HTTPException) as exc:
             return f"URL Error: {exc}"
 
@@ -234,19 +271,30 @@ def _fetch_pinned(url: str, timeout: int) -> str:
                     return f"URL Error: redirect blocked: {exc}"
                 continue
 
-            data = response.read(MAX_CHARS + 1)
-            truncated = len(data) > MAX_CHARS
-            charset = response.headers.get_content_charset() or "utf-8"
-            raw = data[:MAX_CHARS].decode(charset, errors="replace")
+            if not 200 <= response.status < 300:
+                return f"HTTP Error: {response.status} for {current_url}"
+
             content_type = (response.getheader("Content-Type") or "").lower()
+            if content_type and not any(kind in content_type for kind in ALLOWED_CONTENT_TYPES):
+                return f"HTTP Error: unsupported content type '{content_type}'"
+
+            data = response.read(MAX_RESPONSE_BYTES + 1)
+            truncated = len(data) > MAX_RESPONSE_BYTES
+            charset = response.headers.get_content_charset() or "utf-8"
+            raw = data[:MAX_RESPONSE_BYTES].decode(charset, errors="replace")
             is_html = any(kind in content_type for kind in HTML_CONTENT_TYPES) or raw.lstrip().startswith("<")
             body = _html_to_text(raw) if is_html else raw.strip()
             if not body:
                 body = raw.strip()
+            output_truncated = len(body) > MAX_OUTPUT_CHARS
+            body = body[:MAX_OUTPUT_CHARS]
             body_type = "text extracted from html" if is_html else "text"
+            source = current_url.replace('"', "%22")
             return (
+                f"[UNTRUSTED_EXTERNAL_CONTENT source=\"{source}\"]\n"
                 f"[status={response.status}, pinned HTTP, {body_type}"
-                f"{', truncated' if truncated else ''}]\n{body}"
+                f"{', truncated' if truncated or output_truncated else ''}]\n{body}\n"
+                "[/UNTRUSTED_EXTERNAL_CONTENT]"
             )
         finally:
             connection.close()

@@ -48,6 +48,8 @@ _SNIPPET_RE = re.compile(
     r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', re.S
 )
 _TAG_RE = re.compile(r"<[^>]+>")
+MAX_QUERY_LENGTH = 1_000
+_SEARCH_CONCURRENCY = asyncio.Semaphore(4)
 
 
 def _decode_ddg_url(href: str) -> str:
@@ -64,6 +66,15 @@ def _clean(text: str) -> str:
 
 
 async def execute(*, query: str, max_results: int = 5, provider: str = "duckduckgo") -> str:
+    if not isinstance(query, str):
+        return "Error: query must be a string"
+    query = query.strip()
+    if not query:
+        return "Error: query must not be empty"
+    if len(query) > MAX_QUERY_LENGTH:
+        return "Error: query must be at most 1000 characters"
+    if isinstance(max_results, bool) or not isinstance(max_results, int):
+        return "Error: max_results must be an integer"
     max_results = min(max(1, max_results), 10)
     if provider != "duckduckgo":
         return f"Error: provider '{provider}' not supported yet. Use 'duckduckgo'."
@@ -85,7 +96,10 @@ async def execute(*, query: str, max_results: int = 5, provider: str = "duckduck
 
     loop = asyncio.get_event_loop()
     try:
-        page = await loop.run_in_executor(None, _fetch)
+        async with _SEARCH_CONCURRENCY:
+            page = await asyncio.wait_for(loop.run_in_executor(None, _fetch), timeout=15)
+    except asyncio.TimeoutError:
+        return "Error: search request timed out"
     except Exception as e:
         return f"Error: search request failed: {e}"
 
@@ -93,11 +107,15 @@ async def execute(*, query: str, max_results: int = 5, provider: str = "duckduck
     snippets = [_clean(s) for s in _SNIPPET_RE.findall(page)]
 
     if not links:
-        return f"No results for '{query}' (or search engine blocked the request)."
+        challenge_markers = ("anomaly", "captcha", "unusual traffic")
+        if any(marker in page.lower() for marker in challenge_markers):
+            return "Error: search provider returned an anti-bot challenge"
+        return f"[UNTRUSTED_EXTERNAL_CONTENT source=\"duckduckgo\"]\nNo results for '{query}'\n[/UNTRUSTED_EXTERNAL_CONTENT]"
 
-    lines = [f"Search results for: {query}"]
+    lines = ["[UNTRUSTED_EXTERNAL_CONTENT source=\"duckduckgo\"]", f"Search results for: {query}"]
     for i, (href, title) in enumerate(links[:max_results]):
         real_url = _decode_ddg_url(href)
         snippet = snippets[i] if i < len(snippets) else ""
         lines.append(f"\n{i + 1}. {_clean(title)}\n   {real_url}\n   {snippet}")
+    lines.append("[/UNTRUSTED_EXTERNAL_CONTENT]")
     return "\n".join(lines)
