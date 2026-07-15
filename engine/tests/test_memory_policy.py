@@ -243,6 +243,26 @@ def test_compile_recent_writes_only_policy_structured_markdown(tmp_path: Path) -
     assert "Smith Memory Policy" in reviewer.calls[0][-1]["content"]
 
 
+def test_generic_work_events_never_become_durable_memory_candidates(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    _write_event(memory_dir, kind="work", scope="project")
+
+    assert asyncio.run(
+        compile_durable(memory_dir, StaticLLM(DURABLE_DOC), PassReviewer())
+    ) is False
+    assert not (memory_dir / "durable.md").exists()
+
+
+def test_explicit_stable_decision_remains_a_durable_memory_candidate(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    _write_event(memory_dir, kind="decision", scope="project", evidence="user_explicit")
+
+    assert asyncio.run(
+        compile_durable(memory_dir, StaticLLM(DURABLE_DOC), PassReviewer())
+    ) is True
+    assert (memory_dir / "durable.md").read_text(encoding="utf-8") == DURABLE_DOC
+
+
 def test_compile_recent_rejects_free_form_output_and_keeps_old_view(tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
     _write_event(memory_dir)
@@ -266,7 +286,12 @@ def test_compile_recent_rejects_free_form_output_and_keeps_old_view(tmp_path: Pa
 
 def test_compile_durable_accepts_complete_view_without_adding_legacy_wrapper(tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
-    _write_event(memory_dir)
+    _write_event(
+        memory_dir,
+        kind="decision",
+        scope="project",
+        evidence="user_explicit",
+    )
 
     assert asyncio.run(compile_durable(memory_dir, StaticLLM(DURABLE_DOC), PassReviewer())) is True
 

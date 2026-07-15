@@ -12,6 +12,35 @@ import yaml
 
 MemoryViewName = Literal["context", "recent", "durable"]
 
+# These machine-readable allowlists are the write-time counterpart to the
+# Markdown policy.  They intentionally reject generic "work" and task-plan
+# entries from durable memory even when a caller labels them as evidence.
+MANUAL_MEMORY_KINDS = frozenset({
+    "preference",
+    "correction",
+    "decision",
+    "remember",
+    "forget",
+    "verified_fact",
+    "procedure",
+    "pitfall",
+})
+MANUAL_EVIDENCE_TYPES = frozenset({
+    "user_explicit",
+    "tool_result",
+    "test_result",
+    "source_document",
+})
+DURABLE_MEMORY_KINDS = frozenset({
+    "correction",
+    "decision",
+    "remember",
+    "forget",
+    "verified_fact",
+    "procedure",
+    "pitfall",
+})
+
 
 class MemoryPolicyError(ValueError):
     """The canonical policy or a rendered memory view is invalid."""

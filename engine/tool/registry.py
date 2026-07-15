@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
 
+from .environment import ExecutionEnvironment, LocalExecutionEnvironment
 from .interface import ToolCall, ToolDefinition, ToolResult
 from .truncation import truncate_output
 
@@ -48,6 +49,8 @@ class ToolRegistry:
         self._enabled: set[str] | None = None
         self._execution_ledger: ToolExecutionLedger | None = None
         self._working_dir: Path | None = None
+        self._environment: ExecutionEnvironment = LocalExecutionEnvironment()
+        self._wants_environment: set[str] = set()
 
     def register(
         self,
@@ -123,6 +126,11 @@ class ToolRegistry:
             execution_environment=execution_environment,
         )
         self._tools[name] = (defn, func)
+        try:
+            if "environment" in inspect.signature(func).parameters:
+                self._wants_environment.add(name)
+        except (TypeError, ValueError):
+            pass
 
     def load_providers(self, tools_dir: Path) -> None:
         """Auto-discover tool providers from a directory of .py files.
@@ -237,6 +245,10 @@ class ToolRegistry:
         """Bind a per-run ledger used to protect side-effecting tools."""
         self._execution_ledger = ledger
 
+    def bind_execution_environment(self, environment: ExecutionEnvironment | None) -> None:
+        """Bind where side-effecting tool commands run (default: local host)."""
+        self._environment = environment if environment is not None else LocalExecutionEnvironment()
+
     def bind_working_directory(self, working_dir: str | Path | None) -> None:
         """Bind the root used for relative paths during one agent run."""
         self._working_dir = Path(working_dir).expanduser().resolve() if working_dir else None
@@ -328,6 +340,20 @@ class ToolRegistry:
             )
 
         defn, func = entry
+        # ponytail: only LocalExecutionEnvironment ("host") exists today; tools
+        # declaring "sandbox" are rejected explicitly instead of silently
+        # falling back to the host — add a sandbox adapter when one is needed.
+        required_env = defn.execution_environment
+        if required_env != "either" and required_env != self._environment.name:
+            return ToolResult(
+                call_id=call.id,
+                content=(
+                    f"Error: tool '{tool_name}' requires the '{required_env}' execution "
+                    f"environment; current environment is '{self._environment.name}'"
+                ),
+                is_error=True,
+                error_kind="environment_unavailable",
+            )
         ledger = self._execution_ledger if defn.side_effect != "none" else None
         idempotency_key = call.idempotency_key or (
             ledger.idempotency_key_for(
@@ -349,8 +375,14 @@ class ToolRegistry:
                 return decision.result
             claimed = decision.claimed
 
+        arguments = call.arguments
+        if tool_name in self._wants_environment:
+            # Injected last so a model-supplied "environment" argument can
+            # never smuggle a fake environment past the binding.
+            arguments = {**call.arguments, "environment": self._environment}
+
         try:
-            content = await self._invoke(func, call.arguments, defn.timeout_seconds)
+            content = await self._invoke(func, arguments, defn.timeout_seconds)
             content_text = str(content)
             is_error = _looks_like_tool_error(content_text)
             result = ToolResult(

@@ -1,8 +1,9 @@
 """Session state checkpoint for crash recovery.
 
 Saves execution state to a JSON file after each significant step.
-``restore()`` returns the last checkpoint. NOTE: only ``save``/``clear``
-are wired into the pipeline today — restart-resume is not implemented yet.
+``restore()`` returns the last checkpoint; agent_loop consumes it on the
+next identical request to resume a crash-interrupted chain (stale
+checkpoints from a different request are cleared instead).
 """
 
 import json

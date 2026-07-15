@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from types import SimpleNamespace
 
 from engine.execution.compression import (
     DEFAULT_CONTEXT_LIMIT,
     compact_history,
+    compaction_policy_for_llm,
     compress,
     needs_compaction,
 )
@@ -37,7 +39,16 @@ def test_needs_compaction_defaults_to_conservative_context_window() -> None:
     assert needs_compaction(conversation)
 
 
-def test_compress_uses_the_128k_trigger_even_for_large_declared_windows() -> None:
+def test_compaction_policy_reserves_output_and_safety_margin() -> None:
+    llm = SimpleNamespace(context_window=8_192, max_output_tokens=4_096)
+
+    input_budget, trigger_ratio = compaction_policy_for_llm(llm)
+
+    assert input_budget + llm.max_output_tokens < llm.context_window
+    assert trigger_ratio < 1.0
+
+
+def test_compress_reserves_output_before_triggering_for_large_declared_windows() -> None:
     class LargeWindowLLM:
         context_window = 1_000_000
         context_window_declared = True
@@ -45,14 +56,16 @@ def test_compress_uses_the_128k_trigger_even_for_large_declared_windows() -> Non
         async def chat(self, messages, tools=None):
             return SimpleNamespace(text="summary")
 
-    below_limit = [{"role": "user", "content": "证" * 127_999}]
-    at_limit = [{"role": "user", "content": "证" * 128_000}]
+    budget, trigger_ratio = compaction_policy_for_llm(LargeWindowLLM())
+    threshold = math.ceil(budget * trigger_ratio)
+    below_limit = [{"role": "user", "content": "证" * (threshold - 1)}]
+    at_limit = [{"role": "user", "content": "证" * threshold}]
 
     assert asyncio.run(compress(below_limit, LargeWindowLLM())) is below_limit
     assert asyncio.run(compress(at_limit, LargeWindowLLM())) is not at_limit
 
 
-def test_compress_uses_128k_hard_trigger_when_window_is_undeclared() -> None:
+def test_compress_uses_safe_budget_when_window_is_undeclared() -> None:
     class UnconfiguredLLM:
         context_window = DEFAULT_CONTEXT_LIMIT
         context_window_declared = False
@@ -60,8 +73,10 @@ def test_compress_uses_128k_hard_trigger_when_window_is_undeclared() -> None:
         async def chat(self, messages, tools=None):
             return SimpleNamespace(text="summary")
 
-    below_limit = [{"role": "user", "content": "证" * (DEFAULT_CONTEXT_LIMIT - 1)}]
-    at_limit = [{"role": "user", "content": "证" * DEFAULT_CONTEXT_LIMIT}]
+    budget, trigger_ratio = compaction_policy_for_llm(UnconfiguredLLM())
+    threshold = math.ceil(budget * trigger_ratio)
+    below_limit = [{"role": "user", "content": "证" * (threshold - 1)}]
+    at_limit = [{"role": "user", "content": "证" * threshold}]
 
     assert asyncio.run(compress(below_limit, UnconfiguredLLM())) is below_limit
     assert asyncio.run(compress(at_limit, UnconfiguredLLM())) is not at_limit

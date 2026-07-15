@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, AsyncGenerator
 from uuid import uuid4
 
-from engine.llm.contracts import ChatResponse, ToolCallData
+from engine.llm.contracts import ChatResponse, LLMResponseError, ToolCallData
 from engine.llm.events import ProviderEvent, ProviderEventType
 from engine.react_budget import (
     CONTINUE_AFTER_LENGTH_HINT,
@@ -28,8 +28,10 @@ from engine.react_budget import (
     budget_exhausted_message,
     looks_like_incomplete_final_after_tool,
 )
+from .runtime_control import tool_blocked_prompt
 from engine.safety.approval import (
     ApprovalRequest,
+    ApprovalTimeoutError,
     build_approval_presentation,
     current_approval_context,
     summarize_arguments,
@@ -45,6 +47,7 @@ from .compression import (
     estimate_tokens,
     needs_compaction,
     prune_tool_outputs,
+    trim_conversation_for_context_limit,
 )
 from .events import EventType, ExecutionEvent
 
@@ -278,6 +281,36 @@ def _will_compact(conversation: list[dict], llm: object | None) -> bool:
     )
 
 
+def _is_context_limit_error(error: BaseException) -> bool:
+    if not isinstance(error, LLMResponseError):
+        return False
+    message = str(error).casefold()
+    return any(marker in message for marker in (
+        "context_length_exceeded",
+        "context length",
+        "context limit",
+        "maximum context",
+        "max context",
+        "input length",
+        "prompt is too long",
+        "input is too long",
+        "too many tokens",
+    ))
+
+
+def _recover_context_after_provider_rejection(
+    conversation: list[dict],
+    llm: object,
+) -> list[dict]:
+    input_budget, _ = compaction_policy_for_llm(llm)
+    # Keep a second cushion for request framing the local estimator cannot see
+    # (tool schemas, provider envelopes, and tokenizer differences).
+    return trim_conversation_for_context_limit(
+        conversation,
+        token_budget=max(1, int(input_budget * 0.65)),
+    )
+
+
 def _should_repair_incomplete_final(
     text: str,
     *,
@@ -402,6 +435,7 @@ async def react_event_loop(
     identical_error_count = 0
     compact_llm: "LLMPort | None" = llm
     ineffective_compacts = 0
+    context_recoveries = 0
 
     while productive_iters < max_iters:
         compression_started = _will_compact(conversation, compact_llm)
@@ -482,7 +516,22 @@ async def react_event_loop(
                         yield _provisional_retract_event(provision_id, "stream_error")
                     active_provision_ids.clear()
                     raise
-                response = await llm.chat(conversation, tools=tools)
+                try:
+                    response = await llm.chat(conversation, tools=tools)
+                except Exception as exc:
+                    if not _is_context_limit_error(exc):
+                        raise
+                    if context_recoveries >= 1:
+                        yield ExecutionEvent(EventType.INCOMPLETE, {
+                            "reason": "context_limit",
+                            "recoveries": context_recoveries,
+                        })
+                        return
+                    context_recoveries += 1
+                    yield ExecutionEvent(EventType.CONTEXT_COMPRESSION_START)
+                    conversation = _recover_context_after_provider_rejection(conversation, llm)
+                    yield ExecutionEvent(EventType.CONTEXT_COMPRESSION_END)
+                    continue
             else:
                 try:
                     response = accumulator.build()
@@ -493,7 +542,22 @@ async def react_event_loop(
                     raise
                 response_text_was_streamed = accumulator.streamed_text
         else:
-            response = await llm.chat(conversation, tools=tools)
+            try:
+                response = await llm.chat(conversation, tools=tools)
+            except Exception as exc:
+                if not _is_context_limit_error(exc):
+                    raise
+                if context_recoveries >= 1:
+                    yield ExecutionEvent(EventType.INCOMPLETE, {
+                        "reason": "context_limit",
+                        "recoveries": context_recoveries,
+                    })
+                    return
+                context_recoveries += 1
+                yield ExecutionEvent(EventType.CONTEXT_COMPRESSION_START)
+                conversation = _recover_context_after_provider_rejection(conversation, llm)
+                yield ExecutionEvent(EventType.CONTEXT_COMPRESSION_END)
+                continue
         usage = _usage_event_data(response.usage)
         if usage:
             yield ExecutionEvent(EventType.TOKEN_USAGE, usage)
@@ -705,19 +769,24 @@ async def react_event_loop(
                             "arguments": approval_request.arguments_summary,
                             "presentation": presentation.to_dict(),
                         })
-                        approved = await broker.wait(approval_request)
+                        try:
+                            approved = await broker.wait(approval_request)
+                            denial = "User denied approval"
+                        except ApprovalTimeoutError:
+                            approved = False
+                            denial = "Approval timed out"
                         if approved:
                             # The hard guard already passed. Continue with the
                             # exact suspended call instead of asking the model
                             # to recreate it and risking a duplicate side effect.
                             pass
                         else:
-                            denial = "User denied approval"
                             conversation.append({
                                 "role": "tool",
                                 "tool_call_id": call.id,
                                 "content": f"[BLOCKED] {denial}",
                             })
+                            conversation.append({"role": "system", "content": tool_blocked_prompt()})
                             yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
                                 "id": tc.id,
                                 "error": False,
@@ -732,6 +801,7 @@ async def react_event_loop(
                             continue
                     else:
                         conversation.append({"role": "tool", "tool_call_id": call.id, "content": decision.observation})
+                        conversation.append({"role": "system", "content": tool_blocked_prompt()})
                         yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
                             "id": tc.id,
                             "error": False,
@@ -746,6 +816,7 @@ async def react_event_loop(
                         continue
                 else:
                     conversation.append({"role": "tool", "tool_call_id": call.id, "content": decision.observation})
+                    conversation.append({"role": "system", "content": tool_blocked_prompt()})
                     yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
                         "id": tc.id,
                         "error": False,

@@ -698,14 +698,31 @@ async def test_stream_message_forwards_provisional_lifecycle_and_persists_only_c
 
 
 @pytest.mark.asyncio
-async def test_stream_message_saves_partial_reply_on_client_disconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_stream_message_saves_visible_provisional_reply_on_client_disconnect(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_build_engine_runtime(agent_id: str, name: str, *, session_id: str | None = None):
         return SimpleNamespace(agent_id=agent_id, agent_name=name, session_id=session_id), object()
 
     async def fake_engine_reply_events(request, runtime, services):
-        yield SimpleNamespace(type=SimpleNamespace(value="text_delta"), data={"text": "partial "})
-        yield SimpleNamespace(type=SimpleNamespace(value="text_delta"), data={"text": "reply"})
-        yield SimpleNamespace(type=SimpleNamespace(value="text_delta"), data={"text": " never sent"})
+        yield SimpleNamespace(
+            type=SimpleNamespace(value="raw_response_event"),
+            data={
+                "type": "response.output_text.delta",
+                "data": {"delta": "partial reply"},
+                "provision_id": "draft-1",
+            },
+        )
+        yield SimpleNamespace(
+            type=SimpleNamespace(value="provisional_text_delta"),
+            data={"provision_id": "draft-1", "text": "partial reply"},
+        )
+        yield SimpleNamespace(
+            type=SimpleNamespace(value="raw_response_event"),
+            data={
+                "type": "response.output_text.delta",
+                "data": {"delta": " never sent"},
+                "provision_id": "draft-1",
+            },
+        )
 
     monkeypatch.setattr(session_service_module, "build_engine_runtime", fake_build_engine_runtime)
     monkeypatch.setattr(

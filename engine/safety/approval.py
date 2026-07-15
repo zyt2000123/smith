@@ -32,6 +32,11 @@ _SENSITIVE_ARGUMENT_NAMES = frozenset({
 _MAX_SUMMARY_ITEMS = 32
 _MAX_SUMMARY_DEPTH = 3
 _MAX_SUMMARY_TEXT = 240
+DEFAULT_APPROVAL_TIMEOUT_SECONDS = 300.0
+
+
+class ApprovalTimeoutError(TimeoutError):
+    """Raised when a run waits too long for an approval decision."""
 
 _DETAIL_LABELS = {
     "action": "Action",
@@ -168,12 +173,25 @@ class ApprovalBroker:
         )
         return request
 
-    async def wait(self, request: ApprovalRequest) -> bool:
+    async def wait(
+        self,
+        request: ApprovalRequest,
+        *,
+        timeout_seconds: float | None = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
+    ) -> bool:
         pending = self._pending.get(request.approval_id)
         if pending is None or pending.request.run_id != request.run_id:
             raise RuntimeError("Approval request is no longer active")
         try:
-            await pending.event.wait()
+            if timeout_seconds is None:
+                await pending.event.wait()
+            else:
+                await asyncio.wait_for(pending.event.wait(), timeout=timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            self._pending.pop(request.approval_id, None)
+            raise ApprovalTimeoutError(
+                f"Approval timed out after {timeout_seconds:g} seconds"
+            ) from exc
         except asyncio.CancelledError:
             self._pending.pop(request.approval_id, None)
             raise

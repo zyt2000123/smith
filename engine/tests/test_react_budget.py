@@ -10,6 +10,7 @@ from engine.execution.react_loop import (
 from engine.execution.events import EventType
 from engine.execution.react_loop import FailedAgentRunError, IncompleteAgentRunError
 from engine.llm.client import ChatResponse, ToolCallData
+from engine.llm.contracts import LLMResponseError
 from engine.llm.events import ProviderEvent, ProviderEventType
 from engine.react_budget import (
     CONVERSATION_HARD_LIMIT,
@@ -520,6 +521,39 @@ def test_react_event_loop_marks_repeated_model_length_as_incomplete():
     assert incomplete[0].data == {"reason": "model_output_limit", "continuations": 2}
 
 
+def test_react_event_loop_recovers_once_from_context_limit_error():
+    class ContextLimitedLLM(FakeLLM):
+        def __init__(self) -> None:
+            super().__init__(responses=[])
+            self.calls = 0
+
+        async def chat(self, messages, tools=None, prefix_cache_key=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise LLMResponseError("HTTP 400: context_length_exceeded")
+            return ChatResponse(text="recovered")
+
+    async def run():
+        llm = ContextLimitedLLM()
+        events = [
+            event
+            async for event in _react_event_loop(
+                llm,
+                [{"role": "user", "content": "hello"}],
+                _registry(),
+            )
+        ]
+        return events, llm
+
+    events, llm = asyncio.run(run())
+
+    assert llm.calls == 2
+    assert any(event.type == EventType.CONTEXT_COMPRESSION_START for event in events)
+    assert any(event.type == EventType.CONTEXT_COMPRESSION_END for event in events)
+    assert [event.data["text"] for event in events if event.type == EventType.TEXT_DELTA] == ["recovered"]
+    assert not [event for event in events if event.type == EventType.INCOMPLETE]
+
+
 def test_react_loop_collects_decision_response_from_canonical_events():
     async def run():
         llm = FakeLLM(
@@ -918,6 +952,111 @@ def test_react_event_loop_stream_fallback_on_early_error():
     assert text == "fallback result"
 
 
+def _assert_tool_pairing_intact(messages: list[dict]) -> None:
+    """Provider-400 invariant: every tool result answers an open call from the
+    immediately preceding assistant turn, and no call goes unanswered."""
+    open_ids: set[str] = set()
+    for msg in messages:
+        role = msg.get("role")
+        if role == "assistant":
+            assert not open_ids, f"unanswered tool calls before assistant: {open_ids}"
+            for tc in msg.get("tool_calls") or []:
+                open_ids.add(tc["id"])
+        elif role == "user":
+            assert not open_ids, f"user turn with pending tool calls: {open_ids}"
+        elif role == "tool":
+            call_id = msg.get("tool_call_id")
+            assert call_id in open_ids, f"orphan tool result: {call_id!r}"
+            open_ids.discard(call_id)
+    assert not open_ids, f"conversation ends with unanswered tool calls: {open_ids}"
+
+
+def _tool_call_entry(call_id: str) -> dict:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": "ok", "arguments": "{}"},
+    }
+
+
+def test_hard_limit_cut_inside_tool_round_keeps_pairing():
+    """R8 回归：切点落在 tool 结果串（含 system 提示交错）内必须回退到轮次边界。"""
+    async def run():
+        conversation = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "question"},
+        ]
+        for i in range(7):  # indices 2..8
+            conversation.append({
+                "role": "assistant" if i % 2 == 0 else "user",
+                "content": f"pad-{i}",
+            })
+        conversation.append({  # index 9
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                _tool_call_entry("call-a"),
+                _tool_call_entry("call-b"),
+                _tool_call_entry("call-c"),
+            ],
+        })
+        conversation.append({"role": "tool", "tool_call_id": "call-a", "content": "result-a"})
+        conversation.append({"role": "system", "content": "recovery hint"})
+        conversation.append({"role": "tool", "tool_call_id": "call-b", "content": "result-b"})
+        conversation.append({"role": "tool", "tool_call_id": "call-c", "content": "result-c"})
+        for i in range(27):  # indices 14..40 → 41 messages total
+            conversation.append({
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"tail-{i}",
+            })
+        assert len(conversation) > CONVERSATION_HARD_LIMIT
+        raw_cut = len(conversation) - CONVERSATION_KEEP_RECENT
+        # 前置条件：天然切点恰好落在 tool 结果上，逼出边界回退。
+        assert conversation[raw_cut]["role"] == "tool"
+
+        llm = FakeLLM([ChatResponse(text="final")])
+        async for _ in _react_event_loop(llm, conversation, _registry(), max_iters=1):
+            pass
+        return llm.chat_calls[0]["messages"]
+
+    messages = asyncio.run(run())
+    _assert_tool_pairing_intact(messages)
+    assert messages[0]["content"] == "system prompt"
+    assert messages[1]["content"] == "question"
+    assert len(messages) < CONVERSATION_HARD_LIMIT
+
+
+def test_hard_limit_prefers_valid_pairing_over_truncation():
+    """一整轮巨型 tool 串无法安全切分时，保留完整对话而不是切出孤儿。"""
+    async def run():
+        tool_count = CONVERSATION_HARD_LIMIT  # one assistant turn with 40 calls
+        conversation = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "question"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [_tool_call_entry(f"call-{i}") for i in range(tool_count)],
+            },
+        ]
+        for i in range(tool_count):
+            conversation.append({
+                "role": "tool",
+                "tool_call_id": f"call-{i}",
+                "content": f"result-{i}",
+            })
+        assert len(conversation) > CONVERSATION_HARD_LIMIT
+
+        llm = FakeLLM([ChatResponse(text="final")])
+        async for _ in _react_event_loop(llm, conversation, _registry(), max_iters=1):
+            pass
+        return llm.chat_calls[0]["messages"], len(conversation)
+
+    messages, original_len = asyncio.run(run())
+    _assert_tool_pairing_intact(messages)
+    assert len(messages) == original_len
+
+
 def test_incomplete_final_detects_chinese_look_verbs():
     from engine.react_budget import looks_like_incomplete_final_after_tool
 
@@ -927,6 +1066,39 @@ def test_incomplete_final_detects_chinese_look_verbs():
     assert looks_like_incomplete_final_after_tool("接下来看看测试结果。")
     assert looks_like_incomplete_final_after_tool("Let me check the config file.")
     assert not looks_like_incomplete_final_after_tool("修复完成，所有测试通过。")
+
+
+def test_react_event_loop_injects_engine_control_after_a_blocked_tool() -> None:
+    from engine.safety.tool_guard import GuardResult
+
+    class BlockingGuard:
+        def check(self, _call):
+            return GuardResult(allowed=False, reason="blocked by test policy")
+
+    async def run():
+        llm = FakeLLM([
+            ChatResponse(tool_calls=[_tool_call("ok", "blocked-1")]),
+            ChatResponse(text="I cannot complete that operation."),
+        ])
+        events = [
+            event
+            async for event in _react_event_loop(
+                llm,
+                [{"role": "user", "content": "try a blocked tool"}],
+                _registry(),
+                tool_guard=BlockingGuard(),  # type: ignore[arg-type]
+            )
+        ]
+        return events, llm
+
+    events, llm = asyncio.run(run())
+
+    assert any(event.type == EventType.TOOL_CALL_RESULT and event.data["blocked"] for event in events)
+    assert any(
+        message.get("role") == "system"
+        and "Do not attempt to bypass" in str(message.get("content", ""))
+        for message in llm.chat_calls[1]["messages"]
+    )
 
 
 if __name__ == "__main__":

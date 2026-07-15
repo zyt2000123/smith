@@ -1,7 +1,7 @@
 """Memory operations tool provider — CRUD for the agent's memory.
 
 Aligned with engine/memory pipeline:
-  - add: appends to recent.jsonl (gets compiled into recent.md/durable.md)
+  - add: appends structured candidate evidence to recent.jsonl for policy review
   - search: searches across compiled layers + episodes + recent events
   - episode: creates an episode archive (wiki mode)
   - update/remove: operate on episodes only
@@ -18,7 +18,10 @@ EpisodeRunner = Callable[[Path, str, list[dict]], Awaitable[Path | None]]
 
 TOOL_META = {
     "name": "memory_ops",
-    "description": "Memory operations: search memories, add events, manage episodes.",
+    "description": (
+        "Memory operations: search memories, record structured evidence candidates, "
+        "and manage episodes. Plans and Todo items are session state, not memory."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -37,11 +40,29 @@ TOOL_META = {
             },
             "content": {
                 "type": "string",
-                "description": "Memory content (required for add/update)",
+                "description": "Candidate memory content (required for add/update)",
             },
             "evidence": {
                 "type": "string",
-                "description": "Evidence supporting this memory (required for add)",
+                "description": "Evidence supporting this candidate (required for add)",
+            },
+            "kind": {
+                "type": "string",
+                "enum": [
+                    "preference", "correction", "decision", "remember", "forget",
+                    "verified_fact", "procedure", "pitfall",
+                ],
+                "description": "Stable memory category required for add; plans and tasks are excluded",
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["user", "project"],
+                "description": "Ownership scope required for add",
+            },
+            "evidence_type": {
+                "type": "string",
+                "enum": ["user_explicit", "tool_result", "test_result", "source_document"],
+                "description": "Type of supporting evidence required for add",
             },
             "episode_id": {
                 "type": "string",
@@ -111,6 +132,9 @@ async def execute(
     query: str | None = None,
     content: str | None = None,
     evidence: str | None = None,
+    kind: str | None = None,
+    scope: str | None = None,
+    evidence_type: str | None = None,
     topic: str | None = None,
     episode_id: str | None = None,
     memory_dir: str | Path | None = None,
@@ -130,10 +154,25 @@ async def execute(
             return "Error: 'content' is required for add action"
         if not evidence:
             return "Error: 'evidence' is required for add action"
+        if not kind:
+            return "Error: 'kind' is required for add action"
+        if not scope:
+            return "Error: 'scope' is required for add action"
+        if not evidence_type:
+            return "Error: 'evidence_type' is required for add action"
+        if kind in {"plan", "task", "todo", "task_step"}:
+            return "Error: plans and tasks belong in Todo/session state, not persistent memory"
+        mem = _engine_memory()
+        if kind not in mem.MANUAL_MEMORY_KINDS:
+            return "Error: unsupported memory kind; record only stable evidence categories"
+        if scope not in {"user", "project"}:
+            return "Error: scope must be 'user' or 'project'"
+        if evidence_type not in mem.MANUAL_EVIDENCE_TYPES:
+            return "Error: unsupported evidence_type"
         rejection = _check_sensitive(content) or _check_sensitive(evidence)
         if rejection:
             return rejection
-        return _append_event(mem_dir, content, evidence)
+        return _append_event(mem_dir, content, evidence, kind, scope, evidence_type)
 
     elif action == "episode":
         if not topic:
@@ -161,18 +200,29 @@ async def execute(
     return f"Error: unknown action '{action}'. Use: search, add, episode, update, remove"
 
 
-def _append_event(mem_dir: Path, content: str, evidence: str) -> str:
-    """Append to recent.jsonl so it enters the compilation pipeline."""
+def _append_event(
+    mem_dir: Path,
+    content: str,
+    evidence: str,
+    kind: str,
+    scope: str,
+    evidence_type: str,
+) -> str:
+    """Append structured candidate evidence for policy-governed compilation."""
     recent_file = mem_dir / "recent.jsonl"
     now = datetime.now(timezone.utc).isoformat()
     entry = {
         "task": _sanitize_event_value_for_storage(f"[memory] {content}"),
         "summary": _sanitize_event_value_for_storage(f"Evidence: {evidence}"),
         "timestamp": now,
+        "kind": kind,
+        "scope": scope,
+        "evidence": evidence_type,
+        "evidence_type": evidence_type,
     }
     with open(recent_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    return "OK: memory event recorded (will be compiled into durable memory)"
+    return "OK: candidate evidence recorded for policy review; it is not durable memory"
 
 
 async def _search(mem_dir: Path, query: str) -> str:

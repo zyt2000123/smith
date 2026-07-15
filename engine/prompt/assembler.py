@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
+from enum import Enum
 import hashlib
 import logging
 from pathlib import Path
@@ -45,9 +47,114 @@ _prompt_cache: dict[str, tuple[str, str]] = {}
 _SMITH_MD_MAX_CHARS = 50_000
 
 
+class PromptSource(str, Enum):
+    """Origin of one prompt layer, retained for inspection and auditing."""
+
+    AGENT_PROFILE = "agent_profile"
+    TOOL_REGISTRY = "tool_registry"
+    SKILL_REGISTRY = "skill_registry"
+    LEARNED_CONTEXT = "learned_context"
+    SMITH_FILE = "smith_file"
+    IDENTITY_CATALOG = "identity_catalog"
+    ENGINE = "engine"
+    MEMORY_STORE = "memory_store"
+    MEMORY_RECENT = "memory_recent"
+    MEMORY_DURABLE = "memory_durable"
+    MEMORY_EPISODES = "memory_episodes"
+    RUNTIME = "runtime"
+
+
+class PromptAuthority(str, Enum):
+    """How a layer participates in prompt governance."""
+
+    ENGINE_CONTROL = "engine_control"
+    AGENT_POLICY = "agent_policy"
+    USER_POLICY = "user_policy"
+    PROJECT_POLICY = "project_policy"
+    CAPABILITY = "capability"
+    REFERENCE = "reference"
+    RUNTIME_FACT = "runtime_fact"
+
+
+class PromptTrust(str, Enum):
+    """Trust treatment for the layer's content, independent of its position."""
+
+    TRUSTED = "trusted"
+    CONFIGURED = "configured"
+    USER_AUTHORED = "user_authored"
+    UNTRUSTED_REFERENCE = "untrusted_reference"
+    AUTHORITATIVE_FACT = "authoritative_fact"
+
+
+class PromptScope(str, Enum):
+    """Audience and ownership boundary of one prompt layer."""
+
+    AGENT = "agent"
+    USER = "user"
+    PROJECT = "project"
+    RUNTIME = "runtime"
+
+
+class PromptLoadReason(str, Enum):
+    """Why a prompt layer participates in this run."""
+
+    ALWAYS = "always"
+    PROJECT_MATCH = "project_match"
+    QUERY_RETRIEVAL = "query_retrieval"
+    EVAL_SENSITIVE = "eval_sensitive"
+    RUNTIME_ONLY = "runtime_only"
+
+
+@dataclass(frozen=True, slots=True)
+class PromptLayer:
+    """One auditable system-prompt section.
+
+    ``trim_priority`` is ordered from least to most expensive to remove.
+    ``None`` marks a layer that must survive prompt-budget trimming.
+    """
+
+    name: str
+    content: str
+    source: PromptSource
+    authority: PromptAuthority
+    trust: PromptTrust
+    trim_priority: int | None = None
+    source_ref: str = ""
+    scope: PromptScope = PromptScope.AGENT
+    load_reason: PromptLoadReason = PromptLoadReason.ALWAYS
+    display_name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PromptManifest:
+    """Redacted receipt of one prompt assembly, safe to store in run traces."""
+
+    rendered_prompt_hash: str
+    layers: tuple[dict[str, str | int], ...]
+
+    def to_trace_data(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "rendered_prompt_hash": self.rendered_prompt_hash,
+            "layers": [dict(layer) for layer in self.layers],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AssembledPrompt:
+    """Provider-facing prompt plus its non-sensitive provenance receipt."""
+
+    text: str
+    layers: tuple[PromptLayer, ...]
+    manifest: PromptManifest
+
+
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimate: ~4 chars per token for English, ~2 for CJK."""
-    return max(len(text) // 3, 1)
+    """Conservative estimate aligned with execution context accounting."""
+    if not text:
+        return 0
+    cjk = sum(1 for char in text if "一" <= char <= "鿿")
+    return cjk + (len(text) - cjk) // 3
 
 
 def build_team_context(
@@ -80,41 +187,162 @@ class PromptAssembler:
         context: dict,
         max_tokens: int = 100_000,
         retrieved_memory: str = "",
+        retrieved_durable: str = "",
+        retrieved_episodes: str = "",
         working_dir: Path | None = None,
         memory_text: str | None = None,
+        runtime_guidance: str = "",
+        eval_guidance: str = "",
+        runtime_control: str = "",
     ) -> str:
-        layers: list[str] = []
+        """Compatibility wrapper that returns only the provider-facing text."""
+        return self.assemble_detailed(
+            agent_dir,
+            tool_registry,
+            skill_registry,
+            context,
+            max_tokens=max_tokens,
+            retrieved_memory=retrieved_memory,
+            retrieved_durable=retrieved_durable,
+            retrieved_episodes=retrieved_episodes,
+            working_dir=working_dir,
+            memory_text=memory_text,
+            runtime_guidance=runtime_guidance,
+            eval_guidance=eval_guidance,
+            runtime_control=runtime_control,
+        ).text
+
+    def assemble_detailed(
+        self,
+        agent_dir: Path,
+        tool_registry: "ToolRegistry",
+        skill_registry: "SkillRegistry",
+        context: dict,
+        max_tokens: int = 100_000,
+        retrieved_memory: str = "",
+        retrieved_durable: str = "",
+        retrieved_episodes: str = "",
+        working_dir: Path | None = None,
+        memory_text: str | None = None,
+        runtime_guidance: str = "",
+        eval_guidance: str = "",
+        runtime_control: str = "",
+    ) -> AssembledPrompt:
+        """Build prompt text and a redacted provenance receipt for one run."""
+        layers = self.build_layers(
+            agent_dir,
+            tool_registry,
+            skill_registry,
+            context,
+            retrieved_memory=retrieved_memory,
+            retrieved_durable=retrieved_durable,
+            retrieved_episodes=retrieved_episodes,
+            working_dir=working_dir,
+            memory_text=memory_text,
+            runtime_guidance=runtime_guidance,
+            eval_guidance=eval_guidance,
+            runtime_control=runtime_control,
+        )
+
+        # Compute hash of the stable profile and capability prefix.
+        # These rarely change between calls for the same agent.
+        stable_content = _SEPARATOR.join(self._render_layer(layer) for layer in layers[:6])
+        stable_hash = hashlib.md5(stable_content.encode()).hexdigest()
+        cache_key = str(agent_dir)
+
+        cached = _prompt_cache.get(cache_key)
+        if cached and cached[0] == stable_hash:
+            # Layers are rebuilt for every call; this validates cache coherence
+            # and keeps the provider prefix-cache hint current.
+            pass
+        _prompt_cache[cache_key] = (stable_hash, stable_content)
+
+        rendered_layers = self._trim_to_budget(layers, max_tokens)
+        text = self.render_layers(rendered_layers)
+        return AssembledPrompt(
+            text=text,
+            layers=rendered_layers,
+            manifest=self._manifest_for(layers, rendered_layers, text),
+        )
+
+    def build_layers(
+        self,
+        agent_dir: Path,
+        tool_registry: "ToolRegistry",
+        skill_registry: "SkillRegistry",
+        context: dict,
+        retrieved_memory: str = "",
+        retrieved_durable: str = "",
+        retrieved_episodes: str = "",
+        working_dir: Path | None = None,
+        memory_text: str | None = None,
+        runtime_guidance: str = "",
+        eval_guidance: str = "",
+        runtime_control: str = "",
+    ) -> tuple[PromptLayer, ...]:
+        """Build the ordered prompt layers without applying a token budget."""
+        layers: list[PromptLayer] = []
 
         # Layer 1: role (identity)
-        layers.append(self._read(agent_dir / "role.md"))
+        layers.append(PromptLayer(
+            "role", self._read(agent_dir / "role.md"),
+            PromptSource.AGENT_PROFILE, PromptAuthority.AGENT_POLICY,
+            PromptTrust.CONFIGURED, source_ref="profile:role.md", display_name="Agent Role",
+        ))
 
         # Layer 2: style (persona)
-        layers.append(self._read(agent_dir / "style.md"))
+        layers.append(PromptLayer(
+            "style", self._read(agent_dir / "style.md"),
+            PromptSource.AGENT_PROFILE, PromptAuthority.AGENT_POLICY,
+            PromptTrust.CONFIGURED, trim_priority=50, source_ref="profile:style.md",
+            display_name="Agent Style",
+        ))
 
         # Layer 3: workflow (bible)
-        layers.append(self._read(agent_dir / "workflow.md"))
+        layers.append(PromptLayer(
+            "workflow", self._read(agent_dir / "workflow.md"),
+            PromptSource.AGENT_PROFILE, PromptAuthority.AGENT_POLICY,
+            PromptTrust.CONFIGURED, source_ref="profile:workflow.md", display_name="Agent Workflow",
+        ))
 
-        # Layer 4: toolbox
-        tools_text = self._read(agent_dir / "toolbox.md")
+        # Layers 4-5: profile-owned tool policy and dynamic registry definitions
+        layers.append(PromptLayer(
+            "toolbox_policy", self._read(agent_dir / "toolbox.md"),
+            PromptSource.AGENT_PROFILE, PromptAuthority.AGENT_POLICY,
+            PromptTrust.CONFIGURED, trim_priority=40, source_ref="profile:toolbox.md",
+            display_name="Tool Usage Policy",
+        ))
+
         tool_list = tool_registry.list_tools()
         if tool_list:
             tool_lines = ["## Available Tools"]
             for t in tool_list:
                 tool_lines.append(f"- **{t.name}**: {t.description}")
-            tools_text += "\n\n" + "\n".join(tool_lines)
-        layers.append(tools_text)
+            tool_text = "\n".join(tool_lines)
+        else:
+            tool_text = ""
+        layers.append(PromptLayer(
+            "tool_definitions", tool_text, PromptSource.TOOL_REGISTRY,
+            PromptAuthority.CAPABILITY, PromptTrust.CONFIGURED, trim_priority=35,
+            source_ref="tool_registry:enabled", display_name="Available Tools",
+        ))
 
-        # Layer 5: skill catalog (metadata only; skill bodies load on demand)
+        # Layer 6: skill catalog (metadata only; skill bodies load on demand)
         summaries = skill_registry.list_summaries()
         if summaries:
             skill_lines = ["## Available Skills"]
             for s in summaries:
                 skill_lines.append(f"- **{s['name']}**: {s['description']}")
-            layers.append("\n".join(skill_lines))
+            skill_text = "\n".join(skill_lines)
         else:
-            layers.append("")
+            skill_text = ""
+        layers.append(PromptLayer(
+            "skills", skill_text, PromptSource.SKILL_REGISTRY,
+            PromptAuthority.CAPABILITY, PromptTrust.CONFIGURED, trim_priority=30,
+            source_ref="skill_registry:enabled", display_name="Available Skills",
+        ))
 
-        # Layer 6: learned user context (always retained, but never authority)
+        # Layer 7: learned user context (always retained, but never authority)
         learned_context = self._read(agent_dir / "context.md")
         if learned_context:
             from engine.memory._files import sanitize_memory_text
@@ -123,96 +351,223 @@ class PromptAssembler:
             learned_context = learned_context.strip()
         if learned_context:
             learned_context = _LEARNED_CONTEXT_FENCE + "\n\n" + learned_context
-        layers.append(learned_context)
+        layers.append(PromptLayer(
+            "learned_context", learned_context, PromptSource.LEARNED_CONTEXT,
+            PromptAuthority.REFERENCE, PromptTrust.UNTRUSTED_REFERENCE,
+            source_ref="profile:context.md", scope=PromptScope.USER,
+            display_name="Learned User Context",
+        ))
 
-        # Layer 7: SMITH.md — user-authored project instructions (global + project)
-        layers.append(self._read_smith_instructions(working_dir))
+        # Layers 8-9: user-global and repository-scoped instructions must retain
+        # distinct authority and provenance even when both are present.
+        layers.append(PromptLayer(
+            "global_instructions", self._read_global_smith_instructions(),
+            PromptSource.SMITH_FILE, PromptAuthority.USER_POLICY,
+            PromptTrust.USER_AUTHORED, source_ref="global:SMITH.md", scope=PromptScope.USER,
+            display_name="Global Instructions",
+        ))
+        layers.append(PromptLayer(
+            "project_instructions", self._read_project_smith_instructions(working_dir),
+            PromptSource.SMITH_FILE, PromptAuthority.PROJECT_POLICY,
+            PromptTrust.USER_AUTHORED, source_ref="project:.smith/SMITH.md",
+            scope=PromptScope.PROJECT, load_reason=PromptLoadReason.PROJECT_MATCH,
+            display_name="Project Instructions",
+        ))
 
-        # Layer 8: output style
+        # Layers 10-11: identity content and engine evaluation guidance differ.
+        layers.append(PromptLayer(
+            "identity_guidance", runtime_guidance.strip(),
+            PromptSource.IDENTITY_CATALOG, PromptAuthority.AGENT_POLICY,
+            PromptTrust.CONFIGURED, source_ref="identity_catalog:selected",
+            display_name="Identity Guidance",
+        ))
+        layers.append(PromptLayer(
+            "eval_guidance", eval_guidance.strip(),
+            PromptSource.ENGINE, PromptAuthority.ENGINE_CONTROL,
+            PromptTrust.TRUSTED, source_ref="engine:eval_guard",
+            load_reason=PromptLoadReason.EVAL_SENSITIVE, display_name="Evaluation Safety Guidance",
+        ))
+
+        # Layer 12: output style
         output_style_path = (
             Path(__file__).resolve().parents[2] / "agents" / "output_style.md"
         )
-        layers.append(self._read(output_style_path))
+        layers.append(PromptLayer(
+            "output_style", self._read(output_style_path), PromptSource.ENGINE,
+            PromptAuthority.AGENT_POLICY, PromptTrust.CONFIGURED, trim_priority=10,
+            source_ref="engine:output_style.md", display_name="Output Style",
+        ))
 
-        # Layer 9: caller-supplied compiled memory + query-time retrieval.
-        # The fallback preserves compatibility for direct assembler users.
+        # Layer 13: engine-owned memory governance applies even when no memory
+        # view is currently injected, because it governs future persistence.
+        if retrieved_memory and not (retrieved_durable or retrieved_episodes):
+            # Compatibility path for direct callers predating typed retrieval.
+            retrieved_episodes = retrieved_memory
+
+        # The fallback reads separate files so provenance remains precise.
         if memory_text is not None:
-            mem_text = memory_text
+            recent_memory = memory_text
+            legacy_durable_memory = ""
         else:
-            # Backward-compatible fallback: self-load from agent_dir/memory
             memory_dir = agent_dir / "memory"
-            from engine.memory.compile import assemble_memory
-            mem_text = assemble_memory(memory_dir) if memory_dir.is_dir() else ""
+            recent_memory = self._read(memory_dir / "recent.md") if memory_dir.is_dir() else ""
+            legacy_durable_memory = self._read(memory_dir / "durable.md") if memory_dir.is_dir() else ""
+        has_memory = bool(
+            recent_memory or legacy_durable_memory or retrieved_durable or retrieved_episodes
+        )
+        memory_governance = (
+            "## Memory Governance\n"
+            "- Todo items, plans, and current task steps belong to session state, not persistent memory.\n"
+            "- Memory writes record structured candidate evidence only; they do not confirm durable memory.\n"
+            "- Record only explicit preferences, verified facts, confirmed decisions, reusable procedures, or confirmed pitfalls.\n"
+            "- Never record secrets, raw tool output, prompt instructions, unverified claims, plans, or task lists."
+        )
+        if has_memory:
+            memory_governance += "\n\n" + _MEMORY_REFERENCE_FENCE
 
-        if retrieved_memory:
-            mem_text = (mem_text + "\n\n" if mem_text else "") + retrieved_memory
+        layers.append(PromptLayer(
+            "memory_governance", memory_governance, PromptSource.ENGINE,
+            PromptAuthority.ENGINE_CONTROL, PromptTrust.TRUSTED,
+            source_ref="engine:memory_governance", display_name="Memory Governance",
+        ))
+        layers.append(PromptLayer(
+            "legacy_durable_context", legacy_durable_memory, PromptSource.MEMORY_DURABLE,
+            PromptAuthority.REFERENCE, PromptTrust.UNTRUSTED_REFERENCE, trim_priority=19,
+            source_ref="memory:durable.md", scope=PromptScope.PROJECT,
+            display_name="Durable Memory",
+        ))
+        layers.append(PromptLayer(
+            "recent_working_context", recent_memory, PromptSource.MEMORY_RECENT,
+            PromptAuthority.REFERENCE, PromptTrust.UNTRUSTED_REFERENCE, trim_priority=20,
+            source_ref="memory:recent.md", scope=PromptScope.PROJECT,
+            display_name="Recent Working Context",
+        ))
+        layers.append(PromptLayer(
+            "durable_retrieval", retrieved_durable, PromptSource.MEMORY_DURABLE,
+            PromptAuthority.REFERENCE, PromptTrust.UNTRUSTED_REFERENCE, trim_priority=19,
+            source_ref="memory:durable.md", scope=PromptScope.PROJECT,
+            load_reason=PromptLoadReason.QUERY_RETRIEVAL, display_name="Durable Memory Retrieval",
+        ))
+        layers.append(PromptLayer(
+            "episode_retrieval", retrieved_episodes, PromptSource.MEMORY_EPISODES,
+            PromptAuthority.REFERENCE, PromptTrust.UNTRUSTED_REFERENCE, trim_priority=18,
+            source_ref="memory:episodes", scope=PromptScope.PROJECT,
+            load_reason=PromptLoadReason.QUERY_RETRIEVAL, display_name="Relevant Episodes",
+        ))
 
-        if mem_text:
-            mem_text = _MEMORY_REFERENCE_FENCE + "\n\n" + mem_text
-
-        layers.append(mem_text)
-
-        # Layer 10: runtime context
+        # Runtime context remains a model-answerable fact projection.
         if context:
             ctx_lines = [_RUNTIME_CONTEXT_FENCE]
             for k, v in context.items():
                 ctx_lines.append(f"- {k}: {v}")
-            layers.append("\n".join(ctx_lines))
+            runtime_context = "\n".join(ctx_lines)
         else:
-            layers.append("")
+            runtime_context = ""
+        layers.append(PromptLayer(
+            "runtime_context", runtime_context, PromptSource.RUNTIME,
+            PromptAuthority.RUNTIME_FACT, PromptTrust.AUTHORITATIVE_FACT,
+            source_ref="runtime:request_context", scope=PromptScope.RUNTIME,
+            load_reason=PromptLoadReason.RUNTIME_ONLY, display_name="Runtime Context",
+        ))
 
-        # Compute hash of stable layers (1-5: role, style, workflow, tools, skills)
-        # These rarely change between calls for the same agent
-        stable_content = _SEPARATOR.join(layers[:5])
-        stable_hash = hashlib.md5(stable_content.encode()).hexdigest()
-        cache_key = str(agent_dir)
+        # Immutable engine-owned runtime control contract. It is
+        # intentionally appended after pluggable profile/project instructions
+        # and is never a token-budget trimming candidate.
+        layers.append(PromptLayer(
+            "runtime_control", runtime_control.strip(), PromptSource.ENGINE,
+            PromptAuthority.ENGINE_CONTROL, PromptTrust.TRUSTED,
+            source_ref="engine:runtime_control", scope=PromptScope.RUNTIME,
+            load_reason=PromptLoadReason.RUNTIME_ONLY, display_name="Engine Runtime Control",
+        ))
 
-        cached = _prompt_cache.get(cache_key)
-        if cached and cached[0] == stable_hash:
-            # Stable layers unchanged — rebuild only dynamic layers (6+)
-            # But since we already have them in `layers`, just skip re-reading
-            pass  # layers are already built, this validates cache coherence
+        return tuple(layers)
 
-        # Store for next call
-        # The real win: when LLM providers support prefix caching,
-        # we pass this hash as a cache hint
-        _prompt_cache[cache_key] = (stable_hash, stable_content)
+    @staticmethod
+    def render_layers(layers: tuple[PromptLayer, ...]) -> str:
+        """Render ordered layers with model-visible source and authority labels."""
+        return _SEPARATOR.join(
+            PromptAssembler._render_layer(layer)
+            for layer in layers
+            if layer.content.strip()
+        )
 
-        # Token budget — trim lowest-priority layers if over budget
-        # Layer index constants (0-based):
-        _LAYER_ROLE = 0          # identity — never cut
-        _LAYER_STYLE = 1         # persona
-        _LAYER_WORKFLOW = 2      # bible — never cut
-        _LAYER_TOOLS = 3         # toolbox
-        _LAYER_SKILLS = 4        # skill catalog
-        _LAYER_CONTEXT_MD = 5    # context.md
-        _LAYER_SMITH_MD = 6      # user instructions — never cut
-        _LAYER_OUTPUT_STYLE = 7  # output formatting
-        _LAYER_MEMORY = 8        # compiled memory
-        _LAYER_RUNTIME_CTX = 9   # runtime context — never cut
+    @staticmethod
+    def _render_layer(layer: PromptLayer) -> str:
+        title = layer.display_name or layer.name.replace("_", " ").title()
+        source_ref = layer.source_ref or layer.source.value
+        return (
+            f"## Context: {title}\n"
+            f"[Source: {source_ref} · Authority: {layer.authority.value} · "
+            f"Trust: {layer.trust.value} · Scope: {layer.scope.value} · "
+            f"Load: {layer.load_reason.value}]\n\n{layer.content}"
+        )
 
-        if max_tokens:
-            total = sum(_estimate_tokens(layer) for layer in layers if layer.strip())
-            if total > max_tokens:
-                # Cut lowest-priority layers first. SMITH.md, learned user
-                # context, role, workflow, and runtime context are never
-                # trimmed; context.md has its own small policy budget.
-                cut_order = [
-                    _LAYER_OUTPUT_STYLE,
-                    _LAYER_MEMORY,
-                    _LAYER_SKILLS,
-                    _LAYER_TOOLS,
-                    _LAYER_STYLE,
-                ]
-                for idx in cut_order:
-                    if idx < len(layers) and layers[idx].strip():
-                        total -= _estimate_tokens(layers[idx])
-                        layers[idx] = ""
-                        if total <= max_tokens:
-                            break
+    @staticmethod
+    def _manifest_for(
+        original: tuple[PromptLayer, ...],
+        rendered: tuple[PromptLayer, ...],
+        text: str,
+    ) -> PromptManifest:
+        rendered_by_id = {layer.name: layer for layer in rendered}
+        entries: list[dict[str, str | int]] = []
+        for layer in original:
+            final_layer = rendered_by_id[layer.name]
+            action = (
+                "empty" if not layer.content.strip()
+                else "trimmed" if not final_layer.content.strip()
+                else "loaded"
+            )
+            entries.append(
+                {
+                    "id": layer.name,
+                    "source": layer.source.value,
+                    "source_ref": layer.source_ref or layer.source.value,
+                    "scope": layer.scope.value,
+                    "authority": layer.authority.value,
+                    "trust": layer.trust.value,
+                    "load_reason": layer.load_reason.value,
+                    "content_hash": hashlib.sha256(layer.content.encode()).hexdigest(),
+                    "char_count": len(layer.content),
+                    "token_estimate": PromptAssembler._layer_token_cost(layer),
+                    "action": action,
+                }
+            )
+        return PromptManifest(
+            rendered_prompt_hash=hashlib.sha256(text.encode()).hexdigest(),
+            layers=tuple(entries),
+        )
 
-        # Filter empty and join
-        return _SEPARATOR.join(layer for layer in layers if layer.strip())
+    @staticmethod
+    def _layer_token_cost(layer: PromptLayer) -> int:
+        return _estimate_tokens(PromptAssembler._render_layer(layer)) if layer.content.strip() else 0
+
+    @staticmethod
+    def _trim_to_budget(
+        layers: tuple[PromptLayer, ...], max_tokens: int,
+    ) -> tuple[PromptLayer, ...]:
+        """Drop only explicitly trimmable layers in declared priority order."""
+        if not max_tokens:
+            return layers
+
+        total = sum(PromptAssembler._layer_token_cost(layer) for layer in layers)
+        if total <= max_tokens:
+            return layers
+
+        trimmed = list(layers)
+        candidates = sorted(
+            (
+                (index, layer)
+                for index, layer in enumerate(layers)
+                if layer.content.strip() and layer.trim_priority is not None
+            ),
+            key=lambda candidate: (candidate[1].trim_priority, candidate[0]),
+        )
+        for index, layer in candidates:
+            total -= PromptAssembler._layer_token_cost(layer)
+            trimmed[index] = replace(layer, content="")
+            if total <= max_tokens:
+                break
+        return tuple(trimmed)
 
     @staticmethod
     def get_prefix_cache_key(agent_dir: Path) -> str | None:
@@ -282,25 +637,36 @@ class PromptAssembler:
         except (OSError, RuntimeError):
             return ""
 
-    def _read_smith_instructions(self, working_dir: Path | None) -> str:
-        """Read global (~/.agent-smith/SMITH.md) and project (.smith/SMITH.md) instructions."""
+    def _read_global_smith_instructions(self) -> str:
+        """Read user-global instructions without collapsing their provenance."""
         from common.paths import AppPaths
-
-        parts: list[str] = []
 
         global_path = AppPaths.defaults().data_dir / "SMITH.md"
         global_text = self._read_capped(global_path)
         if global_text:
-            parts.append("## Global Instructions\n\n" + global_text)
+            return "## Global Instructions\n\n" + global_text
+        return ""
 
+    def _read_project_smith_instructions(self, working_dir: Path | None) -> str:
+        """Read repository instructions without collapsing their provenance."""
         if working_dir is not None:
             project_path = self._find_project_smith_md(working_dir)
             if project_path is not None:
                 project_text = self._read_capped(project_path)
                 if project_text:
-                    parts.append("## Project Instructions\n\n" + project_text)
+                    return "## Project Instructions\n\n" + project_text
+        return ""
 
-        return "\n\n".join(parts)
+    def _read_smith_instructions(self, working_dir: Path | None) -> str:
+        """Backward-compatible combined view for direct legacy callers."""
+        return "\n\n".join(
+            part
+            for part in (
+                self._read_global_smith_instructions(),
+                self._read_project_smith_instructions(working_dir),
+            )
+            if part
+        )
 
     @staticmethod
     def _extract_memory_body(f: Path) -> str:

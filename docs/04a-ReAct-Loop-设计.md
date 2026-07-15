@@ -294,13 +294,15 @@ else:
 | 输出超限续写 | `MAX_LENGTH_CONTINUATIONS` | 2 | finish_reason=length 时自动续写 |
 | 假完成修复 | `MAX_INCOMPLETE_FINAL_REPAIRS` | 2 | LLM 回复只说"让我去查"而非给答案 |
 
-### 6.2 连续错误 → 提示注入
+### 6.2 运行时控制提示注入
 
-连续 3 次工具失败后，向对话注入 `TOOL_FAILURE_HINT`：
+运行时控制文本统一由 `engine/execution/runtime_control.py` 生成，ReAct 只在状态变化时把它作为 system 消息追加。连续 3 次工具失败后，向对话注入 `TOOL_FAILURE_HINT`：
 
 > "Multiple tool calls have failed consecutively. Change your approach - try a different tool, simplify the command, or explain what you need without using tools."
 
 注入后计数器归零。这是一种**柔性干预**——不终止循环，而是提示 LLM 换策略。
+
+工具被 `ToolPolicy` 阻断时，工具观察仍保留 `[BLOCKED]` 原因；随后追加“不绕过、不重复同一副作用操作、改走安全替代方案或如实说明限制”的控制指令。该提示帮助模型选择下一步，但是否执行始终由 `ToolPolicy` / `ToolGuard` 决定。
 
 ### 6.3 相同错误短路
 
@@ -308,7 +310,7 @@ else:
 
 ### 6.4 "假完成"修复
 
-LLM 在执行完工具后，有时会回复"让我去搜索一下"而非给出真正的总结。`looks_like_incomplete_final_after_tool()` 通过正则检测这种模式（中英文都覆盖），然后注入提示要求 LLM 给出真正的最终答案。
+LLM 在执行完工具后，有时会回复"让我去搜索一下"而非给出真正的总结。`looks_like_incomplete_final_after_tool()` 通过正则检测这种模式（中英文都覆盖），然后注入运行时控制指令，要求 LLM 给出真正的最终答案和交付信息。
 
 检测条件：
 1. 之前有过成功的工具调用（`had_successful_tool`）

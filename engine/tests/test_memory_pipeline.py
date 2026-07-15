@@ -621,6 +621,9 @@ def test_compile_durable_rejects_oversize_output_without_replacing_memory(tmp_pa
         "task": "durable-memory task",
         "summary": "durable-memory result",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "kind": "decision",
+        "scope": "project",
+        "evidence": "test_result",
     }
     (memory_dir / "recent.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
     llm = StaticLLM("x" * (MAX_DURABLE_CHARS * 2))
@@ -664,6 +667,9 @@ def test_compile_durable_preserves_existing_memory_when_llm_output_is_empty(tmp_
         "task": "new task",
         "summary": "new result",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "kind": "decision",
+        "scope": "project",
+        "evidence": "test_result",
     }
     (memory_dir / "recent.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
 
@@ -683,6 +689,9 @@ def test_compile_durable_keeps_backup_before_replacing_existing_memory(tmp_path:
         "task": "new task",
         "summary": "new result",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "kind": "decision",
+        "scope": "project",
+        "evidence": "test_result",
     }
     (memory_dir / "recent.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
 
@@ -705,6 +714,9 @@ def test_compile_durable_sanitizes_existing_memory_before_prompting(tmp_path: Pa
         "task": "new task",
         "summary": "new result",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "kind": "decision",
+        "scope": "project",
+        "evidence": "test_result",
     }
     (memory_dir / "recent.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
     llm = StaticLLM(DURABLE_DOC.format(evidence="- **Safe**: safe replacement."))
@@ -817,6 +829,9 @@ def test_durable_checkpoint_prevents_remerge_after_recent_failure(tmp_path: Path
         "task": "event-A",
         "summary": "first result",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "kind": "decision",
+        "scope": "project",
+        "evidence": "test_result",
     }
     (memory_dir / "recent.jsonl").write_text(json.dumps(first) + "\n", encoding="utf-8")
     llm = StaticLLM()
@@ -832,6 +847,9 @@ def test_durable_checkpoint_prevents_remerge_after_recent_failure(tmp_path: Path
             "task": "event-B",
             "summary": "second result",
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "kind": "decision",
+            "scope": "project",
+            "evidence": "test_result",
         }
         with (memory_dir / "recent.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(second) + "\n")
@@ -853,6 +871,9 @@ def test_run_compilation_advances_offset_after_safe_durable_fallback(tmp_path: P
         "task": "task",
         "summary": "reply",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "kind": "decision",
+        "scope": "project",
+        "evidence": "test_result",
     }
     (memory_dir / "recent.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
 
@@ -888,6 +909,9 @@ def test_run_compilation_keeps_recent_progress_when_durable_times_out_with_fallb
         "task": "keep recent activity",
         "summary": "recent evidence",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "kind": "decision",
+        "scope": "project",
+        "evidence": "test_result",
     }
     (memory_dir / "recent.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
 
@@ -1083,7 +1107,7 @@ def test_save_conversation_memory_keeps_compile_counter_when_durable_output_is_r
     assert (memory_dir / ".compile_counter").read_text(encoding="utf-8") == "5"
 
 
-def test_save_conversation_memory_compiles_after_five_turns(tmp_path: Path) -> None:
+def test_save_conversation_memory_compiles_recent_without_promoting_generic_work(tmp_path: Path) -> None:
     llm = StaticLLM()
 
     async def run() -> None:
@@ -1109,7 +1133,7 @@ def test_save_conversation_memory_compiles_after_five_turns(tmp_path: Path) -> N
 
     memory_dir = tmp_path / "memory"
     assert (memory_dir / "recent.md").is_file()
-    assert (memory_dir / "durable.md").is_file()
+    assert not (memory_dir / "durable.md").exists()
     assert (memory_dir / ".compile_counter").read_text(encoding="utf-8") == "0"
 
 

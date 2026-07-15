@@ -426,6 +426,8 @@ class SessionService:
             return {"event": event, "data": json.dumps(data, ensure_ascii=False)}
 
         full_reply: list[str] = []
+        visible_raw_reply: list[str] = []
+        visible_provisional_reply: dict[str, list[str]] = {}
         msg: dict | None = None
         run_id: str | None = None
         terminal_status = "completed"
@@ -460,11 +462,13 @@ class SessionService:
                 elif t == "raw_response_event":
                     delta = raw_text_delta(ev, include_provisional=False)
                     if delta is not None:
+                        visible_raw_reply.append(delta)
                         yield sse("message", {"text": delta})
                 elif t == "provisional_text_delta":
                     provision_id = str(ev.data.get("provision_id", ""))
                     text = ev.data.get("text")
                     if provision_id and isinstance(text, str) and text:
+                        visible_provisional_reply.setdefault(provision_id, []).append(text)
                         yield sse("provisional_text_delta", {
                             "provision_id": provision_id,
                             "text": text,
@@ -476,6 +480,7 @@ class SessionService:
                 elif t == "provisional_retract":
                     provision_id = str(ev.data.get("provision_id", ""))
                     if provision_id:
+                        visible_provisional_reply.pop(provision_id, None)
                         payload = {"provision_id": provision_id}
                         reason = ev.data.get("reason")
                         if isinstance(reason, str) and reason:
@@ -580,6 +585,13 @@ class SessionService:
             # 客户端断连/引擎异常时生成器在 yield 处被终止，async for 之后的代码不会执行；
             # 落库放 finally 并用 shield 保护，请求被取消也能保住已生成的部分回复。
             reply_text = "".join(full_reply)
+            if not reply_text:
+                # Direct provider text and active provisional drafts have already
+                # reached the client.  On disconnect preserve exactly that visible
+                # state, but never persist drafts that were explicitly retracted.
+                reply_text = "".join(
+                    "".join(chunks) for chunks in visible_provisional_reply.values()
+                ) or "".join(visible_raw_reply)
             if reply_text:
                 try:
                     msg = await asyncio.shield(

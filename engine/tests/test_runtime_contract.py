@@ -18,6 +18,7 @@ from engine.execution.agent_loop import (
 from engine.execution.events import EventType, ExecutionEvent, raw_text_delta
 from engine.execution.run_state import RunStateStore, RunStatus
 from engine.execution.runtime import EngineRequest, RuntimeContext, RuntimeServices
+from engine.execution.trace import TraceStore
 from engine.identity_catalog import IdentityCatalog
 from engine.llm.client import ChatResponse, ToolCallData
 from engine.safety.tool_guard import ToolGuard
@@ -250,7 +251,7 @@ def test_prepare_runtime_binds_memory_ops_but_keeps_it_hidden(tmp_path: Path) ->
 def test_prepare_runtime_keeps_recent_and_retrieves_only_matching_durable(
     tmp_path: Path,
 ) -> None:
-    async def run() -> str:
+    async def run() -> tuple[str, dict[str, object]]:
         runtime, services, _ = _runtime(tmp_path)
         memory_dir = runtime.profile_dir / "memory"
         memory_dir.mkdir()
@@ -271,13 +272,51 @@ def test_prepare_runtime_keeps_recent_and_retrieves_only_matching_durable(
             runtime,
             services,
         )
-        return setup.system_prompt
+        return setup.system_prompt, setup.prompt_manifest
 
-    prompt = asyncio.run(run())
+    prompt, manifest = asyncio.run(run())
 
     assert "RECENT_ACTIVE_WORK" in prompt
     assert "PostgreSQL migration uses Alembic" in prompt
     assert "Redis caching uses a separate worker" not in prompt
+    assert "## Context: Recent Working Context" in prompt
+    assert "## Context: Durable Memory Retrieval" in prompt
+    layers = {item["id"]: item for item in manifest["layers"]}  # type: ignore[index]
+    assert layers["recent_working_context"]["source"] == "memory_recent"
+    assert layers["recent_working_context"]["action"] == "loaded"
+    assert layers["durable_retrieval"]["source"] == "memory_durable"
+    assert layers["durable_retrieval"]["action"] == "loaded"
+
+
+def test_prepare_runtime_injects_engine_owned_runtime_control(tmp_path: Path) -> None:
+    async def run() -> str:
+        runtime, services, _ = _runtime(tmp_path)
+        setup = await prepare_runtime(EngineRequest(message="Inspect this project"), runtime, services)
+        return setup.system_prompt
+
+    prompt = asyncio.run(run())
+
+    assert "## Engine Runtime Control" in prompt
+    assert "ToolPolicy" in prompt
+    assert prompt.endswith("only when the task remains unfinished.")
+
+
+def test_run_stream_persists_redacted_prompt_manifest_to_private_trace(tmp_path: Path) -> None:
+    async def run() -> tuple[Path, str]:
+        runtime, services, _ = _runtime(tmp_path)
+        (runtime.profile_dir / "role.md").write_text("ROLE_SECRET_VALUE", encoding="utf-8")
+        stream = run_stream_with_runtime(EngineRequest(message="hello"), runtime, services)
+        _ = [event async for event in stream.stream_events()]
+        return runtime.profile_dir, stream.run_id
+
+    profile_dir, run_id = asyncio.run(run())
+    records = TraceStore(profile_dir).read(run_id)
+    manifest = next(record for record in records if record["type"] == "prompt_manifest")
+
+    assert manifest["data"]["schema_version"] == 1
+    assert manifest["data"]["rendered_prompt_hash"]
+    assert any(layer["id"] == "role" for layer in manifest["data"]["layers"])
+    assert "ROLE_SECRET_VALUE" not in str(manifest)
 
 
 def test_reply_with_runtime_uses_explicit_profile_context(tmp_path: Path) -> None:
@@ -556,7 +595,7 @@ def test_reply_with_runtime_marks_actual_tool_activity(tmp_path: Path) -> None:
     assert llm.closed is True
 
 
-def test_runtime_reuses_llm_for_memory_compilation(tmp_path: Path) -> None:
+def test_runtime_reuses_llm_for_recent_memory_compilation(tmp_path: Path) -> None:
     async def run() -> ToolCallingMemoryLLM:
         runtime, services, _ = _runtime(tmp_path)
         llm = ToolCallingMemoryLLM()
@@ -570,14 +609,14 @@ def test_runtime_reuses_llm_for_memory_compilation(tmp_path: Path) -> None:
 
         assert result.had_tools is True
         assert (state_dir / "recent.md").is_file()
-        assert (state_dir / "durable.md").is_file()
+        assert not (state_dir / "durable.md").exists()
         assert (state_dir / ".compile_counter").read_text(encoding="utf-8") == "0"
         return llm
 
     llm = asyncio.run(run())
 
     assert llm.closed is True
-    assert len(llm.chat_calls) >= 3
+    assert len(llm.chat_calls) >= 2
     assert any(
         messages[0]["content"].startswith("You are Smith's memory compiler")
         for messages in llm.chat_calls

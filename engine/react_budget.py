@@ -4,6 +4,13 @@ import logging
 import re
 from typing import TYPE_CHECKING, AsyncGenerator
 
+from engine.execution.runtime_control import (
+    continue_after_length_prompt,
+    finalize_without_tools_prompt,
+    incomplete_final_repair_prompt,
+    tool_failure_recovery_prompt,
+)
+
 if TYPE_CHECKING:
     from engine.llm.port import LLMPort
 
@@ -19,20 +26,9 @@ CONVERSATION_KEEP_RECENT = 28
 CONVERSATION_KEEP_HEAD = 2
 MAX_IDENTICAL_TOOL_ERRORS = 6
 COMPRESS_MIN_MESSAGES = 10
-TOOL_FAILURE_HINT = (
-    "Multiple tool calls have failed consecutively. Change your approach - "
-    "try a different tool, simplify the command, or explain what you need without using tools."
-)
-INCOMPLETE_FINAL_AFTER_TOOL_HINT = (
-    "Your last message described a next action instead of completing the user's request. "
-    "Continue now: call the appropriate tool if more evidence is still needed, or provide "
-    "a complete final answer. Do not only say what you will do next."
-)
-CONTINUE_AFTER_LENGTH_HINT = (
-    "Your previous response was cut off by the model output limit. Continue exactly "
-    "from where it stopped. Do not repeat prior text, restart the answer, or mention "
-    "this instruction."
-)
+TOOL_FAILURE_HINT = tool_failure_recovery_prompt()
+INCOMPLETE_FINAL_AFTER_TOOL_HINT = incomplete_final_repair_prompt()
+CONTINUE_AFTER_LENGTH_HINT = continue_after_length_prompt()
 TOOL_FAILURE_BUDGET_MESSAGE = (
     "Tool failure recovery budget reached before a final answer."
 )
@@ -76,14 +72,6 @@ def looks_like_incomplete_final_after_tool(text: str) -> bool:
     if not normalized or len(normalized) > 240:
         return False
     return any(pattern.search(normalized) for pattern in _INCOMPLETE_FINAL_PATTERNS)
-
-
-def finalize_without_tools_prompt(reason: str) -> str:
-    return (
-        f"{reason}\n"
-        "Do not call more tools. Give the user a concise final answer summarizing "
-        "what was completed, what failed, and the next concrete step."
-    )
 
 
 def budget_exhausted_message(reason: str) -> str:

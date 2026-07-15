@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from engine.prompt.assembler import PromptAssembler
+from engine.prompt.assembler import (
+    PromptAuthority,
+    PromptAssembler,
+    PromptLoadReason,
+    PromptScope,
+    PromptSource,
+    PromptTrust,
+)
 
 
 class FakeToolRegistry:
@@ -371,3 +378,160 @@ def test_smith_md_layer_is_not_trimmed_by_token_budget(tmp_path: Path) -> None:
 
     assert "MUST_SURVIVE" in prompt
     assert "CONTEXT.MD" in prompt
+
+
+@pytest.mark.usefixtures("_isolate_apppaths")
+def test_runtime_control_is_last_and_never_trimmed(tmp_path: Path) -> None:
+    agent_dir = _make_agent_dir(tmp_path)
+
+    prompt = PromptAssembler().assemble(
+        agent_dir,
+        FakeToolRegistry(),
+        FakeSkillRegistry(),
+        {},
+        runtime_guidance="IDENTITY_GUIDANCE",
+        runtime_control="ENGINE_RUNTIME_CONTROL",
+        max_tokens=1,
+    )
+
+    assert "ENGINE_RUNTIME_CONTROL" in prompt
+    assert prompt.index("IDENTITY_GUIDANCE") < prompt.index("ENGINE_RUNTIME_CONTROL")
+    assert prompt.endswith("ENGINE_RUNTIME_CONTROL")
+
+
+@pytest.mark.usefixtures("_isolate_apppaths")
+def test_prompt_layers_expose_governance_metadata_and_render_compatibly(
+    tmp_path: Path,
+) -> None:
+    agent_dir = _make_agent_dir(tmp_path)
+    assembler = PromptAssembler()
+    kwargs = {
+        "context": {"current_provider": "openai"},
+        "memory_text": "MEMORY_REFERENCE",
+        "runtime_guidance": "IDENTITY_GUIDANCE",
+        "runtime_control": "ENGINE_RUNTIME_CONTROL",
+    }
+
+    layers = assembler.build_layers(
+        agent_dir,
+        FakeToolRegistry(),
+        FakeSkillRegistry(),
+        **kwargs,
+    )
+    by_name = {layer.name: layer for layer in layers}
+
+    assert [layer.name for layer in layers] == [
+        "role",
+        "style",
+        "workflow",
+        "toolbox_policy",
+        "tool_definitions",
+        "skills",
+        "learned_context",
+        "global_instructions",
+        "project_instructions",
+        "identity_guidance",
+        "eval_guidance",
+        "output_style",
+        "memory_governance",
+        "legacy_durable_context",
+        "recent_working_context",
+        "durable_retrieval",
+        "episode_retrieval",
+        "runtime_context",
+        "runtime_control",
+    ]
+    assert by_name["global_instructions"].authority is PromptAuthority.USER_POLICY
+    assert by_name["project_instructions"].authority is PromptAuthority.PROJECT_POLICY
+    assert by_name["recent_working_context"].authority is PromptAuthority.REFERENCE
+    assert by_name["recent_working_context"].trust is PromptTrust.UNTRUSTED_REFERENCE
+    assert by_name["runtime_context"].source is PromptSource.RUNTIME
+    assert by_name["runtime_context"].authority is PromptAuthority.RUNTIME_FACT
+    assert by_name["runtime_control"].authority is PromptAuthority.ENGINE_CONTROL
+    assert by_name["runtime_control"].trim_priority is None
+    assert assembler.render_layers(layers) == assembler.assemble(
+        agent_dir,
+        FakeToolRegistry(),
+        FakeSkillRegistry(),
+        **kwargs,
+    )
+
+
+def test_prompt_assembly_splits_origins_renders_labels_and_records_redacted_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    agent_dir = _make_agent_dir(tmp_path)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "SMITH.md").write_text("GLOBAL_RULE", encoding="utf-8")
+
+    from common.paths import AppPaths
+
+    monkeypatch.setattr(
+        AppPaths,
+        "defaults",
+        staticmethod(lambda: AppPaths(data_dir=data_dir, project_root=tmp_path)),
+    )
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / ".git").mkdir()
+    (project_dir / ".smith").mkdir()
+    (project_dir / ".smith" / "SMITH.md").write_text(
+        "PROJECT_RULE", encoding="utf-8"
+    )
+
+    assembly = PromptAssembler().assemble_detailed(
+        agent_dir,
+        FakeToolRegistry(),
+        FakeSkillRegistry(),
+        {"current_provider": "openai"},
+        working_dir=project_dir,
+        memory_text="RECENT_SECRET_VALUE",
+        retrieved_durable="DURABLE_MEMORY",
+        retrieved_episodes="EPISODE_MEMORY",
+        runtime_guidance="IDENTITY_GUIDANCE",
+        runtime_control="ENGINE_RUNTIME_CONTROL",
+    )
+
+    by_name = {layer.name: layer for layer in assembly.layers}
+    assert by_name["global_instructions"].scope is PromptScope.USER
+    assert by_name["global_instructions"].authority is PromptAuthority.USER_POLICY
+    assert by_name["global_instructions"].source_ref == "global:SMITH.md"
+    assert by_name["project_instructions"].scope is PromptScope.PROJECT
+    assert by_name["project_instructions"].source_ref == "project:.smith/SMITH.md"
+    assert by_name["recent_working_context"].load_reason is PromptLoadReason.ALWAYS
+    assert by_name["durable_retrieval"].load_reason is PromptLoadReason.QUERY_RETRIEVAL
+    assert by_name["episode_retrieval"].source is PromptSource.MEMORY_EPISODES
+    assert "## Context: Project Instructions" in assembly.text
+    assert "[Source: project:.smith/SMITH.md · Authority: project_policy" in assembly.text
+    assert "## Memory Governance" in assembly.text
+    assert assembly.text.endswith("ENGINE_RUNTIME_CONTROL")
+
+    manifest = assembly.manifest.to_trace_data()
+    assert manifest["schema_version"] == 1
+    assert manifest["rendered_prompt_hash"]
+    assert "RECENT_SECRET_VALUE" not in str(manifest)
+    recent = next(item for item in manifest["layers"] if item["id"] == "recent_working_context")
+    assert recent["action"] == "loaded"
+    assert recent["content_hash"]
+
+
+@pytest.mark.usefixtures("_isolate_apppaths")
+def test_prompt_manifest_marks_trimmable_layers_without_leaking_content(tmp_path: Path) -> None:
+    agent_dir = _make_agent_dir(tmp_path)
+    assembly = PromptAssembler().assemble_detailed(
+        agent_dir,
+        FakeToolRegistry(),
+        FakeSkillRegistry(),
+        {},
+        memory_text="SENSITIVE_MEMORY_PAYLOAD",
+        runtime_control="ENGINE_RUNTIME_CONTROL",
+        max_tokens=1,
+    )
+
+    manifest = assembly.manifest.to_trace_data()
+    by_id = {item["id"]: item for item in manifest["layers"]}
+    assert by_id["recent_working_context"]["action"] == "trimmed"
+    assert by_id["runtime_control"]["action"] != "trimmed"
+    assert "SENSITIVE_MEMORY_PAYLOAD" not in str(manifest)

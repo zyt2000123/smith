@@ -5,6 +5,7 @@ import asyncio
 from engine.safety.approval import (
     ApprovalBroker,
     ApprovalRequest,
+    ApprovalTimeoutError,
     build_approval_presentation,
     summarize_arguments,
 )
@@ -45,6 +46,31 @@ def test_approval_broker_wakes_the_waiting_run_with_the_user_decision() -> None:
         return True
 
     assert asyncio.run(run())
+
+
+def test_approval_broker_times_out_and_clears_pending() -> None:
+    async def run() -> None:
+        broker = ApprovalBroker()
+        request = broker.open(
+            ApprovalRequest(
+                approval_id="approval-timeout",
+                run_id="run-1",
+                tool_name="shell",
+                level="execute",
+                reason="Approval required",
+                arguments_summary={},
+            )
+        )
+        try:
+            await broker.wait(request, timeout_seconds=0.01)
+        except ApprovalTimeoutError:
+            pass
+        else:
+            raise AssertionError("approval wait should time out")
+
+        assert not broker.resolve("run-1", "approval-timeout", True)
+
+    asyncio.run(run())
 
 
 def test_approval_presentation_describes_file_and_git_actions() -> None:
