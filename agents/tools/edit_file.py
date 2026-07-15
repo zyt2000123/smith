@@ -25,16 +25,31 @@ TOOL_META = {
     },
     "path_args": ["path"],
     "is_write_tool": True,
+    "permission_level": "write",
+    "approval_policy": "policy",
+    "side_effect": "write",
+    "concurrency": "serial",
+    "execution_environment": "host",
 }
+
+
+def _is_within_workdir(path: str, work_dir: str) -> bool:
+    resolved = os.path.realpath(path)
+    work_resolved = os.path.realpath(work_dir)
+    return resolved.startswith(work_resolved + os.sep) or resolved == work_resolved
 
 
 async def execute(
     *, path: str, old_string: str, new_string: str, replace_all: bool = False,
+    _work_dir: str = "",
 ) -> str:
     if old_string == new_string:
         return "Error: new_string must differ from old_string"
 
     resolved = os.path.realpath(path) if os.path.isabs(path) else os.path.abspath(path)
+
+    if _work_dir and not _is_within_workdir(resolved, _work_dir):
+        return f"Error: path '{path}' is outside the allowed work directory '{_work_dir}'"
 
     if not os.path.isfile(resolved):
         return f"Error: file not found: {resolved}"

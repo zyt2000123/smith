@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -18,6 +19,7 @@ from ..utils.cron import next_cron_time, next_interval_time
 log = logging.getLogger(__name__)
 _RETRY_BASE_DELAY_SECONDS = 60
 _MAX_RETRY_DELAY_SECONDS = 900
+_LEASE_RENEW_INTERVAL_SECONDS = 60
 
 
 class AutoTaskService:
@@ -102,11 +104,15 @@ class AutoTaskService:
         task_id = task["id"]
         agent_id = task["agent_id"]
 
-        if not await self.repo.claim_running(task_id):
+        lease_token = await self.repo.claim_running(task_id)
+        if lease_token is None:
             return None
 
         run = await self.repo.create_run(task_id)
         next_run = self._calc_next_run(task["trigger_type"], task["trigger_config"])
+        lease_renewal = asyncio.create_task(
+            self._renew_lease_until_finished(task_id, lease_token)
+        )
 
         try:
             profile = await self.agent_profile_repo.get(agent_id)
@@ -144,8 +150,14 @@ class AutoTaskService:
                 session["id"], "assistant", reply_text
             )
 
-            await self.repo.finish_task(task_id, "idle", next_run)
-            await self.repo.update(task_id, {"retry_count": 0})
+            if not await self.repo.finish_task(
+                task_id,
+                "idle",
+                next_run,
+                lease_token,
+                retry_count=0,
+            ):
+                raise RuntimeError("auto task lease was lost before completion")
             finished = await self.repo.finish_run(run["id"], "completed", reply_text)
             if finished is None:
                 raise HTTPException(500, "Failed to record auto task run")
@@ -161,19 +173,27 @@ class AutoTaskService:
             if is_scheduled and retry_count <= max_retries:
                 retry_status = "idle"
                 retry_at = self._retry_next_run(retry_count)
-            await self.repo.finish_task(task_id, retry_status, retry_at)
-            # Keep the counter only across the immediate retry chain. Once the
-            # chain is exhausted, the next normal schedule starts fresh.
-            await self.repo.update(
+            finished_task = await self.repo.finish_task(
                 task_id,
-                {"retry_count": retry_count if retry_status == "idle" else 0},
+                retry_status,
+                retry_at,
+                lease_token,
+                retry_count=retry_count if retry_status == "idle" else 0,
             )
+            if not finished_task:
+                log.warning("Auto task %s lease was lost before failure handling", task_id)
             finished = await self.repo.finish_run(
                 run["id"], "failed", "", error=str(exc)
             )
             if finished is None:
                 raise HTTPException(500, "Failed to record auto task run") from exc
             return AutoTaskRunOut(**finished)
+        finally:
+            lease_renewal.cancel()
+            try:
+                await lease_renewal
+            except asyncio.CancelledError:
+                pass
 
     async def list_runs(self, task_id: str) -> list[AutoTaskRunOut]:
         rows = await self.repo.list_runs(task_id)
@@ -190,6 +210,17 @@ class AutoTaskService:
             except Exception:
                 log.exception("Scheduler failed to run task %s", task["id"])
         return len(due)
+
+    async def _renew_lease_until_finished(self, task_id: str, lease_token: str) -> None:
+        """Keep ownership alive while an LLM/tool run outlives the initial lease."""
+        try:
+            while True:
+                await asyncio.sleep(_LEASE_RENEW_INTERVAL_SECONDS)
+                if not await self.repo.renew_lease(task_id, lease_token):
+                    log.warning("Auto task %s lease was lost while running", task_id)
+                    return
+        except asyncio.CancelledError:
+            raise
 
     # ── helpers ──
 

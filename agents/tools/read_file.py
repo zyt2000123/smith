@@ -26,6 +26,10 @@ TOOL_META = {
         "required": ["path"]
     },
     "path_args": ["path"],
+    "permission_level": "read",
+    "approval_policy": "never",
+    "side_effect": "none",
+    "execution_environment": "host",
 }
 
 MAX_READ_BYTES = 50 * 1024  # 50KB preview budget per call

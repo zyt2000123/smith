@@ -19,6 +19,7 @@ def test_run_state_store_round_trips_and_records_lifecycle(tmp_path: Path) -> No
         "run-1",
         agent_id="smith-id",
         session_id="session-1",
+        message_id="message-1",
         identity_id="smith",
     )
 
@@ -29,6 +30,7 @@ def test_run_state_store_round_trips_and_records_lifecycle(tmp_path: Path) -> No
 
     restored = store.get("run-1")
     assert restored is not None
+    assert restored.message_id == "message-1"
     assert restored.status is RunStatus.COMPLETED
     assert restored.session_id == "session-1"
     assert restored.identity_id == "smith"
@@ -56,6 +58,24 @@ def test_run_state_can_resume_an_incomplete_run(tmp_path: Path) -> None:
     assert resumed.status is RunStatus.RUNNING
     assert resumed.reason == "resumed"
     assert resumed.last_event_type == "run_resumed"
+
+
+def test_run_state_preserves_execution_scope_for_a_resumed_run(tmp_path: Path) -> None:
+    store = RunStateStore(tmp_path)
+    store.create(
+        "run-1",
+        agent_id="smith-id",
+        session_id="session-1",
+        identity_id="smith",
+        working_dir="/tmp/project",
+        forced_skill="review",
+    )
+
+    restored = store.get("run-1")
+
+    assert restored is not None
+    assert restored.working_dir == "/tmp/project"
+    assert restored.forced_skill == "review"
 
 
 def test_run_state_does_not_resume_completed_run(tmp_path: Path) -> None:

@@ -28,6 +28,7 @@ class EngineRequest:
     forced_skill: str | None = None
     identity_id: str | None = None
     working_dir: str | None = None
+    message_id: str | None = None
 
 
 @dataclass(frozen=True)

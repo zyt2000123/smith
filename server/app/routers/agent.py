@@ -203,6 +203,14 @@ async def get_run(
     return await svc.get_run(run_id)
 
 
+@router.post("/runs/{run_id}/resume")
+async def resume_run(
+    run_id: str,
+    svc: AgentService = Depends(get_agent_service),
+):
+    return EventSourceResponse(svc.resume_run(run_id))
+
+
 @router.post("/runs/{run_id}/approval", response_model=RunStateOut)
 async def resolve_run_approval(
     run_id: str,

@@ -200,6 +200,24 @@ def test_metadata_permission_level_overrides_fallback():
     assert ToolGuard(_RULES).check(ToolCall(id="t", name="notes_read", arguments={})).level is PermissionLevel.EXECUTE
 
 
+def test_metadata_read_actions_do_not_require_approval_but_writes_still_do():
+    defn = ToolDefinition(
+        name="memory_ops",
+        description="",
+        permission_level="write",
+        approval_policy="policy",
+        side_effect="write",
+        read_actions=frozenset({"search"}),
+    )
+    guard = ToolGuard(_RULES, tool_registry={"memory_ops": defn})
+
+    searched = guard.check(ToolCall(id="read", name="memory_ops", arguments={"action": "search"}))
+    wrote = guard.check(ToolCall(id="write", name="memory_ops", arguments={"action": "remember"}))
+
+    assert searched.approval_required is False
+    assert wrote.approval_required is True
+
+
 def test_session_whitelist_extends_boundary_but_not_sensitive_blocks():
     guard = ToolGuard(_RULES)
     call = ToolCall(id="t", name="list_dir", arguments={"path": "/opt/data/project"})
@@ -274,6 +292,45 @@ def test_write_tool_requests_approval_after_hard_guard_passes(tmp_path: Path):
     assert result.allowed
     assert result.approval_required
     assert result.level is PermissionLevel.WRITE
+
+
+def test_working_directory_restricts_relative_and_absolute_tool_paths(tmp_path: Path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    guard = ToolGuard(tmp_path / "missing-rules.json")
+    guard.set_working_directory(project_dir)
+
+    relative = guard.check(
+        ToolCall(id="relative", name="write_file", arguments={"path": "notes.md"})
+    )
+    absolute = guard.check(
+        ToolCall(id="absolute", name="write_file", arguments={"path": str(outside)})
+    )
+
+    assert relative.allowed
+    assert relative.approval_required
+    assert not absolute.allowed
+    assert absolute.boundary_block
+
+
+def test_working_directory_disables_unconfined_shell_execution(tmp_path: Path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "nested").mkdir()
+    guard = ToolGuard(tmp_path / "missing-rules.json")
+    guard.set_working_directory(project_dir)
+
+    attempts = [
+        guard.check(ToolCall(id="safe", name="shell", arguments={"command": "pwd"})),
+        guard.check(ToolCall(id="cd", name="shell", arguments={"command": "cd /tmp && pwd"})),
+        guard.check(ToolCall(id="traversal", name="shell", arguments={"command": "cat ../secret.txt"})),
+        guard.check(ToolCall(id="absolute", name="shell", arguments={"command": "cat /tmp/secret.txt"})),
+        guard.check(ToolCall(id="substitution", name="shell", arguments={"command": 'cd $(dirname "$PWD") && pwd'})),
+    ]
+
+    assert all(not result.allowed for result in attempts)
+    assert all("unavailable" in result.reason for result in attempts)
 
 
 def test_sensitive_write_remains_hard_blocked_and_not_approvable(tmp_path: Path):

@@ -11,12 +11,15 @@ from fastapi import HTTPException
 
 from engine.execution.agent_loop import (
     run_stream_with_runtime as engine_run_stream_with_runtime,
+    resume_stream_with_runtime as engine_resume_stream_with_runtime,
     reply_with_runtime as engine_reply_with_runtime,
 )
 from engine.execution.events import raw_text_delta
 from engine.execution.compression import CONTEXT_DISPLAY_WINDOW, compact_history
+from engine.execution.run_state import RunStateError, RunStateStore, RunStatus
 from engine.execution.runtime import EngineRequest
 from engine.identity_catalog import IdentityCatalog, IdentityCatalogError
+from common.config import AGENT_DIR
 from engine.llm.model_config import resolve_llm_config
 from common.yaml_utils import YamlConfigError
 
@@ -161,6 +164,38 @@ class SessionService:
             for r in rows
         ]
 
+    async def _history_before_message(
+        self,
+        session_id: str,
+        rows: list[dict],
+        message_id: str,
+    ) -> list[dict]:
+        """Build bounded history preceding the exact user message being resumed."""
+        user_index = next(
+            (
+                index for index, row in enumerate(rows)
+                if row.get("id") == message_id and row.get("role") == "user"
+            ),
+            -1,
+        )
+        if user_index < 0:
+            raise HTTPException(409, "Run session has no user message to resume")
+
+        prior_rows = rows[:user_index]
+        context_reader = getattr(self.session_repo, "get_context", None)
+        context = await context_reader(session_id) if context_reader is not None else {}
+        summary = context.get("context_summary") if isinstance(context, dict) else ""
+        cutoff = context.get("context_summary_cutoff", 0) if isinstance(context, dict) else 0
+        history: list[dict] = []
+        if isinstance(summary, str) and summary:
+            history.append({"role": "user", "content": f"[Session context summary]\n{summary}"})
+            if isinstance(cutoff, int) and cutoff > 0:
+                prior_rows = prior_rows[cutoff:]
+        return history + [
+            {"role": str(row["role"]), "content": str(row["content"])}
+            for row in prior_rows[-_HISTORY_LIMIT:]
+        ]
+
     async def _build_runtime(self, agent_id: str, profile_name: str, session_id: str):
         session = await self.session_repo.get_owned(session_id, agent_id)
         model_profile = session.get("model_profile") if session else None
@@ -262,7 +297,7 @@ class SessionService:
         history = await self._recent_history(session_id)
 
         # Save user message
-        await self.session_repo.add_message(session_id, "user", content)
+        user_message = await self.session_repo.add_message(session_id, "user", content)
 
         try:
             runtime, services = await self._build_runtime(agent_id, profile_name, session_id)
@@ -274,6 +309,7 @@ class SessionService:
                     forced_skill=skill_name,
                     identity_id=selected_identity_id,
                     working_dir=working_dir,
+                    message_id=user_message["id"],
                 ),
                 runtime,
                 services,
@@ -286,6 +322,71 @@ class SessionService:
         msg = await self.session_repo.add_message(session_id, "assistant", reply_text)
         return MessageOut(**msg)
 
+    async def resume_run(
+        self,
+        agent_id: str,
+        run_id: str,
+    ) -> AsyncGenerator[dict, None]:
+        """Resume an incomplete run through the same SSE/session contract."""
+        try:
+            state = RunStateStore(AGENT_DIR).get(run_id)
+        except (ValueError, RunStateError) as exc:
+            raise HTTPException(404, "Run not found") from exc
+        if state is None or state.agent_id != agent_id or not state.session_id:
+            raise HTTPException(404, "Run not found")
+        if state.status not in {
+            RunStatus.INCOMPLETE,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }:
+            raise HTTPException(409, f"Run cannot be resumed from {state.status.value}")
+        if not state.identity_id:
+            raise HTTPException(409, "Run is missing its execution identity")
+
+        if not state.message_id:
+            raise HTTPException(
+                409,
+                "Run predates message-bound resume and cannot be resumed safely",
+            )
+        rows = await self.session_repo.get_messages(state.session_id)
+        user_message = next(
+            (
+                row for row in rows
+                if row.get("id") == state.message_id and row.get("role") == "user"
+            ),
+            None,
+        )
+        if user_message is None or not isinstance(user_message.get("content"), str):
+            raise HTTPException(409, "Run message is no longer available for resume")
+        user_index = rows.index(user_message)
+        if any(row.get("role") == "user" for row in rows[user_index + 1 :]):
+            raise HTTPException(
+                409,
+                "Run has a newer user turn and cannot be resumed into this session safely",
+            )
+        history = await self._history_before_message(
+            state.session_id,
+            rows,
+            state.message_id,
+        )
+        await self.session_repo.discard_assistant_messages_after_user(
+            state.session_id,
+            state.message_id,
+        )
+
+        async for event in self.stream_message(
+            agent_id,
+            state.session_id,
+            user_message["content"],
+            skill_name=state.forced_skill,
+            identity_id=state.identity_id,
+            working_dir=state.working_dir,
+            _history_override=history,
+            _resume_run_id=run_id,
+            _message_id=state.message_id,
+        ):
+            yield event
+
     async def stream_message(
         self,
         agent_id: str,
@@ -295,6 +396,10 @@ class SessionService:
         skill_name: str | None = None,
         identity_id: str | None = None,
         working_dir: str | None = None,
+        *,
+        _history_override: list[dict] | None = None,
+        _resume_run_id: str | None = None,
+        _message_id: str | None = None,
     ) -> AsyncGenerator[dict, None]:
         """Yield SSE event dicts. Streams text chunks as they arrive from the engine."""
         selected_identity_id = await self._resolve_session_identity(
@@ -307,11 +412,14 @@ class SessionService:
         profile = await self.agent_profile_repo.get(agent_id)
         profile_name = profile["name"] if profile else "Agent"
 
-        # Fetch recent history BEFORE saving the new message (avoids duplication)
-        history = await self._recent_history(session_id)
-
-        # Save user message
-        await self.session_repo.add_message(session_id, "user", content)
+        if _resume_run_id is None:
+            # Fetch recent history BEFORE saving the new message (avoids duplication)
+            history = await self._recent_history(session_id)
+            user_message = await self.session_repo.add_message(session_id, "user", content)
+            message_id = str(user_message["id"])
+        else:
+            history = list(_history_override or [])
+            message_id = _message_id
 
         # Stream structured events from engine
         def sse(event: str, data: dict) -> dict:
@@ -325,18 +433,24 @@ class SessionService:
         try:
             runtime, services = await self._build_runtime(agent_id, profile_name, session_id)
             model_name = str(getattr(getattr(services, "llm", None), "model", "") or "")
-            run = engine_run_stream_with_runtime(
-                EngineRequest(
-                    message=content,
-                    history=history,
-                    context=context,
-                    forced_skill=skill_name,
-                    identity_id=selected_identity_id,
-                    working_dir=working_dir,
-                ),
-                runtime,
-                services,
+            request = EngineRequest(
+                message=content,
+                history=history,
+                context=context,
+                forced_skill=skill_name,
+                identity_id=selected_identity_id,
+                working_dir=working_dir,
+                message_id=message_id,
             )
+            if _resume_run_id is None:
+                run = engine_run_stream_with_runtime(request, runtime, services)
+            else:
+                run = engine_resume_stream_with_runtime(
+                    request,
+                    runtime,
+                    services,
+                    _resume_run_id,
+                )
             run_id = getattr(run, "run_id", None)
             async for ev in run.stream_events():
                 t = ev.type.value

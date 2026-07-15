@@ -34,7 +34,11 @@ TOOL_META = {
             }
         },
         "required": ["query"]
-    }
+    },
+    "permission_level": "read",
+    "approval_policy": "never",
+    "side_effect": "none",
+    "execution_environment": "host",
 }
 
 _RESULT_RE = re.compile(

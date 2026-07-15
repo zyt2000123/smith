@@ -67,16 +67,33 @@ class FileGuard:
     _SENSITIVE_DIRS = frozenset({".git"})
 
     def __init__(self, allowed_dirs: list[Path] | None = None):
-        if allowed_dirs is not None:
+        self._working_dir: Path | None = None
+        self.set_allowed_dirs(allowed_dirs)
+
+    def set_allowed_dirs(self, allowed_dirs: list[Path] | None) -> None:
+        if allowed_dirs:
             self._allowed = [p.resolve() for p in allowed_dirs]
         else:
             self._allowed = [Path.home().resolve(), Path("/tmp").resolve(), Path.cwd().resolve()]
+
+    def set_working_directory(self, working_dir: Path) -> None:
+        root = Path(working_dir).expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError(f"working directory does not exist: {working_dir}")
+        self._working_dir = root
+        self.set_allowed_dirs([root])
+
+    @property
+    def is_working_directory_scoped(self) -> bool:
+        return self._working_dir is not None
 
     def check_path(self, path_str: str, writing: bool = False) -> GuardResult:
         try:
             # Shell expands a leading tilde before execution; mirror that here
             # so the guard evaluates the same target the command will touch.
             candidate = Path(path_str).expanduser()
+            if not candidate.is_absolute() and self._working_dir is not None:
+                candidate = self._working_dir / candidate
             lexical = Path(os.path.abspath(str(candidate)))
             target = candidate.resolve()
         except (ValueError, OSError):
@@ -220,7 +237,10 @@ class SessionWhitelist:
 # ── Shell path extraction (req #4: redirects + pipes) ───────
 
 _REDIRECT_RE = re.compile(r"(?:>>?|[12]>>?)\s*([^\s;|&]+)")
-_ABS_PATH_RE = re.compile(r"(?<![\w~])/(?:[a-zA-Z0-9_.~-]+/)+[a-zA-Z0-9_.~-]+")
+_ABS_PATH_RE = re.compile(r"(?<![\w:~])/(?!/)[^\s;|&'\"`$()<>]+")
+_SHELL_CD_RE = re.compile(
+    r"(?:^|[;|&]\s*)cd\s+(?:--\s+)?(?P<path>'[^']*'|\"[^\"]*\"|[^\s;|&]+)"
+)
 
 _PLATFORM_DATA_ROOT = (Path.home() / ".agent-smith").resolve()
 _MEMORY_WRITE_ROOT = _PLATFORM_DATA_ROOT / "agent" / "memory"
@@ -230,6 +250,10 @@ _MEMORY_WRITE_FILES = frozenset({"recent.jsonl", "recent.md", "durable.md"})
 def _extract_shell_paths(command: str) -> tuple[list[str], list[str]]:
     read_paths = _ABS_PATH_RE.findall(command)
     write_paths = [m.strip("'\"") for m in _REDIRECT_RE.findall(command)]
+    for match in _SHELL_CD_RE.finditer(command):
+        path = match.group("path").strip("'\"")
+        if path:
+            read_paths.append(path)
     return read_paths, write_paths
 
 
@@ -295,13 +319,17 @@ class ToolGuard:
 
     def set_allowed_dirs(self, allowed_dirs: list[Path]) -> None:
         """Replace the file boundary for the current request's project root."""
-        self.file_guard = FileGuard(allowed_dirs)
+        self.file_guard.set_allowed_dirs(allowed_dirs)
 
     def allow_project_instruction_path(self, project_root: Path) -> Path:
         """Whitelist only the canonical project instruction file for an explicit /init action."""
         target = project_root.resolve() / ".smith" / "SMITH.md"
         self.whitelist.allow_file(str(target))
         return target
+
+    def set_working_directory(self, working_dir: Path) -> None:
+        """Constrain project-facing file tools to one resolved workspace."""
+        self.file_guard.set_working_directory(working_dir)
 
     def _resolve_path_metadata(self, tool_name: str) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
         """Return (path_args, list_path_args, is_write) for *tool_name*.
@@ -345,6 +373,11 @@ class ToolGuard:
 
         if tool_call.name == "shell":
             cmd = tool_call.arguments.get("command", "")
+            if self.file_guard.is_working_directory_scoped:
+                return GuardResult(
+                    allowed=False,
+                    reason="Shell is unavailable while a working-directory boundary is active",
+                )
             _, write_paths = _extract_shell_paths(cmd)
             for wp in write_paths:
                 # A raw shell command cannot be safely parsed into a complete
@@ -409,6 +442,10 @@ class ToolGuard:
             return False
         if policy == "always":
             return True
+        definition = self._tool_registry.get(tool_call.name)
+        action = str(tool_call.arguments.get("action") or "").lower()
+        if definition is not None and action in definition.read_actions:
+            return False
         if tool_call.name == "git_ops":
             return str(tool_call.arguments.get("action") or "").lower() not in self._READ_ONLY_GIT_ACTIONS
         return True

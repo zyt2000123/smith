@@ -8,6 +8,7 @@ import pytest
 
 from engine.execution import agent_loop as agent_loop_module
 from engine.execution.agent_loop import (
+    _bind_working_directory_tools,
     prepare_runtime,
     reply_events_with_runtime,
     reply_with_runtime,
@@ -221,7 +222,7 @@ def test_prepare_runtime_scopes_tool_paths_to_the_request_working_dir(tmp_path: 
     )
     assert shell.arguments["cwd"] == str((tmp_path / "OpenAI_project").resolve())
     assert guard.check(write).allowed
-    assert guard.check(shell).allowed
+    assert not guard.check(shell).allowed
     assert not guard.check(escaped).allowed
 
 
@@ -351,6 +352,97 @@ def test_resume_setup_failure_is_exposed_as_terminal_stream(
     assert stream.is_complete is True
     assert stream.status == "failed"
     assert llm.closed is True
+
+
+def test_resume_stream_enables_ledger_replay_for_new_provider_call_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, services, _ = _runtime(tmp_path)
+    store = RunStateStore(runtime.profile_dir)
+    store.create("run-1", agent_id=runtime.agent_id)
+    store.transition("run-1", RunStatus.RUNNING)
+    store.transition("run-1", RunStatus.INCOMPLETE)
+    captured: dict[str, object] = {}
+
+    class RecordingLedger:
+        def __init__(self, profile_dir: Path, run_id: str, *, replay_existing: bool = False):
+            captured["profile_dir"] = profile_dir
+            captured["run_id"] = run_id
+            captured["replay_existing"] = replay_existing
+
+    async def fake_events(*_args, **_kwargs):
+        if False:
+            yield None
+
+    monkeypatch.setattr(agent_loop_module, "ToolExecutionLedger", RecordingLedger)
+    monkeypatch.setattr(agent_loop_module, "_run_events_with_runtime", fake_events)
+
+    resume_stream_with_runtime(EngineRequest(message="resume"), runtime, services, "run-1")
+
+    assert captured == {
+        "profile_dir": runtime.profile_dir,
+        "run_id": "run-1",
+        "replay_existing": True,
+    }
+
+
+def test_working_directory_adapter_binds_file_shell_and_git_arguments(tmp_path: Path) -> None:
+    async def run() -> list[tuple[str, dict]]:
+        calls: list[tuple[str, dict]] = []
+
+        async def capture(name: str, **kwargs) -> str:
+            calls.append((name, kwargs))
+            return "OK"
+
+        def handler_for(name: str):
+            async def handler(**kwargs) -> str:
+                return await capture(name, **kwargs)
+
+            return handler
+
+        registry = ToolRegistry()
+        for tool_name in ("write_file", "edit_file", "shell", "git_ops"):
+            registry.register(
+                tool_name,
+                "",
+                {},
+                handler_for(tool_name),
+            )
+        services = RuntimeServices(
+            llm=FakeLLM(),
+            tool_registry=registry,
+            skill_registry=SkillRegistry(),
+        )
+        _bind_working_directory_tools(services, tmp_path)
+
+        await registry.execute(
+            ToolCall(id="write", name="write_file", arguments={"path": "notes.txt", "content": "x"})
+        )
+        await registry.execute(
+            ToolCall(id="edit", name="edit_file", arguments={"path": "nested/notes.txt"})
+        )
+        await registry.execute(
+            ToolCall(id="shell", name="shell", arguments={"command": "pwd"})
+        )
+        await registry.execute(
+            ToolCall(
+                id="git",
+                name="git_ops",
+                arguments={"action": "status", "cwd": "repo", "path": "repo/file.txt"},
+            )
+        )
+        return calls
+
+    calls = asyncio.run(run())
+    root = str(tmp_path.resolve())
+
+    assert calls == [
+        ("write_file", {"path": f"{root}/notes.txt", "content": "x", "_work_dir": root}),
+        ("edit_file", {"path": f"{root}/nested/notes.txt", "_work_dir": root}),
+        ("shell", {"command": "pwd", "cwd": root}),
+        ("git_ops", {"action": "status", "cwd": f"{root}/repo", "path": f"{root}/repo/file.txt"}),
+    ]
 
 
 def test_incomplete_run_persists_learning_with_partial_status(

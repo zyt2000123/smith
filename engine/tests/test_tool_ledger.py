@@ -55,3 +55,35 @@ def test_uncertain_side_effect_is_not_retried_automatically(tmp_path):
     assert second.error_kind == "side_effect_uncertain"
     assert second.retryable is False
 
+
+def test_resumed_run_replays_side_effect_when_provider_call_id_changes(tmp_path):
+    calls: list[str] = []
+
+    async def write_tool(value: str):
+        calls.append(value)
+        return f"written:{value}"
+
+    async def run():
+        first_registry = ToolRegistry()
+        first_registry.register("writer", "", {}, write_tool, side_effect="write")
+        first_registry.bind_execution_ledger(ToolExecutionLedger(tmp_path, "run-1"))
+        first = await first_registry.execute(
+            ToolCall(id="provider-call-1", name="writer", arguments={"value": "x"})
+        )
+
+        resumed_registry = ToolRegistry()
+        resumed_registry.register("writer", "", {}, write_tool, side_effect="write")
+        resumed_registry.bind_execution_ledger(
+            ToolExecutionLedger(tmp_path, "run-1", replay_existing=True)
+        )
+        replayed = await resumed_registry.execute(
+            ToolCall(id="provider-call-after-resume", name="writer", arguments={"value": "x"})
+        )
+        return first, replayed
+
+    first, replayed = asyncio.run(run())
+
+    assert calls == ["x"]
+    assert first.content == "written:x"
+    assert replayed.content == "written:x"
+    assert replayed.metadata["replayed"] is True

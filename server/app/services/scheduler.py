@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from common.config import AGENT_DIR
+from engine.execution.agent_loop import run_memory_idle_tick
+
 from .auto_task_service import AutoTaskService
+from .engine_runtime import build_memory_maintenance_services
 from ..infrastructure.repositories.auto_task_repo import AutoTaskRepo
 from ..infrastructure.repositories.agent_profile_repo import AgentProfileRepo
 from ..infrastructure.repositories.session_repo import SessionRepo
@@ -19,13 +23,26 @@ def _build_service() -> AutoTaskService:
     return AutoTaskService(AutoTaskRepo(), AgentProfileRepo(), SessionRepo())
 
 
+async def run_memory_maintenance_tick() -> bool:
+    """Retry due memory maintenance even when no new conversation arrives."""
+    services = build_memory_maintenance_services()
+    return await run_memory_idle_tick(AGENT_DIR / "memory", services)
+
+
+async def run_scheduler_tick() -> int:
+    """Run one scheduler iteration; split out for deterministic tests."""
+    count = await _build_service().tick()
+    if not await run_memory_maintenance_tick():
+        log.warning("Scheduler memory maintenance did not complete")
+    return count
+
+
 async def run_scheduler() -> None:
     """Loop forever, checking for due auto tasks every TICK_INTERVAL seconds."""
     log.info("Scheduler started (tick every %ds)", TICK_INTERVAL)
     while True:
         try:
-            svc = _build_service()
-            count = await svc.tick()
+            count = await run_scheduler_tick()
             if count:
                 log.info("Scheduler tick: ran %d auto task(s)", count)
         except asyncio.CancelledError:

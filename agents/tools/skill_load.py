@@ -14,7 +14,11 @@ TOOL_META = {
             }
         },
         "required": ["name"]
-    }
+    },
+    "permission_level": "read",
+    "approval_policy": "never",
+    "side_effect": "none",
+    "execution_environment": "host",
 }
 
 # Default skills directory — resolved relative to this file

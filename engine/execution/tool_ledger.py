@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,8 +27,17 @@ class ToolExecutionLedger:
     duplicate an external write.
     """
 
-    def __init__(self, profile_dir: Path, run_id: str) -> None:
+    def __init__(
+        self,
+        profile_dir: Path,
+        run_id: str,
+        *,
+        replay_existing: bool = False,
+    ) -> None:
         self.run_id = run_id
+        self.replay_existing = replay_existing
+        self._call_keys: dict[str, str] = {}
+        self._semantic_occurrences: dict[str, int] = {}
         self.path = Path(profile_dir) / "runs" / "tool_executions.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
         self.path.parent.chmod(PRIVATE_DIR_MODE)
@@ -64,6 +75,56 @@ class ToolExecutionLedger:
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _semantic_key(tool_name: str, arguments: dict) -> str:
+        payload = json.dumps(
+            {"tool": tool_name, "arguments": arguments},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def idempotency_key_for(
+        self,
+        *,
+        call_id: str,
+        tool_name: str,
+        arguments: dict,
+    ) -> str:
+        """Return a stable key for one logical side effect.
+
+        Provider call IDs are recreated after a resumed model invocation.  The
+        occurrence index preserves intentionally repeated equivalent calls
+        while letting a resumed run replay the matching earlier operation.
+        """
+        existing = self._call_keys.get(call_id)
+        if existing is not None:
+            return existing
+
+        semantic = self._semantic_key(tool_name, arguments)
+        prior = self._semantic_occurrences.get(semantic, 0)
+        if not self.replay_existing:
+            prior = max(prior, self._persisted_occurrences(semantic))
+        occurrence = prior + 1
+        self._semantic_occurrences[semantic] = occurrence
+        key = f"semantic:{semantic}:{occurrence}"
+        self._call_keys[call_id] = key
+        return key
+
+    def _persisted_occurrences(self, semantic: str) -> int:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM tool_executions "
+                "WHERE run_id=? AND idempotency_key LIKE ?",
+                (self.run_id, f"semantic:{semantic}:%"),
+            ).fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            connection.close()
 
     def begin(self, *, call_id: str, tool_name: str, idempotency_key: str) -> ToolLedgerDecision:
         now = self._now()

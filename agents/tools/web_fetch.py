@@ -1,24 +1,21 @@
-"""Web fetch tool provider — headless-browser rendering via crawl4ai, markdown output.
-
-JS 渲染页面（SPA / 动态加载）也能抓到正文；crawl4ai 不可用或失败时退回 urllib 原始抓取。
-"""
+"""Web fetch tool provider — validated, DNS-pinned HTTP text fetches."""
 
 from __future__ import annotations
 
 import asyncio
+import http.client
 import ipaddress
 import re
 import socket
-import urllib.error
 import urllib.parse
-import urllib.request
+import ssl
 from html.parser import HTMLParser
 
 TOOL_META = {
     "name": "web_fetch",
     "description": (
-        "Fetch a URL and return its main content as clean markdown "
-        "(renders JavaScript via headless browser, works on SPAs). "
+        "Fetch a URL and return its main text content. Redirect targets and "
+        "resolved addresses are validated before every network request. "
         "Use web_search first to discover URLs."
     ),
     "parameters": {
@@ -35,7 +32,11 @@ TOOL_META = {
             }
         },
         "required": ["url"]
-    }
+    },
+    "permission_level": "read",
+    "approval_policy": "never",
+    "side_effect": "none",
+    "execution_environment": "host",
 }
 
 MAX_CHARS = 40_000
@@ -147,18 +148,34 @@ def _validate_url(url: str) -> str | None:
         return f"host resolves to a blocked {reason}"
 
     try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except socket.gaierror as e:
-        return f"could not resolve host '{host}': {e}"
-
-    for info in infos:
-        sockaddr = info[4]
-        resolved_host = sockaddr[0]
-        reason = _blocked_ip_reason(resolved_host)
-        if reason:
-            return f"host resolves to a blocked {reason}: {resolved_host}"
+        _safe_addresses(host, parsed.port or (443 if scheme == "https" else 80))
+    except (OSError, ValueError) as exc:
+        return str(exc)
 
     return None
+
+
+def _safe_addresses(host: str, port: int) -> list[tuple[int, int, int, str, tuple]]:
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"could not resolve host '{host}': {exc}") from exc
+    if not infos:
+        raise ValueError(f"could not resolve host '{host}'")
+
+    for info in infos:
+        reason = _blocked_ip_reason(str(info[4][0]))
+        if reason:
+            raise ValueError(f"host resolves to a blocked {reason}: {info[4][0]}")
+    return infos
+
+
+def _validated_redirect_url(current_url: str, location: str) -> str:
+    target = urllib.parse.urljoin(current_url, location)
+    validation_error = _validate_url(target)
+    if validation_error:
+        raise ValueError(validation_error)
+    return target
 
 
 def _html_to_text(raw: str) -> str:
@@ -184,72 +201,95 @@ async def execute(*, url: str, timeout: int = 30) -> str:
     if validation_error:
         return f"Error: {validation_error}"
 
-    try:
-        return await _fetch_browser(url, timeout)
-    except Exception as e:
-        raw = await _fetch_plain(url, timeout)
-        return (
-            f"[browser fetch failed: {type(e).__name__}: {e}; "
-            f"fell back to plain HTTP]\n{raw}"
-        )
-
-
-async def _fetch_browser(url: str, timeout: int) -> str:
-    from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
-
-    browser_cfg = BrowserConfig(headless=True, verbose=False)
-    run_cfg = CrawlerRunConfig(
-        cache_mode=CacheMode.BYPASS,
-        page_timeout=timeout * 1000,
-        verbose=False,
-    )
-    # ponytail: 每次调用起一个浏览器实例（1-2s 开销）；高频场景可改为模块级共享实例
-    async with AsyncWebCrawler(config=browser_cfg) as crawler:
-        result = await crawler.arun(url=url, config=run_cfg)
-
-    if not result.success:
-        raise RuntimeError(result.error_message or "crawl failed")
-
-    md = str(result.markdown or "").strip()
-    if not md:
-        raise RuntimeError("empty content after rendering")
-
-    truncated = len(md) > MAX_CHARS
-    if truncated:
-        md = md[:MAX_CHARS]
-    header = f"[fetched via headless browser, markdown, {len(md)} chars"
-    header += ", truncated]" if truncated else "]"
-    return f"{header}\n{md}"
+    return await _fetch_plain(url, timeout)
 
 
 async def _fetch_plain(url: str, timeout: int) -> str:
-    """urllib 兜底：无浏览器环境或渲染失败时仍可抓静态页。"""
+    """Fetch text without following unvalidated redirects or re-resolving DNS."""
+    return await asyncio.to_thread(_fetch_pinned, url, timeout)
 
-    def _fetch():
-        req = urllib.request.Request(url, headers={"User-Agent": "AgentSmith/1.0"})
+
+def _fetch_pinned(url: str, timeout: int) -> str:
+    current_url = url
+    for _ in range(6):
+        parsed = urllib.parse.urlparse(current_url)
+        host = parsed.hostname
+        if host is None:
+            return "URL Error: URL must include a hostname"
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = resp.read(MAX_CHARS + 1)
-                truncated = len(data) > MAX_CHARS
-                charset = resp.headers.get_content_charset() or "utf-8"
-                raw = data[:MAX_CHARS].decode(charset, errors="replace")
-                content_type = (resp.headers.get("Content-Type") or "").lower()
-                is_html = (
-                    any(kind in content_type for kind in HTML_CONTENT_TYPES)
-                    or raw.lstrip().startswith("<")
-                )
-                body = _html_to_text(raw) if is_html else raw.strip()
-                if not body:
-                    body = raw.strip()
-                body_type = "text extracted from html" if is_html else "text"
-                return (
-                    f"[status={resp.status}, fallback plain HTTP, {body_type}"
-                    f"{', truncated' if truncated else ''}]\n{body}"
-                )
-        except urllib.error.HTTPError as e:
-            return f"HTTP Error: {e.code} {e.reason}"
-        except urllib.error.URLError as e:
-            return f"URL Error: {e.reason}"
+            infos = _safe_addresses(host, port)
+            connection, response = _request_pinned(parsed, infos, timeout)
+        except (OSError, ValueError, ssl.SSLError, http.client.HTTPException) as exc:
+            return f"URL Error: {exc}"
 
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _fetch)
+        try:
+            if response.status in {301, 302, 303, 307, 308}:
+                location = response.getheader("Location")
+                if not location:
+                    return f"HTTP Error: {response.status} redirect without Location"
+                try:
+                    current_url = _validated_redirect_url(current_url, location)
+                except ValueError as exc:
+                    return f"URL Error: redirect blocked: {exc}"
+                continue
+
+            data = response.read(MAX_CHARS + 1)
+            truncated = len(data) > MAX_CHARS
+            charset = response.headers.get_content_charset() or "utf-8"
+            raw = data[:MAX_CHARS].decode(charset, errors="replace")
+            content_type = (response.getheader("Content-Type") or "").lower()
+            is_html = any(kind in content_type for kind in HTML_CONTENT_TYPES) or raw.lstrip().startswith("<")
+            body = _html_to_text(raw) if is_html else raw.strip()
+            if not body:
+                body = raw.strip()
+            body_type = "text extracted from html" if is_html else "text"
+            return (
+                f"[status={response.status}, pinned HTTP, {body_type}"
+                f"{', truncated' if truncated else ''}]\n{body}"
+            )
+        finally:
+            connection.close()
+
+    return "URL Error: too many redirects"
+
+
+def _request_pinned(
+    parsed: urllib.parse.ParseResult,
+    infos: list[tuple[int, int, int, str, tuple]],
+    timeout: int,
+) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+    host = parsed.hostname
+    assert host is not None
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    target = parsed.path or "/"
+    if parsed.query:
+        target += f"?{parsed.query}"
+    host_header = host if port in {80, 443} else f"{host}:{port}"
+    last_error: OSError | ssl.SSLError | None = None
+
+    for family, socktype, proto, _, sockaddr in infos:
+        raw_socket: socket.socket | None = None
+        connection = http.client.HTTPConnection(host, port=port, timeout=timeout)
+        try:
+            raw_socket = socket.socket(family, socktype, proto)
+            raw_socket.settimeout(timeout)
+            raw_socket.connect(sockaddr)
+            connection.sock = raw_socket
+            if parsed.scheme.lower() == "https":
+                connection.sock = ssl.create_default_context().wrap_socket(
+                    raw_socket,
+                    server_hostname=host,
+                )
+            else:
+                connection.sock = raw_socket
+            connection.request(
+                "GET",
+                target,
+                headers={"Host": host_header, "User-Agent": "AgentSmith/1.0"},
+            )
+            return connection, connection.getresponse()
+        except (OSError, ssl.SSLError) as exc:
+            last_error = exc
+            connection.close()
+    raise last_error or OSError("unable to connect to resolved host")

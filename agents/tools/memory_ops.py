@@ -50,6 +50,13 @@ TOOL_META = {
         },
         "required": ["action"],
     },
+    "is_write_tool": True,
+    "permission_level": "write",
+    "approval_policy": "policy",
+    "read_actions": ["search"],
+    "side_effect": "write",
+    "concurrency": "serial",
+    "execution_environment": "host",
 }
 
 def _memory_dir(memory_dir: str | Path | None = None) -> Path:
