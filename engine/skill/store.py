@@ -22,25 +22,42 @@ from pathlib import Path
 _MAX_VERSIONS = 10
 
 
+def _safe_skill_name(skill_name: str) -> str:
+    """Return one path component, rejecting traversal rather than rewriting it."""
+    safe = Path(skill_name).name
+    if not skill_name or safe != skill_name or safe in {".", ".."}:
+        raise ValueError("skill name must be a single non-relative path component")
+    return safe
+
+
 class SkillStore:
     """Version-controlled skill storage for agent-installed skills."""
 
     def __init__(self, skills_dir: Path) -> None:
-        self._dir = skills_dir  # agent profile skills dir: …/<id>/skills/
+        self._dir = skills_dir.resolve()  # agent profile skills dir: …/<id>/skills/
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _skill_dir(self, skill_name: str) -> Path:
-        safe = Path(skill_name).name  # prevent path traversal
-        return self._dir / safe
+        safe = _safe_skill_name(skill_name)
+        path = self._dir / safe
+        if path.is_symlink() or not path.resolve(strict=False).is_relative_to(self._dir):
+            raise ValueError("skill directory escapes skills root")
+        return path
 
     def _skill_file(self, skill_name: str) -> Path:
-        return self._skill_dir(skill_name) / "SKILL.md"
+        path = self._skill_dir(skill_name) / "SKILL.md"
+        if path.is_symlink():
+            raise ValueError("skill file must not be a symlink")
+        return path
 
     def _versions_dir(self, skill_name: str) -> Path:
-        return self._skill_dir(skill_name) / ".versions"
+        path = self._skill_dir(skill_name) / ".versions"
+        if path.is_symlink():
+            raise ValueError("skill versions directory must not be a symlink")
+        return path
 
     def _prune(self, skill_name: str) -> None:
         """Keep only the last _MAX_VERSIONS snapshots."""
@@ -81,8 +98,10 @@ class SkillStore:
     async def rollback(self, skill_name: str, version_id: str) -> bool:
         """Restore a previous version of a skill."""
         safe_vid = Path(version_id).name
+        if not version_id or safe_vid != version_id or safe_vid in {".", ".."}:
+            return False
         snapshot = self._versions_dir(skill_name) / f"{safe_vid}.md"
-        if not snapshot.is_file():
+        if snapshot.is_symlink() or not snapshot.is_file():
             return False
 
         skill_file = self._skill_file(skill_name)
@@ -123,8 +142,10 @@ class SkillStore:
                 p = self._skill_file(skill_name)
             else:
                 safe = Path(vid).name
+                if not vid or safe != vid or safe in {".", ".."}:
+                    raise FileNotFoundError(f"Version '{vid}' not found")
                 p = self._versions_dir(skill_name) / f"{safe}.md"
-            if not p.is_file():
+            if p.is_symlink() or not p.is_file():
                 raise FileNotFoundError(f"Version '{vid}' not found")
             return p.read_text(encoding="utf-8").splitlines(keepends=True)
 

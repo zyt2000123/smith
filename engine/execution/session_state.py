@@ -7,11 +7,15 @@ checkpoints from a different request are cleared instead).
 """
 
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 from dataclasses import dataclass, asdict
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_PRIVATE_DIR_MODE = 0o700
+_PRIVATE_FILE_MODE = 0o600
 
 
 @dataclass
@@ -36,8 +40,19 @@ class SessionStateManager:
     """Persist and restore session execution state."""
 
     def __init__(self, agent_dir: Path):
-        self._state_dir = agent_dir / "sessions" / ".state"
+        agent_root = agent_dir.resolve()
+        sessions_dir = agent_root / "sessions"
+        if sessions_dir.is_symlink():
+            raise ValueError("session directory must not be a symlink")
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._state_dir = sessions_dir / ".state"
+        if self._state_dir.is_symlink():
+            raise ValueError("session state directory must not be a symlink")
         self._state_dir.mkdir(parents=True, exist_ok=True)
+        self._state_dir = self._state_dir.resolve()
+        if not self._state_dir.is_relative_to(agent_root):
+            raise ValueError("session state directory escapes agent directory")
+        self._state_dir.chmod(_PRIVATE_DIR_MODE)
 
     def _path(self, session_id: str) -> Path:
         if not _SESSION_ID_RE.match(session_id):
@@ -49,10 +64,17 @@ class SessionStateManager:
 
     def save(self, checkpoint: SessionCheckpoint) -> None:
         path = self._path(checkpoint.session_id)
-        path.write_text(
-            json.dumps(checkpoint.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(checkpoint.to_dict(), handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, path)
+            path.chmod(_PRIVATE_FILE_MODE)
+        except BaseException:
+            Path(temp_name).unlink(missing_ok=True)
+            raise
 
     def restore(self, session_id: str) -> SessionCheckpoint | None:
         try:

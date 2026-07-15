@@ -16,6 +16,7 @@ agent-smith-common = { path = "../common", editable = true }
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
+browser = ["playwright>=1.50"]
 
 [build-system]
 requires = ["setuptools>=69"]

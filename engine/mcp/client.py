@@ -26,6 +26,7 @@ SUPPORTED_PROTOCOL_VERSIONS = {
 }
 CLIENT_INFO = {"name": "agent-smith", "version": "0.2.0"}
 MAX_TOOL_NAME_LENGTH = 64
+MAX_MCP_RESPONSE_BYTES = 1024 * 1024
 
 
 @dataclass
@@ -71,6 +72,7 @@ class StdioMCPTransport:
         self._env = {**os.environ, **env} if env is not None else None
         self._close_timeout = close_timeout
         self._process: asyncio.subprocess.Process | None = None
+        self._stderr_drain_task: asyncio.Task[None] | None = None
         self._request_id = 0
         # stdio is a single shared pipe: concurrent send_request calls would
         # interleave reads and one waiter would consume (and drop) another
@@ -86,6 +88,18 @@ class StdioMCPTransport:
             stderr=asyncio.subprocess.PIPE,
             env=self._env,
         )
+        # An MCP server's stderr is diagnostic-only, but it is still a pipe.
+        # If nobody consumes it, a noisy or malicious server can fill the OS
+        # pipe buffer and deadlock before it writes its JSON-RPC response.
+        assert self._process.stderr is not None
+        self._stderr_drain_task = asyncio.create_task(
+            self._drain_stderr(self._process.stderr)
+        )
+
+    @staticmethod
+    async def _drain_stderr(stream: asyncio.StreamReader) -> None:
+        while await stream.read(4096):
+            pass
 
     async def send_request(self, method: str, params: dict) -> dict:
         if self._process is None or self._process.stdin is None or self._process.stdout is None:
@@ -132,15 +146,33 @@ class StdioMCPTransport:
     async def close(self) -> None:
         if self._process is None:
             return
-        if self._process.stdin:
-            self._process.stdin.close()
+        process = self._process
+        if process.stdin:
+            process.stdin.close()
         try:
-            await asyncio.wait_for(self._process.wait(), timeout=self._close_timeout)
+            await asyncio.wait_for(process.wait(), timeout=self._close_timeout)
         except asyncio.TimeoutError:
-            self._process.kill()
-            await self._process.wait()
+            process.kill()
+            await process.wait()
             log.warning("MCP server killed after timeout")
-        self._process = None
+        except asyncio.CancelledError:
+            # Dropping the transport reference during cancellation must not
+            # orphan a configured MCP server.
+            if process.returncode is None:
+                process.kill()
+                try:
+                    await asyncio.shield(process.wait())
+                except Exception:
+                    log.warning("failed to reap cancelled MCP server", exc_info=True)
+            raise
+        finally:
+            self._process = None
+            drain_task = self._stderr_drain_task
+            self._stderr_drain_task = None
+            if drain_task is not None:
+                if not drain_task.done():
+                    drain_task.cancel()
+                await asyncio.gather(drain_task, return_exceptions=True)
 
 
 class StreamableHTTPMCPTransport:
@@ -203,7 +235,7 @@ class StreamableHTTPMCPTransport:
             if content_type == "text/event-stream":
                 resp = await _response_from_sse_stream(response, request_id)
             else:
-                resp = json.loads((await response.aread()).decode())
+                resp = json.loads((await _read_bounded_response(response)).decode())
 
         if resp.get("id") != request_id:
             raise RuntimeError(f"MCP HTTP response id mismatch: {resp.get('id')!r} != {request_id!r}")
@@ -226,17 +258,19 @@ class StreamableHTTPMCPTransport:
             "method": method,
             "params": params,
         }
-        response = await self._client.post(
+        async with self._client.stream(
+            "POST",
             self._url,
             json=message,
             headers=self._request_headers(
                 accept="application/json, text/event-stream",
                 include_protocol=True,
             ),
-        )
-        if response.status_code not in (200, 202, 204):
-            response.raise_for_status()
-        self._capture_session(response.headers)
+        ) as response:
+            if response.status_code not in (200, 202, 204):
+                response.raise_for_status()
+            self._capture_session(response.headers)
+            await _read_bounded_response(response)
 
     async def close(self) -> None:
         if self._client is None:
@@ -382,9 +416,10 @@ async def register_mcp_tools_with_prefix(
     client: MCPClient,
     *,
     prefix: str,
+    tools: list[MCPTool] | None = None,
 ) -> int:
     """Discover MCP tools and register them into a ToolRegistry."""
-    tools = await client.list_tools()
+    tools = tools if tools is not None else await client.list_tools()
     count = 0
     safe_prefix = _safe_tool_name_part(prefix) or "mcp"
     for tool in tools:
@@ -403,6 +438,14 @@ async def register_mcp_tools_with_prefix(
                 description=tool.description,
                 parameters=tool.input_schema,
                 func=_execute,
+                # A remote MCP tool's real side effect cannot be inferred
+                # safely from server-supplied metadata.  Default to explicit
+                # approval and serialize calls until a trusted integration
+                # can declare a narrower contract.
+                permission_level="execute",
+                approval_policy="always",
+                side_effect="external",
+                concurrency="serial",
             )
             count += 1
         except ValueError as exc:
@@ -443,6 +486,7 @@ async def _response_from_sse_stream(response: Any, request_id: int) -> dict:
 
 async def _iter_sse_data_stream(response: Any):
     data_lines: list[str] = []
+    payload_size = 0
     async for raw_line in response.aiter_lines():
         line = raw_line.rstrip("\r")
         if not line:
@@ -451,9 +495,24 @@ async def _iter_sse_data_stream(response: Any):
                 data_lines = []
             continue
         if line.startswith("data:"):
-            data_lines.append(line[5:].lstrip())
+            payload = line[5:].lstrip()
+            payload_size += len(payload.encode("utf-8"))
+            if payload_size > MAX_MCP_RESPONSE_BYTES:
+                raise RuntimeError("MCP SSE response exceeds maximum size")
+            data_lines.append(payload)
     if data_lines:
         yield "\n".join(data_lines)
+
+
+async def _read_bounded_response(response: Any) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > MAX_MCP_RESPONSE_BYTES:
+            raise RuntimeError("MCP HTTP response exceeds maximum size")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _safe_tool_name_part(value: str) -> str:

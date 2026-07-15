@@ -31,7 +31,7 @@ const HELP_TEXT = [
   "- `/config` — edit LLM config",
   "- `/sessions` — recent sessions",
   "- `/token` — local token usage dashboard",
-  "- `/skill [name] [prompt]` / `/skills` — inspect or run a standard SKILL.md skill",
+  "- `/skills` — inspect or run a standard SKILL.md skill",
   "- `/mcp` — inspect configured MCP servers and tools",
   "- `/resume <id>` — resume session",
   "- `/compact` — switch to compact view; Ctrl+O toggles compact/transcript",
@@ -119,14 +119,6 @@ export function buildSlashItems(_skills: SkillSummary[]): SlashItem[] {
       title: "/skills",
       command: "/skills",
       description: "Inspect skills.",
-      category: "Commands",
-    },
-    {
-      id: "skill",
-      kind: "command",
-      title: "/skill",
-      command: "/skill",
-      description: "Inspect or run a SKILL.md skill.",
       category: "Commands",
     },
     {

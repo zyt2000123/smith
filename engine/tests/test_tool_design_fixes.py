@@ -53,6 +53,28 @@ def test_text_error_results_are_marked_as_errors():
     assert not success.is_error
 
 
+def test_web_error_prefixes_are_marked_as_errors():
+    async def url_failure():
+        return "URL Error: connection refused"
+
+    async def http_failure():
+        return "HTTP Error: 404"
+
+    async def run():
+        registry = ToolRegistry()
+        registry.register("url_failure", "", {}, url_failure)
+        registry.register("http_failure", "", {}, http_failure)
+        return (
+            await registry.execute(ToolCall(id="1", name="url_failure", arguments={})),
+            await registry.execute(ToolCall(id="2", name="http_failure", arguments={})),
+        )
+
+    url_result, http_result = asyncio.run(run())
+
+    assert url_result.is_error
+    assert http_result.is_error
+
+
 def test_duplicate_tool_registration_is_rejected():
     registry = ToolRegistry()
     registry.register("sample", "", {}, lambda: "OK")
@@ -539,6 +561,52 @@ def test_web_fetch_rejects_local_network_targets():
     assert "loopback" in web_fetch._validate_url("http://127.0.0.1:8000")
     assert "private network" in web_fetch._validate_url("http://10.0.0.1")
     assert "scheme 'file'" in web_fetch._validate_url("file:///etc/passwd")
+
+
+def test_web_fetch_rejects_non_public_addresses_and_non_web_ports():
+    web_fetch = _load_tool_module("web_fetch")
+
+    assert "non-public" in web_fetch._validate_url("http://100.64.0.1")
+    assert "port" in web_fetch._validate_url("https://example.com:8443")
+
+
+def test_web_fetch_treats_non_2xx_responses_as_errors(monkeypatch):
+    web_fetch = _load_tool_module("web_fetch")
+
+    class Connection:
+        def close(self) -> None:
+            return None
+
+    class Response:
+        status = 404
+
+    monkeypatch.setattr(
+        web_fetch,
+        "_request_pinned",
+        lambda parsed, infos, timeout: (Connection(), Response()),
+    )
+    monkeypatch.setattr(
+        web_fetch,
+        "_safe_addresses",
+        lambda host, port: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+
+    assert web_fetch._fetch_pinned("https://example.com/not-found", 5).startswith("HTTP Error: 404")
+
+
+def test_web_search_rejects_blank_and_oversized_queries_without_network_access(monkeypatch):
+    web_search = _load_tool_module("web_search")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("network access should not occur")
+
+    monkeypatch.setattr(web_search.urllib.request, "urlopen", fail_if_called)
+
+    blank = asyncio.run(web_search.execute(query=" \t "))
+    oversized = asyncio.run(web_search.execute(query="x" * 1001))
+
+    assert blank.startswith("Error: query must not be empty")
+    assert oversized.startswith("Error: query must be at most 1000 characters")
 
 
 def test_web_fetch_rejects_redirects_to_local_network_targets():
