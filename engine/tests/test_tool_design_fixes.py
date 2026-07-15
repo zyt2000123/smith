@@ -69,10 +69,10 @@ def test_web_error_prefixes_are_marked_as_errors():
             await registry.execute(ToolCall(id="2", name="http_failure", arguments={})),
         )
 
-    url_failure, http_failure = asyncio.run(run())
+    url_result, http_result = asyncio.run(run())
 
-    assert url_failure.is_error
-    assert http_failure.is_error
+    assert url_result.is_error
+    assert http_result.is_error
 
 
 def test_duplicate_tool_registration_is_rejected():

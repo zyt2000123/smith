@@ -11,6 +11,7 @@ import time
 import urllib.parse
 import ssl
 from html.parser import HTMLParser
+from typing import Any
 
 TOOL_META = {
     "name": "web_fetch",
@@ -177,7 +178,7 @@ def _validate_url(url: str) -> str | None:
     return None
 
 
-def _safe_addresses(host: str, port: int) -> list[tuple[int, int, int, str, tuple]]:
+def _safe_addresses(host: str, port: int) -> list[tuple[Any, Any, int, str, tuple[Any, ...]]]:
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
@@ -304,8 +305,8 @@ def _fetch_pinned(url: str, timeout: int) -> str:
 
 def _request_pinned(
     parsed: urllib.parse.ParseResult,
-    infos: list[tuple[int, int, int, str, tuple]],
-    timeout: int,
+    infos: list[tuple[Any, Any, int, str, tuple[Any, ...]]],
+    timeout: float,
     user_agent: str = "AgentSmith/1.0",
 ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
     host = parsed.hostname
