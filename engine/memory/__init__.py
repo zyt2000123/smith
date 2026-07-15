@@ -1,4 +1,5 @@
 from .store import save_conversation_memory, sanitize_event_value
+from .policy import MANUAL_EVIDENCE_TYPES, MANUAL_MEMORY_KINDS
 
 from ._files import (
     MEMORY_LAYER_FILES,
@@ -13,6 +14,8 @@ from ._files import (
 __all__ = [
     "save_conversation_memory",
     "sanitize_event_value",
+    "MANUAL_EVIDENCE_TYPES",
+    "MANUAL_MEMORY_KINDS",
     "MEMORY_LAYER_FILES",
     "atomic_write_text",
     "contains_injection",

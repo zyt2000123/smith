@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from engine.hook import HookManager, HookType
 
@@ -49,3 +50,22 @@ def test_parallel_collects_results_and_drops_failures():
     result = asyncio.run(manager.apply("tools", HookType.PARALLEL))
 
     assert result == [{"name": "good"}]
+
+
+def test_parallel_hook_timeout_is_reported_to_runtime_callers():
+    class Slow:
+        def tools(self):
+            time.sleep(0.1)
+            return {"name": "late"}
+
+    async def run() -> None:
+        manager = HookManager(timeout_seconds=0.01)
+        manager.register(Slow())
+        result = await manager.apply(
+            "tools",
+            HookType.PARALLEL,
+            include_failures=True,
+        )
+        assert result == [False]
+
+    asyncio.run(run())

@@ -1,4 +1,10 @@
-"""Regression tests for the privileged raw-shell execution boundary."""
+"""Regression tests for the privileged raw-shell execution boundary.
+
+Process-lifecycle tests (timeout, process groups, cancellation) live in
+test_execution_environment.py since process handling moved into the engine's
+LocalExecutionEnvironment; these tests cover the shell provider's own
+promises: approval, metadata, credential stripping, and output formatting.
+"""
 
 from __future__ import annotations
 
@@ -6,12 +12,11 @@ import asyncio
 import importlib
 import os
 import sys
-import signal
 from pathlib import Path
 
-import pytest
-
 from engine.safety.tool_guard import ToolGuard
+from engine.tool import environment as environment_module
+from engine.tool.environment import MAX_OUTPUT, LocalExecutionEnvironment
 from engine.tool.interface import ToolCall
 from engine.tool.registry import ToolRegistry
 
@@ -58,6 +63,14 @@ def test_shell_definition_records_external_side_effects() -> None:
     assert not definition.idempotent
 
 
+def test_shell_requires_an_execution_environment(tmp_path: Path) -> None:
+    shell = _load_shell_provider()
+
+    result = asyncio.run(shell.execute(command="echo hi", cwd=str(tmp_path)))
+
+    assert result == "Error: no execution environment is available for shell"
+
+
 def test_shell_strips_inherited_secrets_and_caps_streamed_output(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -74,7 +87,7 @@ def test_shell_strips_inherited_secrets_and_caps_streamed_output(
     class Process:
         pid = 12345
         returncode = 0
-        stdout = Reader([b"x" * (shell.MAX_OUTPUT + 32)])
+        stdout = Reader([b"x" * (MAX_OUTPUT + 32)])
         stderr = Reader([])
 
         async def wait(self) -> int:
@@ -86,9 +99,17 @@ def test_shell_strips_inherited_secrets_and_caps_streamed_output(
         return Process()
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-secret")
-    monkeypatch.setattr(shell.asyncio, "create_subprocess_shell", create_process)
+    monkeypatch.setattr(
+        environment_module.asyncio, "create_subprocess_shell", create_process
+    )
 
-    result = asyncio.run(shell.execute(command="echo ok", cwd=str(tmp_path)))
+    result = asyncio.run(
+        shell.execute(
+            command="echo ok",
+            cwd=str(tmp_path),
+            environment=LocalExecutionEnvironment(),
+        )
+    )
 
     environment = captured["env"]
     assert isinstance(environment, dict)
@@ -97,8 +118,8 @@ def test_shell_strips_inherited_secrets_and_caps_streamed_output(
     assert captured["cwd"] == str(tmp_path)
     if os.name == "posix":
         assert captured["start_new_session"] is True
-    assert "x" * shell.MAX_OUTPUT in result
-    assert f"{shell.MAX_OUTPUT + 32} bytes total" in result
+    assert "x" * MAX_OUTPUT in result
+    assert f"{MAX_OUTPUT + 32} bytes total" in result
 
 
 def test_shell_process_cannot_read_the_service_secret_environment(
@@ -108,7 +129,11 @@ def test_shell_process_cannot_read_the_service_secret_environment(
     monkeypatch.setenv("OPENAI_API_KEY", "shell-test-secret")
 
     result = asyncio.run(
-        shell.execute(command='printf "%s" "$OPENAI_API_KEY"', cwd=str(tmp_path))
+        shell.execute(
+            command='printf "%s" "$OPENAI_API_KEY"',
+            cwd=str(tmp_path),
+            environment=LocalExecutionEnvironment(),
+        )
     )
 
     assert "shell-test-secret" not in result
@@ -117,177 +142,29 @@ def test_shell_process_cannot_read_the_service_secret_environment(
 
 def test_shell_preserves_small_stderr_and_rejects_missing_workdir(tmp_path: Path) -> None:
     shell = _load_shell_provider()
+    env = LocalExecutionEnvironment()
 
-    stderr_result = asyncio.run(shell.execute(command="printf failure >&2", cwd=str(tmp_path)))
-    missing_result = asyncio.run(shell.execute(command="pwd", cwd=str(tmp_path / "missing")))
+    stderr_result = asyncio.run(
+        shell.execute(command="printf failure >&2", cwd=str(tmp_path), environment=env)
+    )
+    missing_result = asyncio.run(
+        shell.execute(command="pwd", cwd=str(tmp_path / "missing"), environment=env)
+    )
 
-    assert shell._format_stream(b"ok", 2) == "ok"
     assert stderr_result == "[exit_code=0]\n[stderr]\nfailure"
     assert missing_result == f"Error: working directory does not exist: {tmp_path / 'missing'}"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-specific")
-def test_shell_timeout_terminates_the_entire_process_group(monkeypatch, tmp_path: Path) -> None:
+def test_shell_timeout_reports_the_clamped_timeout(tmp_path: Path) -> None:
     shell = _load_shell_provider()
-    signals: list[tuple[int, int]] = []
 
-    class Reader:
-        async def read(self, _: int) -> bytes:
-            return b""
-
-    async def run() -> tuple[str, object]:
-        terminated = asyncio.Event()
-
-        class Process:
-            pid = 12345
-            returncode: int | None = None
-            stdout = Reader()
-            stderr = Reader()
-
-            async def wait(self) -> int:
-                if self.returncode is None:
-                    await terminated.wait()
-                assert self.returncode is not None
-                return self.returncode
-
-        process = Process()
-
-        async def create_process(*_: object, **__: object) -> Process:
-            return process
-
-        def killpg(pid: int, sig: int) -> None:
-            signals.append((pid, sig))
-            process.returncode = -sig
-            terminated.set()
-
-        monkeypatch.setattr(shell.asyncio, "create_subprocess_shell", create_process)
-        monkeypatch.setattr(shell.os, "killpg", killpg)
-        result = await shell.execute(command="long-running", timeout=1, cwd=str(tmp_path))
-        return result, process
-
-    result, _ = asyncio.run(run())
+    result = asyncio.run(
+        shell.execute(
+            command="sleep 30",
+            timeout=1,
+            cwd=str(tmp_path),
+            environment=LocalExecutionEnvironment(),
+        )
+    )
 
     assert result == "Error: command timed out after 1s"
-    assert signals == [(12345, signal.SIGTERM)]
-
-
-@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-specific")
-def test_shell_closes_background_children_that_hold_output_pipes(monkeypatch, tmp_path: Path) -> None:
-    shell = _load_shell_provider()
-    signals: list[tuple[int, int]] = []
-
-    async def run() -> str:
-        close_pipes = asyncio.Event()
-
-        class Reader:
-            async def read(self, _: int) -> bytes:
-                await close_pipes.wait()
-                return b""
-
-        class Process:
-            pid = 24680
-            returncode = 0
-            stdout = Reader()
-            stderr = Reader()
-
-            async def wait(self) -> int:
-                return self.returncode
-
-        async def create_process(*_: object, **__: object) -> Process:
-            return Process()
-
-        def killpg(pid: int, sig: int) -> None:
-            signals.append((pid, sig))
-            close_pipes.set()
-
-        monkeypatch.setattr(shell, "_OUTPUT_DRAIN_TIMEOUT", 0.01)
-        monkeypatch.setattr(shell.asyncio, "create_subprocess_shell", create_process)
-        monkeypatch.setattr(shell.os, "killpg", killpg)
-        return await shell.execute(command="background-child", cwd=str(tmp_path))
-
-    assert asyncio.run(run()) == "[exit_code=0]\n(no output)"
-    assert signals == [(24680, signal.SIGTERM)]
-
-
-@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-specific")
-def test_shell_escalates_to_kill_for_a_stuck_process_group(monkeypatch) -> None:
-    shell = _load_shell_provider()
-    signals: list[tuple[int, int]] = []
-
-    async def run() -> None:
-        released = asyncio.Event()
-
-        class Process:
-            pid = 13579
-            returncode: int | None = None
-
-            async def wait(self) -> int:
-                if self.returncode is None:
-                    await released.wait()
-                assert self.returncode is not None
-                return self.returncode
-
-        process = Process()
-
-        def killpg(pid: int, sig: int) -> None:
-            signals.append((pid, sig))
-            if sig == signal.SIGKILL:
-                process.returncode = -sig
-                released.set()
-
-        monkeypatch.setattr(shell, "_TERMINATION_GRACE_SECONDS", 0.01)
-        monkeypatch.setattr(shell.os, "killpg", killpg)
-        await shell._stop_process_group(process)
-
-    asyncio.run(run())
-
-    assert signals == [(13579, signal.SIGTERM), (13579, signal.SIGKILL)]
-
-
-@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-specific")
-def test_shell_cancellation_terminates_the_process_group(monkeypatch, tmp_path: Path) -> None:
-    shell = _load_shell_provider()
-    signals: list[tuple[int, int]] = []
-
-    class Reader:
-        async def read(self, _: int) -> bytes:
-            return b""
-
-    async def run() -> None:
-        started = asyncio.Event()
-        terminated = asyncio.Event()
-
-        class Process:
-            pid = 67890
-            returncode: int | None = None
-            stdout = Reader()
-            stderr = Reader()
-
-            async def wait(self) -> int:
-                started.set()
-                if self.returncode is None:
-                    await terminated.wait()
-                assert self.returncode is not None
-                return self.returncode
-
-        process = Process()
-
-        async def create_process(*_: object, **__: object) -> Process:
-            return process
-
-        def killpg(pid: int, sig: int) -> None:
-            signals.append((pid, sig))
-            process.returncode = -sig
-            terminated.set()
-
-        monkeypatch.setattr(shell.asyncio, "create_subprocess_shell", create_process)
-        monkeypatch.setattr(shell.os, "killpg", killpg)
-        task = asyncio.create_task(shell.execute(command="long-running", cwd=str(tmp_path)))
-        await started.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(run())
-
-    assert signals == [(67890, signal.SIGTERM)]

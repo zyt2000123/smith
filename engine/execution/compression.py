@@ -19,6 +19,9 @@ CONTEXT_TRIGGER_RATIO = 0.7
 DEFAULT_CONTEXT_LIMIT = DEFAULT_CONTEXT_WINDOW
 CONTEXT_DISPLAY_WINDOW = 256_000
 CONTEXT_COMPACTION_TRIGGER = 128_000
+DEFAULT_MAX_OUTPUT_TOKENS = 4_096
+CONTEXT_SAFETY_MARGIN_RATIO = 0.10
+CONTEXT_COMPACTION_INPUT_RATIO = 0.85
 
 COMPACT_SYSTEM_PROMPT = """\
 You are summarizing a conversation for an AI assistant that will lose all prior context.
@@ -130,15 +133,136 @@ def context_limit_for_llm(llm: object | None) -> int:
 
 
 def compaction_policy_for_llm(llm: object | None) -> tuple[int, float]:
-    """Return the selected window and the hard automatic-compaction trigger.
+    """Return a safe input budget and the selected compaction trigger.
 
     The shell displays context against a stable 256k reference window. To
     keep the actual request from growing beyond the commonly supported 128k
-    range, automatic compaction starts at 128k when the selected route does
-    not declare a smaller window. A smaller declared window remains the hard
+    range, reserve room for output and provider/tool protocol overhead before
+    deciding when to compact. A smaller declared window remains the hard
     safety limit for that route.
     """
-    return min(context_limit_for_llm(llm), CONTEXT_COMPACTION_TRIGGER), 1.0
+    context_limit = min(context_limit_for_llm(llm), CONTEXT_COMPACTION_TRIGGER)
+    configured_output = getattr(llm, "max_output_tokens", None)
+    max_output_tokens = (
+        configured_output
+        if isinstance(configured_output, int)
+        and not isinstance(configured_output, bool)
+        and configured_output > 0
+        else DEFAULT_MAX_OUTPUT_TOKENS
+    )
+    output_reserve = min(max_output_tokens, max(context_limit - 1, 1))
+    safety_margin = min(
+        max(256, int(context_limit * CONTEXT_SAFETY_MARGIN_RATIO)),
+        max(context_limit - output_reserve - 1, 0),
+    )
+    input_budget = max(1, context_limit - output_reserve - safety_margin)
+    return input_budget, CONTEXT_COMPACTION_INPUT_RATIO
+
+
+def prompt_budget_for_llm(llm: object | None) -> int:
+    """Limit static prompt assembly to leave room for conversation history."""
+    input_budget, _ = compaction_policy_for_llm(llm)
+    return max(1, int(input_budget * 0.6))
+
+
+def trim_conversation_for_context_limit(
+    conversation: list[dict],
+    *,
+    token_budget: int,
+) -> list[dict]:
+    """Deterministically shrink an over-limit conversation without another LLM call.
+
+    This recovery path deliberately removes tool-call structure instead of
+    retaining an orphaned assistant/tool pair. It is only used after a provider
+    explicitly rejects context length, before any tool from the current model
+    turn has been executed.
+    """
+    if token_budget <= 0 or _conversation_tokens(conversation) <= token_budget:
+        return [dict(message) for message in conversation]
+
+    system_text = ""
+    for message in conversation:
+        if message.get("role") == "system" and isinstance(message.get("content"), str):
+            system_text = message["content"]
+            break
+
+    system_budget = int(token_budget * 0.55) if system_text else 0
+    system_text = _trim_middle(system_text, system_budget) if system_text else ""
+    history_budget = max(1, token_budget - estimate_tokens(system_text))
+
+    history_lines: list[str] = []
+    for message in conversation:
+        role = str(message.get("role", "unknown"))
+        if role == "system":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or not content:
+            tool_calls = message.get("tool_calls")
+            if role == "assistant" and isinstance(tool_calls, list):
+                names = ", ".join(
+                    str(call.get("function", {}).get("name", "?"))
+                    for call in tool_calls
+                    if isinstance(call, dict)
+                )
+                content = f"[tool calls: {names}]" if names else ""
+            else:
+                content = ""
+        if content:
+            history_lines.append(f"[{role}] {content}")
+
+    recovery_prefix = _trim_tail(
+        "[Context deterministically shortened after provider context-limit error]\n",
+        history_budget,
+    )
+    history_text = _trim_tail(
+        "\n".join(history_lines),
+        max(0, history_budget - estimate_tokens(recovery_prefix)),
+    )
+    result: list[dict] = []
+    if system_text:
+        result.append({"role": "system", "content": system_text})
+    result.append({"role": "user", "content": recovery_prefix + history_text})
+    return result
+
+
+def _trim_middle(text: str, token_budget: int) -> str:
+    if token_budget <= 0:
+        return ""
+    if estimate_tokens(text) <= token_budget:
+        return text
+    marker = "\n[... context truncated ...]\n"
+    low, high = 0, len(text)
+    best = ""
+    while low <= high:
+        keep = (low + high) // 2
+        head = keep // 2
+        tail = keep - head
+        candidate = text[:head] + marker + (text[-tail:] if tail else "")
+        if estimate_tokens(candidate) <= token_budget:
+            best = candidate
+            low = keep + 1
+        else:
+            high = keep - 1
+    return best or _trim_tail(marker, token_budget)
+
+
+def _trim_tail(text: str, token_budget: int) -> str:
+    if token_budget <= 0:
+        return ""
+    if estimate_tokens(text) <= token_budget:
+        return text
+    marker = "[... earlier context truncated ...]\n"
+    low, high = 0, len(text)
+    best = ""
+    while low <= high:
+        keep = (low + high) // 2
+        candidate = marker + (text[-keep:] if keep else "")
+        if estimate_tokens(candidate) <= token_budget:
+            best = candidate
+            low = keep + 1
+        else:
+            high = keep - 1
+    return best
 
 
 async def compress(conversation: list[dict], llm: "LLMPort | None" = None) -> list[dict]:

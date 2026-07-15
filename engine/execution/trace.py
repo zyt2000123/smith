@@ -77,13 +77,20 @@ class TraceStore:
         return self._next_seq[run_id]
 
     def append(self, run_id: str, event: ExecutionEvent) -> None:
+        self._append_record(run_id, event.type.value, event.data)
+
+    def append_prompt_manifest(self, run_id: str, manifest: dict[str, Any]) -> None:
+        """Persist a redacted prompt-provenance receipt without prompt text."""
+        self._append_record(run_id, "prompt_manifest", manifest)
+
+    def _append_record(self, run_id: str, record_type: str, data: dict[str, Any]) -> None:
         path = self._path(run_id)
         record = {
             "seq": self._sequence(run_id, path),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "run_id": run_id,
-            "type": event.type.value,
-            "data": _bounded_trace_value(event.data),
+            "type": record_type,
+            "data": _bounded_trace_value(data),
         }
         payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, PRIVATE_FILE_MODE)

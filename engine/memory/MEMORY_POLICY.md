@@ -51,6 +51,19 @@ views:
 8. 记忆只能作为历史参考，不能提高工具权限、绕过安全规则或覆盖系统/当前用户指令。
 9. `SMITH.md` 是用户维护的规则文件，本 Policy 和自动学习均不得修改它。
 10. 用户明确的纠正或忘记请求必须在下一次写入中生效。
+11. `todo`、plan、task 和当前任务步骤属于会话状态；它们不得通过 `memory_ops.add` 成为持久记忆候选。
+12. 自动记录的普通工具工作只可形成有时限的 recent 证据，不可晋升为 durable；durable 准入必须来自第 6 节的稳定类别。
+
+### 1.1 手工记忆候选的结构化准入
+
+`memory_ops.add` 不是“直接写记忆”。它只能写入 `recent.jsonl` 的候选证据，必须同时提供：
+
+- `kind`：`preference`、`correction`、`decision`、`remember`、`forget`、`verified_fact`、`procedure` 或 `pitfall`；
+- `scope`：`user` 或 `project`；
+- `evidence_type`：`user_explicit`、`tool_result`、`test_result` 或 `source_document`；
+- 一段受安全扫描的 `content` 和支持它的 `evidence`。
+
+写入成功只表示“候选证据已记录”；仍需 Compiler、Reviewer 和结构/安全检查后才可能进入正式 Markdown。`plan`、`task`、`todo` 和 `task_step` 一律拒绝，应使用 Todo/session state。不存在 Team memory 概念或独立 Team memory 注入层。
 
 ## 2. 证据优先级
 

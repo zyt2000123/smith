@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -26,6 +27,17 @@ logger = logging.getLogger(__name__)
 MemoryMaintenance = Callable[[Path], Awaitable[bool]]
 
 
+@dataclass(frozen=True)
+class RelevantMemory:
+    """Query-time memory results that retain their source boundary."""
+
+    durable: str = ""
+    episodes: str = ""
+
+    def render(self) -> str:
+        return "\n\n".join(part for part in (self.durable, self.episodes) if part)
+
+
 # ---------------------------------------------------------------------------
 # Query-time retrieval: search episodes via FTS5
 # ---------------------------------------------------------------------------
@@ -35,27 +47,33 @@ _MAX_DURABLE_CONTEXT_CHARS = 4000
 
 
 async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) -> str:
-    """Search durable memory and episode summaries relevant to *query*.
+    """Backward-compatible flattened query-time memory retrieval."""
+    return (await retrieve_relevant_memory(agent_dir, query, top_k)).render()
+
+
+async def retrieve_relevant_memory(
+    agent_dir: Path,
+    query: str,
+    top_k: int = 3,
+) -> RelevantMemory:
+    """Search durable and episode memory while retaining their source boundary.
 
     Recent working memory remains a bounded passive layer. Durable and episode
     memory are recalled on demand. Every failure degrades to whatever safe
     section was already found, never to a blocked prompt assembly.
     """
     if not query.strip():
-        return ""
+        return RelevantMemory()
 
-    sections: list[str] = []
     try:
         durable = _select_relevant_durable(agent_dir / "memory", query)
     except Exception:
         logger.warning("durable-memory retrieval failed", exc_info=True)
         durable = ""
-    if durable:
-        sections.append(durable)
 
     episodes_dir = agent_dir / "memory" / "episodes"
     if not episodes_dir.is_dir():
-        return "\n\n".join(sections)
+        return RelevantMemory(durable=durable)
 
     try:
         from .search import SearchIndex
@@ -67,7 +85,7 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) 
 
             hits = await idx.search(query, top_k)
             if not hits:
-                return "\n\n".join(sections)
+                return RelevantMemory(durable=durable)
 
             lines = ["## Relevant Episodes"]
             total_chars = 0
@@ -85,13 +103,13 @@ async def search_relevant_memories(agent_dir: Path, query: str, top_k: int = 3) 
                 total_chars += len(content)
 
             if len(lines) > 1:
-                sections.append("\n\n".join(lines))
-            return "\n\n".join(sections)
+                return RelevantMemory(durable=durable, episodes="\n\n".join(lines))
+            return RelevantMemory(durable=durable)
         finally:
             await idx.close()
     except Exception:
         logger.warning("episode-memory retrieval failed", exc_info=True)
-        return "\n\n".join(sections)
+        return RelevantMemory(durable=durable)
 
 
 def _select_relevant_durable(memory_dir: Path, query: str) -> str:

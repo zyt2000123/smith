@@ -483,6 +483,97 @@ class RecordingStreamingLLM(FakeLLM):
         )
 
 
+def _seed_checkpoint(tmp_path: Path, session_id: str, user_message: str) -> None:
+    from engine.execution.session_state import SessionCheckpoint, SessionStateManager
+
+    SessionStateManager(tmp_path).save(SessionCheckpoint(
+        agent_id="smith-id",
+        session_id=session_id,
+        identity_id="smith",
+        route_id="feature",
+        skill_chain_index=0,  # planning already passed before the crash
+        context={
+            "user_message": user_message,
+            "identity_id": "smith",
+            "route_id": "feature",
+            "agent_id": "smith-id",
+            "session_id": session_id,
+            "planning_output": "PLAN-FROM-CHECKPOINT",
+        },
+        timestamp="2026-07-15T00:00:00+00:00",
+    ))
+
+
+def test_run_agent_stream_resumes_from_crash_checkpoint(tmp_path: Path) -> None:
+    """崩溃遗留的 checkpoint（同 route + 同消息）恢复时跳过已完成节点。"""
+    _seed_checkpoint(tmp_path, "sess-resume", "build a feature")
+
+    async def run():
+        llm = RecordingStreamingLLM()
+        events = []
+        async for event in run_agent_stream(
+            llm,
+            "system prompt",
+            "build a feature",
+            FakeToolRegistry(),
+            FakeSkillRegistry(),
+            FEATURE_ROUTE,
+            SkillChain([
+                SkillNode("planning", PassingGate()),
+                SkillNode("testing", PassingGate()),
+            ]),
+            FailureLoopGuard(),
+            execution_context={
+                "agent_id": "smith-id",
+                "session_id": "sess-resume",
+                "_state_dir": str(tmp_path),
+            },
+        ):
+            events.append(event)
+        return llm, events
+
+    llm, events = asyncio.run(run())
+    started = [e.data["skill"] for e in events if e.type == EventType.SKILL_START]
+    assert started == ["testing"], "planning must be skipped, not re-run"
+    assert len(llm.calls) == 1
+    assert not (tmp_path / "sessions" / ".state" / "sess-resume.json").exists()
+
+
+def test_run_agent_stream_discards_stale_checkpoint_for_new_task(tmp_path: Path) -> None:
+    """消息不同 → 陈旧 checkpoint 清除，链从头执行，不残留可恢复状态。"""
+    _seed_checkpoint(tmp_path, "sess-stale", "build a feature")
+
+    async def run():
+        llm = RecordingStreamingLLM()
+        events = []
+        async for event in run_agent_stream(
+            llm,
+            "system prompt",
+            "a completely different task",
+            FakeToolRegistry(),
+            FakeSkillRegistry(),
+            FEATURE_ROUTE,
+            SkillChain([
+                SkillNode("planning", PassingGate()),
+                SkillNode("testing", PassingGate()),
+            ]),
+            FailureLoopGuard(),
+            execution_context={
+                "agent_id": "smith-id",
+                "session_id": "sess-stale",
+                "_state_dir": str(tmp_path),
+            },
+        ):
+            events.append(event)
+        return llm, events
+
+    llm, events = asyncio.run(run())
+    started = [e.data["skill"] for e in events if e.type == EventType.SKILL_START]
+    assert started == ["planning", "testing"]
+    assert len(llm.calls) == 2
+    assert not (tmp_path / "sessions" / ".state" / "sess-stale.json").exists()
+
+
 def test_domain_gate_retry_hint_reaches_retry_attempt() -> None:
     """域门禁 retry_hint 必须随重试流回节点，而不是被静默丢弃。"""
 

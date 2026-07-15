@@ -58,11 +58,16 @@ async def run_pipeline(
     max_react_iters: int,
     context: dict,
     gate_llm: "LLMPort | None" = None,
+    start_node_idx: int = 0,
 ) -> AsyncGenerator[ExecutionEvent, None]:
-    """Execute a pipeline: walk nodes sequentially, ReAct each, gate-check."""
+    """Execute a pipeline: walk nodes sequentially, ReAct each, gate-check.
+
+    ``start_node_idx`` > 0 resumes a crash-interrupted chain: earlier nodes'
+    outputs must already be present in ``context`` (from the checkpoint).
+    """
     from engine.skill.executor import execute_skill_events
 
-    node_idx = 0
+    node_idx = start_node_idx
     max_backtracks = 5
     backtrack_count = 0
     committed_provisional_output: dict[str, bool] = {}
@@ -236,9 +241,9 @@ async def run_pipeline(
                 yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
                     "provision_id": provision_id, "reason": "execution_error",
                 })
-            # 进程内异常与 blocked/incomplete/failed 一样是终态：restore 尚未
-            # 接线，遗留 checkpoint 只会在 list_active 里堆成永远无人消费的
-            # "可恢复会话"。真正的进程崩溃本来就走不到这里，不受影响。
+            # 进程内异常与 blocked/incomplete/failed 一样是终态：错误已上抛给
+            # 调用方，重跑应从头开始。只有真正的进程崩溃（走不到这里）才留下
+            # checkpoint，由 agent_loop 的 crash-resume 消费。
             _clear_checkpoint(context)
             raise
 

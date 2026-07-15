@@ -7,7 +7,12 @@ from engine.execution.events import EventType
 from engine.execution.react_loop import react_event_loop
 from engine.llm.client import ChatResponse
 from engine.llm.contracts import ToolCallData
-from engine.safety.approval import APPROVAL_BROKER, use_approval_context
+from engine.safety.approval import (
+    APPROVAL_BROKER,
+    ApprovalBroker,
+    ApprovalTimeoutError,
+    use_approval_context,
+)
 from engine.safety.tool_guard import ToolGuard
 from engine.tool.registry import ToolRegistry
 
@@ -66,6 +71,45 @@ def test_react_loop_executes_a_guarded_tool_only_after_approval(tmp_path: Path) 
         "reason": "This will change file contents.",
     }
     assert any(event.type is EventType.TEXT_DELTA and event.data.get("text") == "done" for event in events)
+
+
+def test_react_loop_treats_approval_timeout_as_blocked_without_executing_tool(tmp_path: Path) -> None:
+    class TimedOutBroker(ApprovalBroker):
+        async def wait(self, request, *, timeout_seconds=300.0):
+            raise ApprovalTimeoutError("Approval timed out")
+
+    async def run():
+        target = tmp_path / "must-not-exist.txt"
+        registry = ToolRegistry()
+
+        async def write_file(path: str, content: str):
+            Path(path).write_text(content, encoding="utf-8")
+            return "written"
+
+        registry.register("write_file", "Write", {}, write_file)
+        guard = ToolGuard(tmp_path / "missing-rules.json", allowed_dirs=[tmp_path])
+        guard.bind_definitions(registry.definitions())
+        events = []
+        with use_approval_context(TimedOutBroker(), "run-1"):
+            async for event in react_event_loop(
+                _ApprovalLLM(target),
+                [{"role": "user", "content": "write"}],
+                registry,
+                guard,
+                max_iters=3,
+            ):
+                events.append(event)
+        return events, target
+
+    events, target = asyncio.run(run())
+
+    assert not target.exists()
+    timeout_events = [
+        event for event in events
+        if event.type is EventType.TOOL_CALL_RESULT and event.data.get("reason") == "Approval timed out"
+    ]
+    assert len(timeout_events) == 1
+    assert timeout_events[0].data["blocked"] is True
 
 
 class _ApprovalLLM:

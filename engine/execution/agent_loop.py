@@ -30,6 +30,7 @@ from engine.skill.executor import execute_skill_events
 from engine.skill.registry import SkillRegistry
 from engine.tool.registry import ToolRegistry
 from .backtrack import FailureLoopGuard
+from .compression import prompt_budget_for_llm
 from .events import EventType, ExecutionEvent, raw_text_delta
 from .pipeline import run_pipeline
 from .pipeline_context import (
@@ -49,6 +50,7 @@ from .react_loop import (
 from .run_state import RunStateError, RunStateStore, RunStatus
 from .run_stream import AgentRunStream
 from .runtime import EngineRequest, EngineResult, RuntimeContext, RuntimeServices
+from .runtime_control import initial_runtime_control_prompt
 from .skill_chain import SkillChain, load_gate_content
 from .tool_ledger import ToolExecutionLedger
 from .trace import TraceStore
@@ -144,12 +146,57 @@ async def run_agent_stream(
     if execution_context:
         context.update({k: v for k, v in execution_context.items() if v is not None})
 
+    context, start_node_idx = _apply_crash_checkpoint(
+        context, route.route_id or "", user_message, len(skill_chain.nodes),
+    )
+
     async for event in run_pipeline(
         skill_chain, llm, user_message, base_messages,
         tool_registry, skill_registry, tool_guard, guard,
         max_react_iters, context, gate_llm=gate_llm,
+        start_node_idx=start_node_idx,
     ):
         yield event
+
+
+def _apply_crash_checkpoint(
+    context: dict,
+    route_id: str,
+    user_message: str,
+    node_count: int,
+) -> tuple[dict, int]:
+    """Consume a crash-leftover checkpoint: resume the same request, drop stale ones.
+
+    Every terminal path clears its checkpoint, so a surviving file means the
+    process died mid-chain. Resume only when the identical request comes back
+    (same route, same user message); anything else is a new task and the stale
+    file is removed so it never masquerades as resumable state.
+    """
+    session_id = str(context.get(CTX_SESSION_ID) or "")
+    state_dir = str(context.get(CTX_STATE_DIR) or "")
+    if not session_id or not state_dir:
+        return context, 0
+    try:
+        from .session_state import SessionStateManager
+
+        manager = SessionStateManager(Path(state_dir))
+        checkpoint = manager.restore(session_id)
+        if checkpoint is None:
+            return context, 0
+        if (
+            checkpoint.route_id == route_id
+            and checkpoint.context.get(CTX_USER_MESSAGE) == user_message
+            and 0 <= checkpoint.skill_chain_index < node_count
+        ):
+            logger.info(
+                "session %s: resuming crashed chain, skipping %d completed node(s)",
+                session_id, checkpoint.skill_chain_index + 1,
+            )
+            return {**checkpoint.context, **context}, checkpoint.skill_chain_index + 1
+        manager.clear(session_id)
+    except Exception:
+        logger.exception("failed to inspect crash checkpoint; starting fresh")
+    return context, 0
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +277,7 @@ async def _run_forced_skill_stream(
 
 class _AgentSetup(NamedTuple):
     system_prompt: str
+    prompt_manifest: dict[str, object]
     identity: IdentitySpec
     route: RouteDecision
     chain: SkillChain | None
@@ -383,27 +431,41 @@ async def prepare_runtime(
         services.skill_registry.restrict_to(identity.enabled_skills)
 
     from engine.memory.compile import assemble_memory
-    from engine.memory.store import search_relevant_memories
-    retrieved = await search_relevant_memories(state_dir, request.message)
+    from engine.memory.store import retrieve_relevant_memory
+    retrieved = await retrieve_relevant_memory(state_dir, request.message)
     memory_text = assemble_memory(
         state_dir / "memory",
         include_durable=False,
     )
     assembler = PromptAssembler()
-    system_prompt = assembler.assemble(
-        runtime.profile_dir, services.tool_registry, services.skill_registry,
-        _runtime_prompt_context(runtime, identity), retrieved_memory=retrieved,
-        working_dir=wd, memory_text=memory_text,
-    )
-    if identity.prompt:
-        system_prompt += "\n\n---\n\n" + identity.prompt
-
+    runtime_guidance = identity.prompt
+    eval_guidance = ""
     if detect_eval_sensitive(request.message):
-        system_prompt += "\n\n" + EVAL_SENSITIVE_GUIDANCE
+        eval_guidance = EVAL_SENSITIVE_GUIDANCE
+
+    prompt_assembly = assembler.assemble_detailed(
+        runtime.profile_dir, services.tool_registry, services.skill_registry,
+        _runtime_prompt_context(runtime, identity),
+        retrieved_durable=retrieved.durable,
+        retrieved_episodes=retrieved.episodes,
+        working_dir=wd,
+        memory_text=memory_text,
+        runtime_guidance=runtime_guidance,
+        eval_guidance=eval_guidance,
+        runtime_control=initial_runtime_control_prompt(),
+        max_tokens=prompt_budget_for_llm(services.llm),
+    )
 
     chain = _resolve_pipeline(route, runtime)
 
-    return _AgentSetup(system_prompt, identity, route, chain, state_dir)
+    return _AgentSetup(
+        prompt_assembly.text,
+        prompt_assembly.manifest.to_trace_data(),
+        identity,
+        route,
+        chain,
+        state_dir,
+    )
 
 
 def _bind_memory_ops_tool(services: RuntimeServices, state_dir: Path) -> None:
@@ -600,6 +662,7 @@ async def _dispatch_memory_maintenance_tick(
             hook_name,
             HookType.PARALLEL,
             args=(memory_dir,),
+            include_failures=True,
         )
         return all(result is not False for result in results)
     except Exception:
@@ -645,6 +708,7 @@ async def _persist_runtime_learning(
             hook_name,
             HookType.PARALLEL,
             args=hook_args,
+            include_failures=True,
         )
         ok = ok and all(result is not False for result in results)
     except Exception:
@@ -877,6 +941,11 @@ async def _run_events_with_runtime(
     try:
         s = await prepare_runtime(request, runtime, services)
         state_dir = s.state_dir
+        if trace_store is not None and hasattr(s, "prompt_manifest"):
+            try:
+                trace_store.append_prompt_manifest(run_id, s.prompt_manifest)
+            except (OSError, ValueError):
+                logger.warning("failed to persist prompt manifest (run=%s)", run_id, exc_info=True)
         guard = FailureLoopGuard()
         with use_fact_gate(_fact_gate_for_request(request, runtime, services)), use_approval_context(
             APPROVAL_BROKER, run_id

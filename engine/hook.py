@@ -18,6 +18,7 @@ from enum import Enum
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+DEFAULT_HOOK_TIMEOUT_SECONDS = 30.0
 
 
 class HookType(Enum):
@@ -29,8 +30,11 @@ class HookType(Enum):
 
 
 class HookManager:
-    def __init__(self) -> None:
+    def __init__(self, *, timeout_seconds: float = DEFAULT_HOOK_TIMEOUT_SECONDS) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("hook timeout must be positive")
         self._handlers: list[Any] = []
+        self._timeout_seconds = timeout_seconds
 
     def register(self, handler: Any) -> None:
         self._handlers.append(handler)
@@ -65,6 +69,7 @@ class HookManager:
         *,
         args: tuple = (),
         initial: Any = None,
+        include_failures: bool = False,
     ) -> Any:
         handlers = self._get_handlers(hook)
         if not handlers:
@@ -73,7 +78,7 @@ class HookManager:
         if hook_type == HookType.FIRST:
             for fn in handlers:
                 try:
-                    result = await _call(fn, *args)
+                    result = await _call_with_timeout(fn, self._timeout_seconds, *args)
                     if result is not None:
                         return result
                 except Exception:
@@ -83,7 +88,7 @@ class HookManager:
         if hook_type == HookType.SERIES:
             for fn in handlers:
                 try:
-                    await _call(fn, *args)
+                    await _call_with_timeout(fn, self._timeout_seconds, *args)
                 except Exception:
                     logger.debug("hook %s.SERIES error", hook, exc_info=True)
             return None
@@ -92,7 +97,7 @@ class HookManager:
             result = initial
             for fn in handlers:
                 try:
-                    result = await _call(fn, result, *args)
+                    result = await _call_with_timeout(fn, self._timeout_seconds, result, *args)
                 except Exception:
                     logger.debug("hook %s.SERIES_LAST error", hook, exc_info=True)
             return result
@@ -102,7 +107,7 @@ class HookManager:
             is_list = isinstance(result, list)
             for fn in handlers:
                 try:
-                    partial = await _call(fn, *args)
+                    partial = await _call_with_timeout(fn, self._timeout_seconds, *args)
                     if partial is None:
                         continue
                     if is_list:
@@ -117,13 +122,15 @@ class HookManager:
 
         if hook_type == HookType.PARALLEL:
             results = await asyncio.gather(
-                *[_call(fn, *args) for fn in handlers],
+                *[_call_with_timeout(fn, self._timeout_seconds, *args) for fn in handlers],
                 return_exceptions=True,
             )
             collected: list[Any] = []
             for r in results:
                 if isinstance(r, BaseException):
                     logger.debug("hook %s.PARALLEL error", hook, exc_info=r)
+                    if include_failures:
+                        collected.append(False)
                 elif r is not None:
                     collected.append(r)
             return collected
@@ -135,7 +142,14 @@ async def _call(fn: Callable, *args: Any) -> Any:
     # Await by result, not by introspection: iscoroutinefunction misses
     # async callables such as objects with an async __call__, which would
     # silently return an un-awaited coroutine.
-    result = fn(*args)
+    is_async_callable = inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(
+        getattr(fn, "__call__", None)
+    )
+    result = fn(*args) if is_async_callable else await asyncio.to_thread(fn, *args)
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+async def _call_with_timeout(fn: Callable, timeout_seconds: float, *args: Any) -> Any:
+    return await asyncio.wait_for(_call(fn, *args), timeout=timeout_seconds)

@@ -38,6 +38,7 @@ from ._review import (
 )
 from .history import append_memory_history
 from .policy import (
+    DURABLE_MEMORY_KINDS,
     MemoryPolicy,
     MemoryPolicyError,
     MemoryViewName,
@@ -224,7 +225,10 @@ def _entries_to_source(
     return _truncate_source(source, source_limit) if source_limit is not None else source
 
 
-_RECENT_KINDS = {"work", "partial_work", "decision", "correction", "remember", "forget"}
+_RECENT_KINDS = {
+    "work", "partial_work", "decision", "correction", "remember", "forget",
+    "verified_fact", "procedure", "pitfall",
+}
 
 
 def _entries_for_view(entries: list[dict], view: MemoryViewName) -> list[dict]:
@@ -240,7 +244,7 @@ def _entries_for_view(entries: list[dict], view: MemoryViewName) -> list[dict]:
             if kind in _RECENT_KINDS and (scope == "project" or kind in {"correction", "forget"}):
                 selected.append(entry)
         elif view == "durable":
-            if kind not in {"preference", "pattern", "partial_work"} and (
+            if kind in DURABLE_MEMORY_KINDS and (
                 scope == "project" or kind in {"correction", "remember", "forget"}
             ):
                 selected.append(entry)

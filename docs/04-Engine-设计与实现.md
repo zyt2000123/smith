@@ -178,7 +178,7 @@ memory / safety / plugin ──▶ 互不依赖
    b. ToolRegistry.load_providers(agents/tools/)     ← 扫描注册内置工具
    c. 读 Agent config.yaml 的 mcp_servers → MCPClient 连接 STDIO / Streamable HTTP → 注册 mcp_* 工具
    d. SkillRegistry.load_builtin() + load_agent_skills()  # 语义是加载 Smith 自装技能
-   e. PromptAssembler.assemble()                     ← 10 段 system prompt
+   e. PromptAssembler.assemble_detailed()            ← 带来源契约与审计清单的 system prompt
    f. route_task(message) → DIRECT / FEATURE / BUGFIX
    g. 构建 SkillChain（或 None）、FailureLoopGuard、ToolGuard
 4. run_agent_stream() 产出 ExecutionEvent 流：
@@ -230,26 +230,35 @@ Smith 的基础人格 = 一个目录下的 6 个文本/配置文件。Agent-Smit
 
 ## 五、System Prompt 组装设计
 
-实现：`engine/prompt/assembler.py:51`（`PromptAssembler.assemble`）
+实现：`engine/prompt/assembler.py`（`PromptAssembler.assemble_detailed`）
 
-### 5.1 9 段分层结构
+### 5.1 统一来源契约与分层结构
 
-按固定顺序拼接（`\n\n---\n\n` 分隔），空段过滤：
+每个 Layer 统一携带 `source`、`source_ref`、`scope`、`authority`、`trust`、`load_reason` 和 `trim_priority`。渲染进模型的每个非空段均有同一格式的可见标签：
 
-| # | 段 | 来源 | 稳定性 | 被裁剪优先级* |
+```text
+## Context: {display_name}
+[Source: {source_ref} · Authority: {authority} · Trust: {trust} · Scope: {scope} · Load: {load_reason}]
+```
+
+因此模型能区分“来自哪里”和“能否覆盖谁”；系统也不再把多个不同来源预先拼成一个不可审计的大段。按固定顺序拼接（`\n\n---\n\n` 分隔），空段不渲染：
+
+| # | 段 | 来源与作用域 | 稳定性 | 被裁剪优先级* |
 |---|---|---|---|---|
 | 0 | 身份 role | `role.md` | 稳定 | **永不裁剪** |
 | 1 | 风格 style | `style.md` | 稳定 | 9（最后裁） |
 | 2 | 工作流 workflow | `workflow.md` | 稳定 | **永不裁剪** |
-| 3 | 工具 toolbox | `toolbox.md` + ToolRegistry 实时清单 | 稳定 | 8 |
-| 4 | 技能清单 skills | SkillRegistry 摘要（name + description） | 稳定 | 7 |
-| 5 | 学习后的用户上下文 | `context.md`（清洗并包裹参考围栏） | 动态 | **永不裁剪** |
-| 6 | 用户规则 | 全局与项目 `SMITH.md` | 动态 | **永不裁剪** |
-| 7 | 输出风格 | `agents/output_style.md`（全局共享） | 稳定 | 1（最先裁） |
-| 8 | 项目记忆 | recent.md + 按需召回的 durable/episodes | 动态 | 2 |
-| 9 | 运行时上下文 | agent profile / name 等 dict | 每次不同 | **永不裁剪** |
+| 3 | 工具策略 / 工具定义 | `toolbox.md` / ToolRegistry（两层） | 稳定 | 8 / 7 |
+| 4 | 技能清单 | SkillRegistry 摘要 | 稳定 | 6 |
+| 5 | 学习后的用户上下文 | `context.md`，用户范围的参考材料 | 动态 | **永不裁剪** |
+| 6 | 全局指令 / 项目指令 | `global:SMITH.md`（用户）/ `project:.smith/SMITH.md`（项目），两层 | 动态 | **永不裁剪** |
+| 7 | Identity / eval 指导 | Identity Catalog / engine，分层 | 每次不同 | **永不裁剪** |
+| 8 | 输出风格 | `agents/output_style.md` | 稳定 | 1（最先裁） |
+| 9 | 记忆治理 | engine 固定合同：Todo/plan/task 不可作为持久记忆 | 稳定 | **永不裁剪** |
+| 10 | recent / durable / episodes | `memory:recent.md` 常驻；durable 与 episodes 查询时分别召回 | 动态 | 2 / 3 / 4 |
+| 11 | 运行时上下文 / 运行控制 | runtime facts / `execution/runtime_control.py`，分层 | 每次不同 | **永不裁剪** |
 
-> \* 当前裁剪顺序为输出风格 → 项目记忆 → 技能目录 → 工具目录 → style。role、workflow、context、`SMITH.md` 与运行时上下文不裁剪。
+> \* 当前裁剪顺序为输出风格 → episodes → durable → recent → skills → tools → style。role、workflow、context、`SMITH.md`、运行时指导、记忆治理、运行时上下文与运行控制合同不裁剪。
 
 ### 5.2 稳定层缓存与 Prefix Cache
 
@@ -257,15 +266,31 @@ Smith 的基础人格 = 一个目录下的 6 个文本/配置文件。Agent-Smit
 - `PromptAssembler.get_prefix_cache_key()` 暴露该 hash；`LLMClient.chat(prefix_cache_key=...)` 通过 `extra_body.prefix_cache_key` 传给支持前缀缓存的推理服务（`llm/client.py:56`）
 - 设计意图：把"稳定在前、动态在后"的分层顺序转化为真实的推理成本节省
 
-### 5.3 记忆注入策略
+### 5.3 PromptManifest：逐层可审计但不落原文
+
+`assemble_detailed()` 同时返回 provider prompt 和 `PromptManifest`。每层清单记录逻辑 id、来源/引用、范围、权威度、信任级别、加载原因、内容 SHA-256、字符数、估算 token 与动作（`loaded` / `trimmed` / `empty`）；**不记录 prompt 原文、绝对路径或用户内容**。
+
+`run_stream_with_runtime()` 将该清单以 `prompt_manifest` 写入 owner-only 的 `traces/{run_id}.jsonl`。这使一次请求可逐层解释“为什么被加载、是否被裁剪”，又不会把模型上下文复制成另一份敏感日志。没有 Team memory 层；未来若接入新来源，必须映射为同一 `PromptLayer` 契约，而不是旁路拼接字符串。
+
+### 5.4 记忆注入策略
 
 ```
-固定注入：assemble_memory(include_durable=False) 只装配 recent.md
-按需注入：search_relevant_memories() 匹配 durable 条目，并用 FTS5 检索 episodes
+固定注入：assemble_memory(include_durable=False) 只装配 recent.md，标记为 memory_recent
+按需注入：retrieve_relevant_memory() 分别产生 memory_durable 与 memory_episodes；它们不会再合并后失去来源
 安全围栏：context 和项目记忆分别标注为历史参考，不能覆盖当前请求、SMITH.md 或系统规则
 ```
 
 编译产物是经过 Reviewer 审核的完整结构化 Markdown（context ≤4K、recent ≤8K、durable ≤10K）；durable 不再整份常驻，召回块另有 4K 上限。
+
+### 5.5 引擎运行控制合同
+
+`engine/execution/runtime_control.py` 把不可替换的运行标准投影为 system prompt 的最后一层。它不是 `workflow.md` 的替代品：workflow、identity 与 skill 仍可定义领域 SOP；控制合同只定义任何任务都成立的底线。
+
+- **执行边界**：`ToolPolicy` / `ToolGuard` 的裁决不可绕过；模型不得把被阻断或待审批的操作描述为已完成。
+- **失败行为**：工具被阻断、连续失败、输出截断与“只承诺下一步”的假完成，均由 ReAct 追加 engine 生成的 system 指令来纠偏。
+- **交付责任**：发生工具调用后，最终回复须覆盖结果、证据或改动、失败或遗漏；未完成时才给出下一步。
+
+合同只使用 engine 生成的固定文本，不拼接用户消息、项目 `SMITH.md`、记忆或工具输出。它位于可插拔内容之后以明确优先级，但真正的安全边界仍由代码执行，不依赖模型遵守提示词。
 
 ---
 

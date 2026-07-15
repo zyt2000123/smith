@@ -19,9 +19,13 @@ test("slash filtering keeps only general commands", () => {
   const skills = Array.from({ length: 8 }, (_, index) => skill(`skill-${index + 1}`));
   const items = filterSlash(buildSlashItems(skills), "/");
 
-  assert.equal(items.length, 14);
+  assert.equal(items.length, 15);
   assert.equal(
     items.some((item) => item.command === "/init"),
+    true,
+  );
+  assert.equal(
+    items.some((item) => item.command === "/resume"),
     true,
   );
   assert.equal(
@@ -111,6 +115,23 @@ test("init command creates project instructions once and reports the preserved f
   await runShellCommand("/init", context);
   assert.match(store.getState().statusLine, /Already exists:.+not changed/);
   assert.deepEqual(calls, ["/workspace/project", "/workspace/project"]);
+});
+
+test("init command surfaces the failure reason in the status line", async () => {
+  const store = createAppStore();
+  const context = {
+    bridge: {
+      initializeProject: async () => {
+        throw new Error("permission denied: .smith");
+      },
+    } as unknown as NodeBridge,
+    exit: () => {},
+    getState: store.getState,
+    workingDir: "/workspace/project",
+  };
+
+  await runShellCommand("/init", context);
+  assert.match(store.getState().statusLine, /Project initialization failed: permission denied: \.smith/);
 });
 
 test("model commands add relay-sharing profiles and use bridge contracts", async () => {

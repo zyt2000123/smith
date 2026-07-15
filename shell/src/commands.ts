@@ -1,5 +1,5 @@
 import type { SkillSummary } from "./api.js";
-import type { NodeBridge } from "./bridge.js";
+import { errorMessage, type NodeBridge } from "./bridge.js";
 import { createSetupDraft } from "./setup.js";
 import type { AppStore } from "./store.js";
 
@@ -95,6 +95,14 @@ export function buildSlashItems(_skills: SkillSummary[]): SlashItem[] {
       title: "/sessions",
       command: "/sessions",
       description: "Recent sessions.",
+      category: "Commands",
+    },
+    {
+      id: "resume",
+      kind: "command",
+      title: "/resume",
+      command: "/resume",
+      description: "Resume a recent session by ID.",
       category: "Commands",
     },
     {
@@ -221,8 +229,8 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
           ? `Created ${result.path}. Add your project instructions.`
           : `Already exists: ${result.path} (not changed).`,
       });
-    } catch {
-      state.set({ statusLine: "Project initialization failed. Review the project path and permissions." });
+    } catch (error) {
+      state.set({ statusLine: `Project initialization failed: ${errorMessage(error)}` });
     }
   },
   "/config": (_args, context) => openConfig(context),

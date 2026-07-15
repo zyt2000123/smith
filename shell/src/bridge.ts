@@ -36,7 +36,7 @@ import { type AppStore, TRANSCRIPT_LIMIT } from "./store.js";
 import { clearTerminal } from "./term.js";
 import { limitTranscript, removeApprovalNotice, restoreTranscript } from "./transcript-state.js";
 
-function errorMessage(error: unknown): string {
+export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
