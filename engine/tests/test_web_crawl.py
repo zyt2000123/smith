@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import asyncio
 from pathlib import Path
 
 
@@ -88,3 +89,12 @@ def test_change_detection_uses_content_hash_and_preserves_unchanged_records():
     assert not unchanged["changed"]
     assert changed["changed"]
     assert unchanged["content_hash"] == crawler._content_hash("Body")
+
+
+def test_crawler_exposes_explicit_render_policy_and_rejects_invalid_values():
+    crawler = _load_crawler()
+
+    render = crawler.TOOL_META["parameters"]["properties"]["render"]
+    assert render["enum"] == ["auto", "never", "always"]
+    result = asyncio.run(crawler.execute(url="https://example.com", render="sometimes"))
+    assert result == "Error: render must be 'auto', 'never', or 'always'"
