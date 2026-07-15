@@ -87,7 +87,10 @@ class RunState:
     run_id: str
     agent_id: str
     session_id: str | None = None
+    message_id: str | None = None
     identity_id: str | None = None
+    working_dir: str | None = None
+    forced_skill: str | None = None
     status: RunStatus = RunStatus.QUEUED
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
@@ -148,7 +151,10 @@ class RunState:
             "run_id": self.run_id,
             "agent_id": self.agent_id,
             "session_id": self.session_id,
+            "message_id": self.message_id,
             "identity_id": self.identity_id,
+            "working_dir": self.working_dir,
+            "forced_skill": self.forced_skill,
             "status": self.status.value,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -183,7 +189,10 @@ class RunState:
             run_id=run_id,
             agent_id=agent_id,
             session_id=_bounded_text(data.get("session_id")),
+            message_id=_bounded_text(data.get("message_id")),
             identity_id=_bounded_text(data.get("identity_id")),
+            working_dir=_bounded_text(data.get("working_dir"), limit=1024),
+            forced_skill=_bounded_text(data.get("forced_skill")),
             status=status,
             created_at=str(data.get("created_at") or _now()),
             updated_at=str(data.get("updated_at") or _now()),
@@ -223,7 +232,10 @@ class RunStateStore:
         *,
         agent_id: str,
         session_id: str | None = None,
+        message_id: str | None = None,
         identity_id: str | None = None,
+        working_dir: str | None = None,
+        forced_skill: str | None = None,
     ) -> RunState:
         path = self._path(run_id)
         if path.exists():
@@ -232,7 +244,10 @@ class RunStateStore:
             run_id=run_id,
             agent_id=_bounded_text(agent_id) or "unknown",
             session_id=_bounded_text(session_id),
+            message_id=_bounded_text(message_id),
             identity_id=_bounded_text(identity_id),
+            working_dir=_bounded_text(working_dir, limit=1024),
+            forced_skill=_bounded_text(forced_skill),
         )
         self.save(state)
         return state

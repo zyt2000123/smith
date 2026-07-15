@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 # is for explicit/idle maintenance; production turn finalization defers this
 # work when the runtime owns shared LLM clients.
 _MEMORY_MAINTENANCE_TIMEOUT_SECONDS = 900.0
+_COMPILE_PENDING_FILE = ".compile_pending"
+_DREAM_PENDING_FILE = ".dream_pending"
 
 
 @dataclass(frozen=True)
@@ -81,18 +83,32 @@ class MemoryMaintenanceService:
     async def run_compile(self, memory_dir: Path) -> bool:
         """Compile recent and durable memory for an explicit trigger."""
         async with self._lock_for(memory_dir):
-            return await self._run_compilation_unlocked(memory_dir)
+            completed = await self._run_compilation_unlocked(memory_dir)
+            if completed:
+                self._mark_completed("compile", memory_dir)
+            return completed
 
     async def run_dream(self, memory_dir: Path) -> bool:
         """Run Dream maintenance for an explicit trigger."""
         async with self._lock_for(memory_dir):
-            return await self._run_dream_unlocked(memory_dir)
+            completed = await self._run_dream_unlocked(memory_dir)
+            if completed:
+                self._mark_completed("dream", memory_dir)
+            return completed
 
     async def run_idle_maintenance(self, memory_dir: Path) -> bool:
-        """Run maintenance that is safe for idle/scheduled lifecycle ticks."""
+        """Retry only maintenance that was due or previously left pending."""
         async with self._lock_for(memory_dir):
-            compiled = await self._run_compilation_unlocked(memory_dir)
-            dreamed = await self._run_dream_unlocked(memory_dir)
+            compiled = True
+            dreamed = True
+            if self._is_pending("compile", memory_dir):
+                compiled = await self._run_compilation_unlocked(memory_dir)
+                if compiled:
+                    self._mark_completed("compile", memory_dir)
+            if self._is_pending("dream", memory_dir):
+                dreamed = await self._run_dream_unlocked(memory_dir)
+                if dreamed:
+                    self._mark_completed("dream", memory_dir)
             return compiled and dreamed
 
     async def _run_compilation_unlocked(self, memory_dir: Path) -> bool:
@@ -120,10 +136,12 @@ class MemoryMaintenanceService:
             return False
 
     async def _schedule_compilation(self, memory_dir: Path) -> bool:
+        self._mark_pending("compile", memory_dir)
         self._schedule_background("compile", memory_dir)
         return False
 
     async def _schedule_dream(self, memory_dir: Path) -> bool:
+        self._mark_pending("dream", memory_dir)
         self._schedule_background("dream", memory_dir)
         return False
 
@@ -155,12 +173,12 @@ class MemoryMaintenanceService:
     async def _run_background_compilation(self, memory_dir: Path) -> None:
         async with self._lock_for(memory_dir):
             if await self._run_compilation_unlocked(memory_dir):
-                atomic_write_text(memory_dir / ".compile_counter", "0")
+                self._mark_completed("compile", memory_dir)
 
     async def _run_background_dream(self, memory_dir: Path) -> None:
         async with self._lock_for(memory_dir):
             if await self._run_dream_unlocked(memory_dir):
-                atomic_write_text(memory_dir / ".dream_counter", "0")
+                self._mark_completed("dream", memory_dir)
 
     async def wait_for_pending_tasks(self, memory_dir: Path) -> None:
         """Wait for currently scheduled maintenance; primarily useful to callers/tests."""
@@ -195,6 +213,52 @@ class MemoryMaintenanceService:
             lock = asyncio.Lock()
             cls._locks[key] = lock
         return lock
+
+    @staticmethod
+    def _pending_path(kind: str, memory_dir: Path) -> Path:
+        if kind == "compile":
+            return memory_dir / _COMPILE_PENDING_FILE
+        if kind == "dream":
+            return memory_dir / _DREAM_PENDING_FILE
+        raise ValueError(f"unknown memory maintenance kind: {kind}")
+
+    @classmethod
+    def _mark_pending(cls, kind: str, memory_dir: Path) -> None:
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(cls._pending_path(kind, memory_dir), "1")
+
+    @classmethod
+    def _clear_pending(cls, kind: str, memory_dir: Path) -> None:
+        cls._pending_path(kind, memory_dir).unlink(missing_ok=True)
+
+    @classmethod
+    def _mark_completed(cls, kind: str, memory_dir: Path) -> None:
+        cls._clear_pending(kind, memory_dir)
+        atomic_write_text(memory_dir / f".{kind}_counter", "0")
+
+    @classmethod
+    def _is_pending(cls, kind: str, memory_dir: Path) -> bool:
+        if cls._pending_path(kind, memory_dir).is_file():
+            return True
+        try:
+            if kind == "compile":
+                from engine.memory.store import _COMPILE_INTERVAL
+
+                threshold = _COMPILE_INTERVAL
+            elif kind == "dream":
+                from engine.memory.dream import DREAM_INTERVAL
+
+                threshold = DREAM_INTERVAL
+            else:
+                raise ValueError(f"unknown memory maintenance kind: {kind}")
+            counter = int((memory_dir / f".{kind}_counter").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError):
+            # A malformed counter should be retried and repaired, never suppress
+            # maintenance indefinitely.
+            return True
+        return counter >= threshold
 
 
 @dataclass(frozen=True)

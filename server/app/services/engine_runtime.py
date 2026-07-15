@@ -141,6 +141,21 @@ def build_engine_runtime(
     return runtime, services
 
 
+def build_memory_maintenance_services() -> RuntimeServices:
+    """Build scheduler-safe services backed by process-scoped LLM clients."""
+    gate_config = resolve_llm_config(usage=LLMUsage.GATE)
+    background_config = resolve_llm_config(usage=LLMUsage.BACKGROUND)
+    background_llm = _llm_client_manager.get_for_config(background_config)
+    return RuntimeServices(
+        llm=background_llm,
+        gate_llm=_llm_client_manager.get_for_config(gate_config),
+        background_llm=background_llm,
+        tool_registry=ToolRegistry(),
+        skill_registry=SkillRegistry(),
+        owns_llm_clients=False,
+    )
+
+
 async def close_shared_llm_clients() -> None:
     """Close process-scoped LLM clients during server shutdown."""
     await _llm_client_manager.close()

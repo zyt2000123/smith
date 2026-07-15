@@ -36,6 +36,8 @@ TOOL_META = {
     "approval_policy": "always",
     "side_effect": "external",
     "idempotent": False,
+    "concurrency": "serial",
+    "execution_environment": "host",
 }
 
 MAX_OUTPUT = 10 * 1024  # 10KB

@@ -17,6 +17,10 @@ TOOL_META = {
         "required": [],
     },
     "path_args": ["path"],
+    "permission_level": "read",
+    "approval_policy": "never",
+    "side_effect": "none",
+    "execution_environment": "host",
 }
 
 MAX_ENTRIES = 300

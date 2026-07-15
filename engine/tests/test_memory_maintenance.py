@@ -141,6 +141,61 @@ def test_memory_idle_hook_uses_same_maintenance_service(tmp_path: Path) -> None:
     assert results == [True]
 
 
+def test_idle_maintenance_retries_pending_work_without_running_below_threshold(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fail_compile(self, memory_dir: Path) -> bool:
+        calls.append("compile")
+        return False
+
+    async def run() -> tuple[bool, bool]:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / ".compile_counter").write_text("5", encoding="utf-8")
+        service = MemoryMaintenanceService(StaticLLM())  # type: ignore[arg-type]
+        first = await service.run_idle_maintenance(memory_dir)
+        # A failed, due compilation remains pending; a future idle tick retries it.
+        second = await service.run_idle_maintenance(memory_dir)
+        return first, second
+
+    monkeypatch.setattr(MemoryMaintenanceService, "_run_compilation_unlocked", fail_compile)
+    first, second = asyncio.run(run())
+
+    assert (first, second) == (False, False)
+    assert calls == ["compile", "compile"]
+
+
+def test_idle_maintenance_skips_work_that_is_not_pending(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    async def unexpected_compile(self, memory_dir: Path) -> bool:
+        calls.append("compile")
+        return True
+
+    async def unexpected_dream(self, memory_dir: Path) -> bool:
+        calls.append("dream")
+        return True
+
+    async def run() -> bool:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / ".compile_counter").write_text("1", encoding="utf-8")
+        (memory_dir / ".dream_counter").write_text("1", encoding="utf-8")
+        return await MemoryMaintenanceService(StaticLLM()).run_idle_maintenance(memory_dir)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(MemoryMaintenanceService, "_run_compilation_unlocked", unexpected_compile)
+    monkeypatch.setattr(MemoryMaintenanceService, "_run_dream_unlocked", unexpected_dream)
+
+    assert asyncio.run(run()) is True
+    assert calls == []
+
+
 def test_memory_compilation_timeout_does_not_block_lifecycle(tmp_path: Path, monkeypatch) -> None:
     import engine.execution.memory_maintenance as memory_maintenance
 

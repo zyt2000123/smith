@@ -73,3 +73,23 @@ def test_project_instruction_route_delegates_to_agent_service() -> None:
     assert response.status_code == 200
     assert response.json() == {"path": "/workspace/project/.smith/SMITH.md", "created": True}
     assert calls == ["/workspace/project"]
+
+
+def test_resume_run_route_delegates_to_the_streaming_agent_service() -> None:
+    calls: list[str] = []
+
+    class FakeAgentService:
+        async def resume_run(self, run_id: str):
+            calls.append(run_id)
+            yield {"event": "done", "data": '{"run_id":"run-1","status":"completed"}'}
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_agent_service] = lambda: FakeAgentService()
+
+    with TestClient(app) as client:
+        response = client.post("/api/agent/runs/run-1/resume")
+
+    assert response.status_code == 200
+    assert "event: done" in response.text
+    assert calls == ["run-1"]

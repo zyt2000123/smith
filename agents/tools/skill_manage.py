@@ -53,6 +53,13 @@ TOOL_META = {
         },
         "required": ["action", "agent_id"],
     },
+    "is_write_tool": True,
+    "permission_level": "write",
+    "approval_policy": "policy",
+    "read_actions": ["list", "get", "versions"],
+    "side_effect": "write",
+    "concurrency": "serial",
+    "execution_environment": "host",
 }
 
 # Builtin skills directory — resolved relative to this file

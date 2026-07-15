@@ -195,6 +195,13 @@ class AgentService:
         ):
             yield event
 
+    async def resume_run(self, run_id: str) -> AsyncGenerator[dict, None]:
+        async for event in self.session_service.resume_run(
+            await self._profile_id(),
+            run_id,
+        ):
+            yield event
+
     async def list_skills(self):
         return await self.skill_service.list_skills(await self._profile_id())
 

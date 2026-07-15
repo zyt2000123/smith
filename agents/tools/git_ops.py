@@ -9,7 +9,6 @@ injection. Checks for sensitive files before staging.
 import os
 import re
 import subprocess
-import tempfile
 
 TOOL_META = {
     "name": "git_ops",
@@ -62,6 +61,13 @@ TOOL_META = {
     },
     "path_args": ["cwd", "path"],
     "list_path_args": ["files"],
+    "is_write_tool": True,
+    "permission_level": "write",
+    "approval_policy": "policy",
+    "read_actions": ["status", "diff", "discover"],
+    "side_effect": "external",
+    "concurrency": "serial",
+    "execution_environment": "host",
 }
 
 MAX_OUTPUT = 10 * 1024  # 10KB
@@ -253,8 +259,9 @@ async def execute(
         if err:
             return f"Error: {err}"
 
-        # Create worktree in a temp directory, not inside the repo
-        wt_base = os.path.join(tempfile.gettempdir(), "agent-smith-worktrees")
+        # Keep the worktree inside the selected repository workspace so the
+        # request-level path boundary also covers the new checkout.
+        wt_base = os.path.join(repo_dir, ".agent-smith-worktrees")
         os.makedirs(wt_base, exist_ok=True)
         # Use branch name (sanitized) as directory name
         safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", branch)

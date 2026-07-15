@@ -329,7 +329,15 @@ class ToolRegistry:
 
         defn, func = entry
         ledger = self._execution_ledger if defn.side_effect != "none" else None
-        idempotency_key = call.idempotency_key or call.id
+        idempotency_key = call.idempotency_key or (
+            ledger.idempotency_key_for(
+                call_id=call.id,
+                tool_name=tool_name,
+                arguments=call.arguments,
+            )
+            if ledger is not None
+            else call.id
+        )
         claimed = False
         if ledger is not None:
             decision = ledger.begin(

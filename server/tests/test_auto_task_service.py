@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,11 +17,30 @@ class FakeAutoTaskRepo:
     def __init__(self) -> None:
         self.updates: list[dict] = []
 
-    async def claim_running(self, task_id: str) -> bool:
+    async def claim_running(self, task_id: str) -> str | None:
+        return "lease-token"
+
+    async def finish_task(
+        self,
+        task_id: str,
+        status: str,
+        next_run_at: str | None,
+        lease_token: str,
+        *,
+        retry_count: int | None = None,
+    ) -> bool:
+        self.updates.append({
+            "task_id": task_id,
+            "status": status,
+            "next_run_at": next_run_at,
+            "lease_token": lease_token,
+            "retry_count": retry_count,
+        })
         return True
 
-    async def finish_task(self, task_id: str, status: str, next_run_at: str | None) -> None:
-        self.updates.append({"task_id": task_id, "status": status, "next_run_at": next_run_at})
+    async def renew_lease(self, task_id: str, lease_token: str) -> bool:
+        self.updates.append({"renewed_task_id": task_id, "lease_token": lease_token})
+        return True
 
     async def update(self, task_id: str, updates: dict):
         self.updates.append(dict(updates))
@@ -185,4 +205,42 @@ async def test_exhausted_retry_chain_resets_before_next_schedule(
     result = await service.run_auto_task(task)
 
     assert result.status == "failed"
-    assert {"retry_count": 0} in task_repo.updates
+    assert any(
+        update.get("task_id") == "task-1" and update.get("retry_count") == 0
+        for update in task_repo.updates
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_task_renews_its_lease_while_the_engine_is_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def slow_reply(request, runtime, services):
+        await asyncio.sleep(0.01)
+        return SimpleNamespace(text="finished")
+
+    monkeypatch.setattr(
+        auto_task_service_module,
+        "load_runtime_identity_catalog",
+        lambda: SimpleNamespace(resolve=lambda message: SimpleNamespace(identity_id="smith")),
+    )
+    monkeypatch.setattr(
+        auto_task_service_module,
+        "build_engine_runtime",
+        lambda *args, **kwargs: (object(), object()),
+    )
+    monkeypatch.setattr(auto_task_service_module, "engine_reply_with_runtime", slow_reply)
+    monkeypatch.setattr(auto_task_service_module, "_LEASE_RENEW_INTERVAL_SECONDS", 0.001)
+
+    task_repo = FakeAutoTaskRepo()
+    result = await AutoTaskService(task_repo, FakeProfileRepo(), FakeSessionRepo()).run_auto_task({
+        "id": "task-1",
+        "agent_id": "smith-id",
+        "title": "slow check",
+        "instruction": "check",
+        "trigger_type": "manual",
+        "trigger_config": "",
+    })
+
+    assert result.status == "completed"
+    assert any(update.get("renewed_task_id") == "task-1" for update in task_repo.updates)

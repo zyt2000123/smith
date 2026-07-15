@@ -26,6 +26,11 @@ TOOL_META = {
     },
     "path_args": ["path"],
     "is_write_tool": True,
+    "permission_level": "write",
+    "approval_policy": "policy",
+    "side_effect": "write",
+    "concurrency": "serial",
+    "execution_environment": "host",
 }
 
 

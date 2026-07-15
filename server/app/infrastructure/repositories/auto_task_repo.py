@@ -18,8 +18,8 @@ class AutoTaskRepo:
             "INSERT INTO auto_tasks "
             "(id, agent_id, title, description, trigger_type, trigger_config, "
             "instruction, enabled, status, next_run_at, run_count, retry_count, "
-            "max_retries, lease_until, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "max_retries, lease_until, lease_token, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 tid,
                 agent_id,
@@ -35,6 +35,7 @@ class AutoTaskRepo:
                 int(data.get("retry_count", 0)),
                 int(data.get("max_retries", 2)),
                 data.get("lease_until"),
+                data.get("lease_token"),
                 now,
             ),
         )
@@ -70,7 +71,7 @@ class AutoTaskRepo:
         for field in (
             "title", "description", "trigger_type", "trigger_config",
             "instruction", "status", "last_run_at", "next_run_at",
-            "retry_count", "max_retries", "lease_until",
+            "retry_count", "max_retries", "lease_until", "lease_token",
         ):
             if field in updates and updates[field] is not None:
                 set_parts.append(f"{field}=?")
@@ -105,31 +106,54 @@ class AutoTaskRepo:
         await db.commit()
         return True
 
-    async def claim_running(self, task_id: str) -> bool:
-        """CAS claim with a lease so crashed workers can be reclaimed."""
+    async def claim_running(self, task_id: str) -> str | None:
+        """Claim a task with an expiring, owner-bound execution lease."""
         db = await get_app_db()
         now = datetime.now(timezone.utc)
         now_text = now.isoformat()
         lease_until = (now + timedelta(minutes=15)).isoformat()
+        lease_token = uuid.uuid4().hex
         cursor = await db.execute(
-            "UPDATE auto_tasks SET status='running', lease_until=? "
+            "UPDATE auto_tasks SET status='running', lease_until=?, lease_token=? "
             "WHERE id=? AND (status != 'running' OR lease_until IS NULL "
             "OR lease_until <= ?)",
-            (lease_until, task_id, now_text),
+            (lease_until, lease_token, task_id, now_text),
+        )
+        await db.commit()
+        return lease_token if cursor.rowcount == 1 else None
+
+    async def renew_lease(self, task_id: str, lease_token: str) -> bool:
+        """Extend a live lease only when this worker still owns it."""
+        db = await get_app_db()
+        lease_until = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+        cursor = await db.execute(
+            "UPDATE auto_tasks SET lease_until=? "
+            "WHERE id=? AND status='running' AND lease_token=?",
+            (lease_until, task_id, lease_token),
         )
         await db.commit()
         return cursor.rowcount == 1
 
-    async def finish_task(self, task_id: str, status: str, next_run_at: str | None) -> None:
-        """Atomically set final status and increment run_count in SQL."""
+    async def finish_task(
+        self,
+        task_id: str,
+        status: str,
+        next_run_at: str | None,
+        lease_token: str,
+        *,
+        retry_count: int | None = None,
+    ) -> bool:
+        """Finish only the lease held by this worker and atomically update retries."""
         db = await get_app_db()
         now = datetime.now(timezone.utc).isoformat()
-        await db.execute(
-            "UPDATE auto_tasks SET status=?, last_run_at=?, next_run_at=?, lease_until=NULL, "
-            "run_count = run_count + 1 WHERE id=?",
-            (status, now, next_run_at, task_id),
+        cursor = await db.execute(
+            "UPDATE auto_tasks SET status=?, last_run_at=?, next_run_at=?, retry_count=COALESCE(?, retry_count), "
+            "lease_until=NULL, lease_token=NULL, run_count = run_count + 1 "
+            "WHERE id=? AND status='running' AND lease_token=?",
+            (status, now, next_run_at, retry_count, task_id, lease_token),
         )
         await db.commit()
+        return cursor.rowcount == 1
 
     async def list_due_tasks(self) -> list[dict]:
         """Find enabled tasks whose next_run_at <= now."""
@@ -230,5 +254,6 @@ class AutoTaskRepo:
             "retry_count": row["retry_count"],
             "max_retries": row["max_retries"],
             "lease_until": row["lease_until"],
+            "lease_token": row["lease_token"],
             "created_at": row["created_at"],
         }

@@ -167,3 +167,26 @@ class SessionRepo:
         )
         await db.commit()
         return {"id": mid, "session_id": session_id, "role": role, "content": content, "created_at": now}
+
+    async def discard_assistant_messages_after_user(
+        self,
+        session_id: str,
+        user_message_id: str,
+    ) -> int:
+        """Remove only the interrupted run's replies, never later conversation turns."""
+        db = await get_app_db()
+        rows = await db.execute_fetchall(
+            "SELECT rowid FROM messages WHERE session_id=? AND id=? AND role='user'",
+            (session_id, user_message_id),
+        )
+        if not rows:
+            return 0
+        cursor = await db.execute(
+            "DELETE FROM messages WHERE session_id=? AND role='assistant' "
+            "AND rowid > ? AND rowid < COALESCE(("
+            "SELECT MIN(rowid) FROM messages WHERE session_id=? AND role='user' AND rowid > ?"
+            "), 9223372036854775807)",
+            (session_id, rows[0]["rowid"], session_id, rows[0]["rowid"]),
+        )
+        await db.commit()
+        return cursor.rowcount

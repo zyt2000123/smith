@@ -4,7 +4,9 @@ import asyncio
 import importlib.util
 import json
 import os
+import sys
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 from engine.execution.agent_loop import _enabled_tools_from_config
@@ -82,6 +84,111 @@ def test_register_stores_security_metadata():
     assert defn.is_write_tool
     assert defn.permission_level == "write"
     assert defn.read_actions == frozenset({"get", "list"})
+
+
+def test_builtin_tools_declare_explicit_execution_contracts():
+    tools_dir = ROOT / "agents" / "tools"
+    for path in sorted(tools_dir.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        module = _load_tool_module(path.stem)
+        meta = module.TOOL_META
+        assert "side_effect" in meta, path.name
+        assert "approval_policy" in meta, path.name
+        assert "permission_level" in meta, path.name
+        assert "execution_environment" in meta, path.name
+
+    for name in ("write_file", "edit_file", "git_ops", "shell", "memory_ops", "skill_manage", "todo"):
+        meta = _load_tool_module(name).TOOL_META
+        assert meta["side_effect"] != "none", name
+
+
+def test_todo_persists_by_injected_session_file(tmp_path):
+    first_runtime = _load_tool_module("todo")
+    second_runtime = _load_tool_module("todo")
+    other_session = _load_tool_module("todo")
+    todo_file = tmp_path / "session-1.json"
+
+    async def run():
+        added = await first_runtime.execute(
+            action="add", text="audit item", todo_file=todo_file
+        )
+        restored = await second_runtime.execute(action="list", todo_file=todo_file)
+        isolated = await other_session.execute(
+            action="list", todo_file=tmp_path / "session-2.json"
+        )
+        return added, restored, isolated
+
+    added, restored, isolated = asyncio.run(run())
+
+    assert "Added task 1" in added
+    assert "audit item" in restored
+    assert isolated == "No tasks."
+
+
+def test_edit_file_enforces_its_injected_working_directory(tmp_path, monkeypatch):
+    edit_file = _load_tool_module("edit_file")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    allowed = work_dir / "notes.txt"
+    outside = tmp_path / "outside.txt"
+    allowed.write_text("before", encoding="utf-8")
+    outside.write_text("before", encoding="utf-8")
+
+    class Snapshot:
+        def track(self, path: str) -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "engine.snapshot",
+        SimpleNamespace(get_snapshot=lambda: Snapshot()),
+    )
+
+    async def run():
+        permitted = await edit_file.execute(
+            path=str(allowed),
+            old_string="before",
+            new_string="after",
+            _work_dir=str(work_dir),
+        )
+        rejected = await edit_file.execute(
+            path=str(outside),
+            old_string="before",
+            new_string="after",
+            _work_dir=str(work_dir),
+        )
+        return permitted, rejected
+
+    permitted, rejected = asyncio.run(run())
+
+    assert permitted.startswith("OK: edited")
+    assert allowed.read_text(encoding="utf-8") == "after"
+    assert "outside the allowed work directory" in rejected
+    assert outside.read_text(encoding="utf-8") == "before"
+
+
+def test_git_worktree_creation_stays_under_the_selected_repository(tmp_path, monkeypatch):
+    git_ops = _load_tool_module("git_ops")
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    recorded: list[tuple[list[str], str | None]] = []
+
+    def fake_run(args, cwd=None, timeout=30):
+        recorded.append((args, cwd))
+        return 0, "", ""
+
+    monkeypatch.setattr(git_ops, "_run_git", fake_run)
+
+    result = asyncio.run(
+        git_ops.execute(action="worktree_create", cwd=str(repo_dir), branch="feature/demo")
+    )
+
+    expected = repo_dir / ".agent-smith-worktrees" / "feature_demo"
+    assert str(expected) in result
+    assert recorded[-1] == (["worktree", "add", str(expected), "-b", "feature/demo"], str(repo_dir))
+
+
 
 
 def test_register_stores_rich_execution_contract():
@@ -427,6 +534,49 @@ def test_web_fetch_rejects_local_network_targets():
     assert "loopback" in web_fetch._validate_url("http://127.0.0.1:8000")
     assert "private network" in web_fetch._validate_url("http://10.0.0.1")
     assert "scheme 'file'" in web_fetch._validate_url("file:///etc/passwd")
+
+
+def test_web_fetch_rejects_redirects_to_local_network_targets():
+    web_fetch = _load_tool_module("web_fetch")
+
+    try:
+        web_fetch._validated_redirect_url("https://example.com/start", "http://127.0.0.1/admin")
+    except ValueError as exc:
+        assert "loopback" in str(exc)
+    else:
+        raise AssertionError("local redirect was accepted")
+
+
+def test_web_fetch_does_not_request_a_redirect_to_a_private_target(monkeypatch):
+    web_fetch = _load_tool_module("web_fetch")
+    calls: list[str] = []
+
+    class Connection:
+        def close(self) -> None:
+            return None
+
+    class RedirectResponse:
+        status = 302
+
+        @staticmethod
+        def getheader(name: str):
+            return "http://127.0.0.1/admin" if name == "Location" else None
+
+    def fake_addresses(host: str, port: int):
+        calls.append(f"resolve:{host}:{port}")
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+
+    def fake_request(parsed, infos, timeout):
+        calls.append(f"request:{parsed.hostname}")
+        return Connection(), RedirectResponse()
+
+    monkeypatch.setattr(web_fetch, "_safe_addresses", fake_addresses)
+    monkeypatch.setattr(web_fetch, "_request_pinned", fake_request)
+
+    result = web_fetch._fetch_pinned("https://example.com/start", 5)
+
+    assert result.startswith("URL Error: redirect blocked:")
+    assert calls == ["resolve:example.com:443", "request:example.com"]
 
 
 def test_web_fetch_plain_html_fallback_extracts_text():

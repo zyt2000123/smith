@@ -649,7 +649,6 @@ async def react_event_loop(
                     id=tc.id,
                     name=tc.name,
                     arguments=tc.arguments,
-                    idempotency_key=tc.id,
                 )
             )
             yield ExecutionEvent(EventType.TOOL_CALL_START, {"name": tc.name, "id": tc.id, "arguments": call.arguments})

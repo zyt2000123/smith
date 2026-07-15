@@ -1,5 +1,10 @@
 """Todo tool — track tasks during a session."""
 
+import json
+import os
+import tempfile
+from pathlib import Path
+
 TOOL_META = {
     "name": "todo",
     "description": (
@@ -25,43 +30,105 @@ TOOL_META = {
         },
         "required": ["action"],
     },
+    "permission_level": "write",
+    "approval_policy": "policy",
+    "side_effect": "write",
+    "concurrency": "serial",
+    "execution_environment": "host",
 }
 
-_todos: list[dict] = []
+_legacy_todos: list[dict] = []
 _ICONS = {"pending": "○", "in_progress": "◐", "done": "●"}
 
 
-def _fmt() -> str:
-    if not _todos:
+def _load_todos(todo_file: str | Path | None) -> list[dict] | None:
+    if todo_file is None:
+        return _legacy_todos
+    path = Path(todo_file)
+    if not path.is_file():
+        return []
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(loaded, list):
+        return None
+    todos: list[dict] = []
+    for entry in loaded:
+        if not isinstance(entry, dict):
+            return None
+        text = entry.get("text")
+        status = entry.get("status")
+        if not isinstance(text, str) or status not in _ICONS:
+            return None
+        todos.append({"text": text, "status": status})
+    return todos
+
+
+def _save_todos(todos: list[dict], todo_file: str | Path | None) -> None:
+    if todo_file is None:
+        _legacy_todos[:] = todos
+        return
+    path = Path(todo_file)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            json.dump(todos, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        path.chmod(0o600)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _fmt(todos: list[dict]) -> str:
+    if not todos:
         return "No tasks."
-    lines = [f"{i}. {_ICONS.get(t['status'],'?')} [{t['status']}] {t['text']}" for i, t in enumerate(_todos, 1)]
-    done = sum(1 for t in _todos if t["status"] == "done")
-    lines.append(f"\nProgress: {done}/{len(_todos)} done")
+    lines = [f"{i}. {_ICONS.get(t['status'],'?')} [{t['status']}] {t['text']}" for i, t in enumerate(todos, 1)]
+    done = sum(1 for t in todos if t["status"] == "done")
+    lines.append(f"\nProgress: {done}/{len(todos)} done")
     return "\n".join(lines)
 
 
-async def execute(*, action: str, text: str = "", index: int = 0, status: str = "pending") -> str:
+async def execute(
+    *, action: str, text: str = "", index: int = 0, status: str = "pending",
+    todo_file: str | Path | None = None,
+) -> str:
+    todos = _load_todos(todo_file)
+    if todos is None:
+        return "Error: Todo state is invalid; refusing to overwrite it"
     if action == "list":
-        return _fmt()
+        return _fmt(todos)
     if action == "add":
         if not text.strip():
             return "Error: text is required for add"
-        _todos.append({"text": text.strip(), "status": "pending"})
-        return f"Added task {len(_todos)}: {text.strip()}\n\n{_fmt()}"
+        todos.append({"text": text.strip(), "status": "pending"})
+        _save_todos(todos, todo_file)
+        return f"Added task {len(todos)}: {text.strip()}\n\n{_fmt(todos)}"
     if action == "update":
-        if index < 1 or index > len(_todos):
-            return f"Error: invalid index {index}. Tasks: 1-{len(_todos)}"
-        _todos[index - 1]["status"] = status
+        if index < 1 or index > len(todos):
+            return f"Error: invalid index {index}. Tasks: 1-{len(todos)}"
+        if status not in _ICONS:
+            return f"Error: invalid status '{status}'"
+        todos[index - 1]["status"] = status
         if text.strip():
-            _todos[index - 1]["text"] = text.strip()
-        return f"Updated task {index}.\n\n{_fmt()}"
+            todos[index - 1]["text"] = text.strip()
+        _save_todos(todos, todo_file)
+        return f"Updated task {index}.\n\n{_fmt(todos)}"
     if action == "remove":
-        if index < 1 or index > len(_todos):
-            return f"Error: invalid index {index}. Tasks: 1-{len(_todos)}"
-        removed = _todos.pop(index - 1)
-        return f"Removed: {removed['text']}\n\n{_fmt()}"
+        if index < 1 or index > len(todos):
+            return f"Error: invalid index {index}. Tasks: 1-{len(todos)}"
+        removed = todos.pop(index - 1)
+        _save_todos(todos, todo_file)
+        return f"Removed: {removed['text']}\n\n{_fmt(todos)}"
     if action == "clear":
-        n = len(_todos)
-        _todos.clear()
+        n = len(todos)
+        todos.clear()
+        _save_todos(todos, todo_file)
         return f"Cleared {n} task(s)."
     return f"Error: unknown action '{action}'"

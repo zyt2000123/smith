@@ -73,6 +73,29 @@ class FakeSessionRepo:
             "created_at": "2026-07-07T00:00:00Z",
         }
 
+    async def discard_assistant_messages_after_user(self, session_id: str, user_message_id: str) -> int:
+        target = next(
+            (index for index, message in enumerate(self.messages) if message["id"] == user_message_id),
+            -1,
+        )
+        if target < 0:
+            return 0
+        next_user = next(
+            (
+                index
+                for index, message in enumerate(self.messages[target + 1 :], start=target + 1)
+                if message["role"] == "user"
+            ),
+            len(self.messages),
+        )
+        before = len(self.messages)
+        self.messages = self.messages[: target + 1] + [
+            message
+            for message in self.messages[target + 1 : next_user]
+            if message["role"] != "assistant"
+        ] + self.messages[next_user:]
+        return before - len(self.messages)
+
 
 class FakeAgentProfileRepo:
     async def get(self, agent_id: str) -> dict | None:
@@ -282,6 +305,123 @@ async def test_stream_message_persists_token_usage_with_project_and_model(
         "output_tokens": 5,
         "total_tokens": 15,
     }
+
+
+@pytest.mark.asyncio
+async def test_resume_run_reuses_session_scope_and_discards_partial_reply(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from engine.execution.run_state import RunStateStore
+
+    captured: dict[str, object] = {}
+    repo = FakeSessionRepo()
+    repo.identity_id = "smith"
+    identities_dir = tmp_path / "identities"
+    identities_dir.mkdir()
+    repo.messages = [
+        {"id": "u-previous", "session_id": "sess-1", "role": "user", "content": "earlier", "created_at": "1"},
+        {"id": "a-previous", "session_id": "sess-1", "role": "assistant", "content": "done", "created_at": "2"},
+        {"id": "u-current", "session_id": "sess-1", "role": "user", "content": "continue audit", "created_at": "3"},
+        {"id": "a-partial", "session_id": "sess-1", "role": "assistant", "content": "partial", "created_at": "4"},
+    ]
+    store = RunStateStore(tmp_path)
+    store.create(
+        "run-1",
+        agent_id="smith-id",
+        session_id="sess-1",
+        message_id="u-current",
+        identity_id="smith",
+        working_dir="/tmp/project",
+        forced_skill="review",
+    )
+    store.transition("run-1", "running")
+    store.transition("run-1", "incomplete")
+
+    def fake_build_engine_runtime(agent_id: str, name: str, *, session_id: str | None = None):
+        return SimpleNamespace(agent_id=agent_id, agent_name=name, session_id=session_id), object()
+
+    async def fake_resume_events(request, runtime, services, run_id):
+        captured["request"] = request
+        captured["runtime_session"] = runtime.session_id
+        captured["run_id"] = run_id
+        yield SimpleNamespace(type=SimpleNamespace(value="run_started"), data={"run_id": run_id})
+        yield SimpleNamespace(type=SimpleNamespace(value="text_delta"), data={"text": "resumed"})
+        yield SimpleNamespace(type=SimpleNamespace(value="run_finished"), data={"status": "completed"})
+
+    def fake_resume_stream(request, runtime, services, run_id):
+        return FakeRun(fake_resume_events(request, runtime, services, run_id))
+
+    monkeypatch.setattr(session_service_module, "AGENT_DIR", tmp_path)
+    monkeypatch.setattr(session_service_module, "build_engine_runtime", fake_build_engine_runtime)
+    monkeypatch.setattr(
+        session_service_module,
+        "engine_resume_stream_with_runtime",
+        fake_resume_stream,
+    )
+
+    events = [
+        event
+        async for event in SessionService(
+            repo,
+            FakeAgentProfileRepo(),
+            identity_catalog=_identity_catalog(identities_dir),
+        ).resume_run("smith-id", "run-1")
+    ]
+
+    request = captured["request"]
+    assert request.message == "continue audit"
+    assert request.history == [
+        {"role": "user", "content": "earlier"},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert request.working_dir == "/tmp/project"
+    assert request.forced_skill == "review"
+    assert request.message_id == "u-current"
+    assert captured["runtime_session"] == "sess-1"
+    assert captured["run_id"] == "run-1"
+    assert [message["content"] for message in repo.messages] == ["earlier", "done", "continue audit"]
+    assert repo.saved_messages[-1] == ("sess-1", "assistant", "resumed")
+    assert json.loads(events[-1]["data"])["run_id"] == "run-1"
+
+
+@pytest.mark.asyncio
+async def test_resume_run_rejects_an_older_run_without_deleting_later_turns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from engine.execution.run_state import RunStateStore
+
+    repo = FakeSessionRepo()
+    repo.messages = [
+        {"id": "u-1", "session_id": "sess-1", "role": "user", "content": "first", "created_at": "1"},
+        {"id": "a-1", "session_id": "sess-1", "role": "assistant", "content": "partial", "created_at": "2"},
+        {"id": "u-2", "session_id": "sess-1", "role": "user", "content": "later", "created_at": "3"},
+        {"id": "a-2", "session_id": "sess-1", "role": "assistant", "content": "later reply", "created_at": "4"},
+    ]
+    store = RunStateStore(tmp_path)
+    store.create(
+        "run-1",
+        agent_id="smith-id",
+        session_id="sess-1",
+        message_id="u-1",
+        identity_id="smith",
+    )
+    store.transition("run-1", "running")
+    store.transition("run-1", "incomplete")
+    monkeypatch.setattr(session_service_module, "AGENT_DIR", tmp_path)
+
+    with pytest.raises(HTTPException, match="newer user turn") as exc_info:
+        _ = [
+            event
+            async for event in SessionService(
+                repo,
+                FakeAgentProfileRepo(),
+            ).resume_run("smith-id", "run-1")
+        ]
+
+    assert exc_info.value.status_code == 409
+    assert [message["id"] for message in repo.messages] == ["u-1", "a-1", "u-2", "a-2"]
 
 
 @pytest.mark.asyncio

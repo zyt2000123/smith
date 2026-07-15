@@ -12,10 +12,12 @@ Responsibilities:
 
 from __future__ import annotations
 
-import asyncio
-import logging
-from typing import AsyncGenerator, NamedTuple
 from pathlib import Path
+import asyncio
+import inspect
+import logging
+from hashlib import sha256
+from typing import AsyncGenerator, NamedTuple
 from uuid import uuid4
 
 from engine.identity_catalog import IdentityCatalog, IdentitySpec, RouteDecision
@@ -346,10 +348,13 @@ async def prepare_runtime(
         if request.working_dir
         else Path.cwd().resolve()
     )
+    if not wd.is_dir():
+        raise ValueError(f"working directory does not exist: {wd}")
 
     services.tool_registry.load_providers(runtime.agents_dir / "tools")
     services.tool_registry.bind_working_directory(wd)
     _bind_memory_ops_tool(services, state_dir)
+    _bind_todo_tool(services, state_dir, runtime.session_id)
     profile_config = await _load_profile_config(runtime)
     await _register_mcp_tools(profile_config, runtime, services)
 
@@ -364,8 +369,7 @@ async def prepare_runtime(
 
     # 工具全部注册后把定义绑给守卫，metadata-first 安全检查才能生效。
     if services.tool_guard is not None:
-        if request.working_dir:
-            services.tool_guard.set_allowed_dirs([wd])
+        services.tool_guard.set_working_directory(wd)
         services.tool_guard.bind_definitions(services.tool_registry.definitions())
 
     from common.config import BUILTIN_SKILLS_DIR, PATHS
@@ -423,6 +427,65 @@ def _bind_memory_ops_tool(services: RuntimeServices, state_dir: Path) -> None:
         return execute_with_memory_context
 
     services.tool_registry.wrap_tool("memory_ops", wrapper)
+
+
+def _bind_working_directory_tools(services: RuntimeServices, working_dir: Path) -> None:
+    """Bind one request workspace without mutating the server process CWD."""
+    root = working_dir.resolve()
+
+    def resolve_path(value: object) -> str:
+        path = Path(str(value)).expanduser()
+        return str(path if path.is_absolute() else root / path)
+
+    def wrapper_for(name: str):
+        def wrapper(func):
+            async def execute_in_workspace(**kwargs):
+                bound = dict(kwargs)
+                if name in {
+                    "read_file", "write_file", "edit_file", "grep", "glob_files",
+                    "list_dir", "read_pdf", "render_pdf_page",
+                }:
+                    if "path" in bound:
+                        bound["path"] = resolve_path(bound["path"])
+                    elif name in {"grep", "glob_files", "list_dir"}:
+                        bound["path"] = str(root)
+                elif name in {"shell", "git_ops"}:
+                    bound["cwd"] = resolve_path(bound.get("cwd") or root)
+                    if name == "git_ops" and bound.get("path"):
+                        bound["path"] = resolve_path(bound["path"])
+
+                if name in {"write_file", "edit_file"}:
+                    bound["_work_dir"] = str(root)
+
+                result = func(**bound)
+                return await result if inspect.isawaitable(result) else result
+
+            return execute_in_workspace
+        return wrapper
+
+    for tool_name in (
+        "read_file", "write_file", "edit_file", "grep", "glob_files", "list_dir",
+        "read_pdf", "render_pdf_page", "shell", "git_ops",
+    ):
+        services.tool_registry.wrap_tool(tool_name, wrapper_for(tool_name))
+
+
+def _bind_todo_tool(
+    services: RuntimeServices,
+    state_dir: Path,
+    session_id: str | None,
+) -> None:
+    """Persist Todo state per session rather than per imported tool module."""
+    token = sha256((session_id or "default").encode("utf-8")).hexdigest()
+    todo_file = state_dir / "todos" / f"{token}.json"
+
+    def wrapper(func):
+        async def execute_with_session_todos(**kwargs):
+            kwargs["todo_file"] = todo_file
+            return await func(**kwargs)
+        return execute_with_session_todos
+
+    services.tool_registry.wrap_tool("todo", wrapper)
 
 
 def _resolve_pipeline(
@@ -686,7 +749,10 @@ def run_stream_with_runtime(
             run_id,
             agent_id=runtime.agent_id,
             session_id=runtime.session_id,
+            message_id=request.message_id,
             identity_id=request.identity_id,
+            working_dir=request.working_dir,
+            forced_skill=request.forced_skill,
         )
     except (RunStateError, OSError, ValueError):
         logger.warning("failed to initialize run state (run=%s)", run_id, exc_info=True)
@@ -754,7 +820,7 @@ def resume_stream_with_runtime(
     """
     try:
         state_store = RunStateStore(runtime.profile_dir)
-        ledger = ToolExecutionLedger(runtime.profile_dir, run_id)
+        ledger = ToolExecutionLedger(runtime.profile_dir, run_id, replay_existing=True)
         state_store.resume(run_id)
     except Exception:
         logger.warning("failed to resume run (run=%s)", run_id, exc_info=True)

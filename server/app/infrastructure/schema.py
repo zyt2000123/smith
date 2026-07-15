@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS auto_tasks (
     retry_count INTEGER NOT NULL DEFAULT 0,
     max_retries INTEGER NOT NULL DEFAULT 2,
     lease_until TEXT,
+    lease_token TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -138,6 +139,7 @@ async def _ensure_auto_task_columns(db: aiosqlite.Connection) -> None:
         ("retry_count", "INTEGER NOT NULL DEFAULT 0"),
         ("max_retries", "INTEGER NOT NULL DEFAULT 2"),
         ("lease_until", "TEXT"),
+        ("lease_token", "TEXT"),
     ):
         if name not in columns:
             await db.execute(f"ALTER TABLE auto_tasks ADD COLUMN {name} {definition}")
@@ -158,7 +160,8 @@ async def _ensure_token_usage_columns(db: aiosqlite.Connection) -> None:
 async def _reset_stuck_auto_tasks(db: aiosqlite.Connection) -> None:
     """Reset tasks stuck at 'running' from a prior crash."""
     await db.execute(
-        "UPDATE auto_tasks SET status='idle', lease_until=NULL WHERE status='running'"
+        "UPDATE auto_tasks SET status='idle', lease_until=NULL, lease_token=NULL "
+        "WHERE status='running'"
     )
     await db.execute(
         "UPDATE auto_task_runs SET status='failed', error='interrupted by restart', "
