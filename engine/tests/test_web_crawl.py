@@ -98,3 +98,22 @@ def test_crawler_exposes_explicit_render_policy_and_rejects_invalid_values():
     assert render["enum"] == ["auto", "never", "always"]
     result = asyncio.run(crawler.execute(url="https://example.com", render="sometimes"))
     assert result == "Error: render must be 'auto', 'never', or 'always'"
+
+
+def test_download_retries_transient_failures_with_a_bounded_attempt_count(monkeypatch):
+    crawler = _load_crawler()
+    attempts = 0
+
+    def flaky_download(url: str, timeout: float):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary failure")
+        return 200, url, "text/html", "<title>Ready</title>"
+
+    monkeypatch.setattr(crawler, "_download", flaky_download)
+
+    result = crawler._download_with_retries("https://example.com", 5, retries=2)
+
+    assert result[0] == 200
+    assert attempts == 2
