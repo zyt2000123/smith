@@ -19,7 +19,6 @@ from engine.execution.compression import CONTEXT_DISPLAY_WINDOW, compact_history
 from engine.execution.run_state import RunStateError, RunStateStore, RunStatus
 from engine.execution.runtime import EngineRequest
 from engine.identity_catalog import IdentityCatalog, IdentityCatalogError
-from common.config import AGENT_DIR
 from engine.llm.model_config import resolve_llm_config
 from common.yaml_utils import YamlConfigError
 
@@ -43,11 +42,13 @@ class SessionService:
         *,
         identity_catalog: IdentityCatalog | None = None,
         token_stats_service: TokenStatsService | None = None,
+        run_state_store: RunStateStore | None = None,
     ) -> None:
         self.session_repo = session_repo
         self.agent_profile_repo = agent_profile_repo
         self.identity_catalog = identity_catalog
         self.token_stats_service = token_stats_service
+        self.run_state_store = run_state_store
 
     async def list_sessions(self, agent_id: str) -> list[SessionOut]:
         rows = await self.session_repo.list_by_agent(agent_id)
@@ -266,9 +267,15 @@ class SessionService:
             context_summary_cutoff=len(rows),
         )
 
-    async def list_messages(self, session_id: str, limit: int = 0, offset: int = 0) -> list[MessageOut]:
-        exists = await self.session_repo.exists_by_id(session_id)
-        if not exists:
+    async def list_messages(
+        self,
+        agent_id: str,
+        session_id: str,
+        limit: int = 0,
+        offset: int = 0,
+    ) -> list[MessageOut]:
+        session = await self.session_repo.get_owned(session_id, agent_id)
+        if session is None:
             raise HTTPException(404, "Session not found")
         rows = await self.session_repo.get_messages(session_id, limit=limit, offset=offset)
         return [MessageOut(**r) for r in rows]
@@ -328,8 +335,20 @@ class SessionService:
         run_id: str,
     ) -> AsyncGenerator[dict, None]:
         """Resume an incomplete run through the same SSE/session contract."""
+        stream = await self.prepare_resume_run(agent_id, run_id)
+        async for event in stream:
+            yield event
+
+    async def prepare_resume_run(
+        self,
+        agent_id: str,
+        run_id: str,
+    ) -> AsyncGenerator[dict, None]:
+        """Validate recovery and discard stale output before opening an SSE response."""
         try:
-            state = RunStateStore(AGENT_DIR).get(run_id)
+            if self.run_state_store is None:
+                raise HTTPException(503, "Run state is temporarily unavailable")
+            state = self.run_state_store.get(run_id)
         except (ValueError, RunStateError) as exc:
             raise HTTPException(404, "Run not found") from exc
         if state is None or state.agent_id != agent_id or not state.session_id:
@@ -369,12 +388,9 @@ class SessionService:
             rows,
             state.message_id,
         )
-        await self.session_repo.discard_assistant_messages_after_user(
-            state.session_id,
-            state.message_id,
-        )
-
-        async for event in self.stream_message(
+        # This completes ownership and identity validation synchronously, before
+        # recovery deletes any persisted partial assistant output.
+        stream = await self.prepare_stream_message(
             agent_id,
             state.session_id,
             user_message["content"],
@@ -384,8 +400,49 @@ class SessionService:
             _history_override=history,
             _resume_run_id=run_id,
             _message_id=state.message_id,
-        ):
-            yield event
+        )
+        await self.session_repo.discard_assistant_messages_after_user(
+            state.session_id,
+            state.message_id,
+        )
+        return stream
+
+    async def prepare_stream_message(
+        self,
+        agent_id: str,
+        session_id: str,
+        content: str,
+        context: str | None = None,
+        skill_name: str | None = None,
+        identity_id: str | None = None,
+        working_dir: str | None = None,
+        *,
+        _history_override: list[dict] | None = None,
+        _resume_run_id: str | None = None,
+        _message_id: str | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Validate the session before an HTTP caller commits to an SSE 200."""
+        selected_identity_id = await self._resolve_session_identity(
+            agent_id,
+            session_id,
+            content,
+            identity_id,
+        )
+        profile = await self.agent_profile_repo.get(agent_id)
+        profile_name = profile["name"] if profile else "Agent"
+        return self._stream_message(
+            agent_id,
+            session_id,
+            content,
+            selected_identity_id=selected_identity_id,
+            profile_name=profile_name,
+            context=context,
+            skill_name=skill_name,
+            working_dir=working_dir,
+            _history_override=_history_override,
+            _resume_run_id=_resume_run_id,
+            _message_id=_message_id,
+        )
 
     async def stream_message(
         self,
@@ -401,17 +458,37 @@ class SessionService:
         _resume_run_id: str | None = None,
         _message_id: str | None = None,
     ) -> AsyncGenerator[dict, None]:
-        """Yield SSE event dicts. Streams text chunks as they arrive from the engine."""
-        selected_identity_id = await self._resolve_session_identity(
+        stream = await self.prepare_stream_message(
             agent_id,
             session_id,
             content,
-            identity_id,
+            context=context,
+            skill_name=skill_name,
+            identity_id=identity_id,
+            working_dir=working_dir,
+            _history_override=_history_override,
+            _resume_run_id=_resume_run_id,
+            _message_id=_message_id,
         )
+        async for event in stream:
+            yield event
 
-        profile = await self.agent_profile_repo.get(agent_id)
-        profile_name = profile["name"] if profile else "Agent"
-
+    async def _stream_message(
+        self,
+        agent_id: str,
+        session_id: str,
+        content: str,
+        *,
+        selected_identity_id: str,
+        profile_name: str,
+        context: str | None = None,
+        skill_name: str | None = None,
+        working_dir: str | None = None,
+        _history_override: list[dict] | None = None,
+        _resume_run_id: str | None = None,
+        _message_id: str | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Yield SSE event dicts. Streams text chunks as they arrive from the engine."""
         if _resume_run_id is None:
             # Fetch recent history BEFORE saving the new message (avoids duplication)
             history = await self._recent_history(session_id)

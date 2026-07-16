@@ -1,0 +1,23 @@
+# The coding route deliberately uses a single, inspectable chain.  Pipeline
+# nodes may fall back to generic ReAct when a matching SKILL.md is not
+# installed, while gates still make the intermediate contract observable and
+# enforceable.
+route: coding
+
+steps:
+  - skill: understanding
+    gate: understanding
+  - skill: planning
+    gate: planning
+  - skill: architecture
+    gate: design
+    condition: needs_architecture
+  - skill: implementation
+    gate: contract_alignment
+  - skill: validation
+    gate: validation_llm
+
+backtrack:
+  architecture: planning
+  implementation: planning
+  validation: implementation

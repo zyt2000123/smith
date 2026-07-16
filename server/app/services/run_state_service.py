@@ -4,7 +4,6 @@ import logging
 
 from fastapi import HTTPException
 
-from common.config import AGENT_DIR
 from engine.execution.run_state import RunStateError, RunStateStore, RunStateTransitionError
 from engine.safety.approval import APPROVAL_BROKER
 
@@ -16,11 +15,11 @@ logger = logging.getLogger(__name__)
 class RunStateService:
     """Read-only server adapter for the engine-owned run state store."""
 
-    def __init__(self, store: RunStateStore | None = None) -> None:
+    def __init__(self, store: RunStateStore) -> None:
         self.store = store
 
     def get_run(self, agent_id: str, run_id: str) -> RunStateOut:
-        store = self.store or RunStateStore(AGENT_DIR)
+        store = self.store
         try:
             state = store.get(run_id)
         except ValueError:
@@ -43,7 +42,7 @@ class RunStateService:
         *,
         approved: bool,
     ) -> RunStateOut:
-        store = self.store or RunStateStore(AGENT_DIR)
+        store = self.store
         try:
             state = store.get(run_id)
         except (ValueError, RunStateError) as exc:

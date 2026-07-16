@@ -110,6 +110,7 @@ def test_react_loop_treats_approval_timeout_as_blocked_without_executing_tool(tm
     ]
     assert len(timeout_events) == 1
     assert timeout_events[0].data["blocked"] is True
+    assert timeout_events[0].data["approval_outcome"] == "timed_out"
 
 
 class _ApprovalLLM:

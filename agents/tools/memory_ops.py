@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 EpisodeRunner = Callable[[Path, str, list[dict]], Awaitable[Path | None]]
 
@@ -86,44 +86,29 @@ def _memory_dir(memory_dir: str | Path | None = None) -> Path:
     return Path.home() / ".agent-smith" / "agent" / "memory"
 
 
-def _engine_memory():
-    """Import engine.memory, adding the repo root to sys.path when this tool
-    module is loaded standalone (outside an installed engine package)."""
-    try:
-        import engine.memory
-    except ModuleNotFoundError:
-        import sys
-        root = str(Path(__file__).resolve().parents[2])
-        if root not in sys.path:
-            sys.path.insert(0, root)
-        import engine.memory
-    return engine.memory
-
-
-def _check_sensitive(text: str) -> str | None:
-    mem = _engine_memory()
-    if mem.contains_secret(text):
+def _check_sensitive(text: str, memory_api: Any) -> str | None:
+    if memory_api.contains_secret(text):
         return "Memory rejected: contains sensitive information"
-    if mem.contains_injection(text):
+    if memory_api.contains_injection(text):
         return "Memory rejected: contains instruction-injection patterns"
     return None
 
 
-def _sanitize_for_tool_output(text: str) -> str:
+def _sanitize_for_tool_output(text: str, memory_api: Any) -> str:
     """Keep legacy memory content safe before it re-enters model context."""
-    return _engine_memory().sanitize_memory_text(text)[0]
+    return memory_api.sanitize_memory_text(text)[0]
 
 
-def _safe_file_in_dir(root: Path, path: Path) -> Path | None:
-    return _engine_memory().safe_file_in_dir(root, path)
+def _safe_file_in_dir(root: Path, path: Path, memory_api: Any) -> Path | None:
+    return memory_api.safe_file_in_dir(root, path)
 
 
-def _safe_markdown_files(directory: Path) -> list[Path]:
-    return _engine_memory().safe_markdown_files(directory)
+def _safe_markdown_files(directory: Path, memory_api: Any) -> list[Path]:
+    return memory_api.safe_markdown_files(directory)
 
 
-def _sanitize_event_value_for_storage(value: str) -> str:
-    return _engine_memory().sanitize_event_value(value)
+def _sanitize_event_value_for_storage(value: str, memory_api: Any) -> str:
+    return memory_api.sanitize_event_value(value)
 
 
 async def execute(
@@ -139,15 +124,18 @@ async def execute(
     episode_id: str | None = None,
     memory_dir: str | Path | None = None,
     episode_runner: EpisodeRunner | None = None,
+    memory_api: Any | None = None,
     **_: object,
 ) -> str:
+    if memory_api is None:
+        return "Error: memory runtime capability was not provided"
     mem_dir = _memory_dir(memory_dir)
     mem_dir.mkdir(parents=True, exist_ok=True)
 
     if action == "search":
         if not query:
             return "Error: 'query' is required for search action"
-        return await _search(mem_dir, query)
+        return await _search(mem_dir, query, memory_api)
 
     elif action == "add":
         if not content:
@@ -162,22 +150,21 @@ async def execute(
             return "Error: 'evidence_type' is required for add action"
         if kind in {"plan", "task", "todo", "task_step"}:
             return "Error: plans and tasks belong in Todo/session state, not persistent memory"
-        mem = _engine_memory()
-        if kind not in mem.MANUAL_MEMORY_KINDS:
+        if kind not in memory_api.MANUAL_MEMORY_KINDS:
             return "Error: unsupported memory kind; record only stable evidence categories"
         if scope not in {"user", "project"}:
             return "Error: scope must be 'user' or 'project'"
-        if evidence_type not in mem.MANUAL_EVIDENCE_TYPES:
+        if evidence_type not in memory_api.MANUAL_EVIDENCE_TYPES:
             return "Error: unsupported evidence_type"
-        rejection = _check_sensitive(content) or _check_sensitive(evidence)
+        rejection = _check_sensitive(content, memory_api) or _check_sensitive(evidence, memory_api)
         if rejection:
             return rejection
-        return _append_event(mem_dir, content, evidence, kind, scope, evidence_type)
+        return _append_event(mem_dir, content, evidence, kind, scope, evidence_type, memory_api)
 
     elif action == "episode":
         if not topic:
             return "Error: 'topic' is required for episode action"
-        rejection = _check_sensitive(topic)
+        rejection = _check_sensitive(topic, memory_api)
         if rejection:
             return rejection
         return await _create_episode(mem_dir, topic, episode_runner=episode_runner)
@@ -187,15 +174,15 @@ async def execute(
             return "Error: 'episode_id' is required for update action"
         if not content:
             return "Error: 'content' is required for update action"
-        rejection = _check_sensitive(content)
+        rejection = _check_sensitive(content, memory_api)
         if rejection:
             return rejection
-        return _update_episode(mem_dir, episode_id, content)
+        return _update_episode(mem_dir, episode_id, content, memory_api)
 
     elif action == "remove":
         if not episode_id:
             return "Error: 'episode_id' is required for remove action"
-        return await _remove_episode(mem_dir, episode_id)
+        return await _remove_episode(mem_dir, episode_id, memory_api)
 
     return f"Error: unknown action '{action}'. Use: search, add, episode, update, remove"
 
@@ -207,13 +194,14 @@ def _append_event(
     kind: str,
     scope: str,
     evidence_type: str,
+    memory_api: Any,
 ) -> str:
     """Append structured candidate evidence for policy-governed compilation."""
     recent_file = mem_dir / "recent.jsonl"
     now = datetime.now(timezone.utc).isoformat()
     entry = {
-        "task": _sanitize_event_value_for_storage(f"[memory] {content}"),
-        "summary": _sanitize_event_value_for_storage(f"Evidence: {evidence}"),
+        "task": _sanitize_event_value_for_storage(f"[memory] {content}", memory_api),
+        "summary": _sanitize_event_value_for_storage(f"Evidence: {evidence}", memory_api),
         "timestamp": now,
         "kind": kind,
         "scope": scope,
@@ -225,24 +213,24 @@ def _append_event(
     return "OK: candidate evidence recorded for policy review; it is not durable memory"
 
 
-async def _search(mem_dir: Path, query: str) -> str:
-    safe_query = _sanitize_for_tool_output(query)
+async def _search(mem_dir: Path, query: str, memory_api: Any) -> str:
+    safe_query = _sanitize_for_tool_output(query, memory_api)
     keywords = safe_query.lower().split()
     if not keywords:
         return "No keywords provided"
 
     matches: list[str] = []
 
-    for name in _engine_memory().MEMORY_LAYER_FILES:
-        path = _safe_file_in_dir(mem_dir, mem_dir / name)
+    for name in memory_api.MEMORY_LAYER_FILES:
+        path = _safe_file_in_dir(mem_dir, mem_dir / name, memory_api)
         if path is not None:
-            content = _sanitize_for_tool_output(path.read_text(encoding="utf-8"))
+            content = _sanitize_for_tool_output(path.read_text(encoding="utf-8"), memory_api)
             if any(kw in content.lower() for kw in keywords):
                 matches.append(f"- [{name}] {content[:200]}")
 
     episodes_dir = mem_dir / "episodes"
-    for ep in _safe_markdown_files(episodes_dir):
-        content = _sanitize_for_tool_output(ep.read_text(encoding="utf-8"))
+    for ep in _safe_markdown_files(episodes_dir, memory_api):
+        content = _sanitize_for_tool_output(ep.read_text(encoding="utf-8"), memory_api)
         if any(kw in content.lower() for kw in keywords):
             matches.append(f"- [episode:{ep.stem}] {content[:120]}")
 
@@ -255,8 +243,8 @@ async def _search(mem_dir: Path, query: str) -> str:
                         entry = json.loads(line)
                         if not isinstance(entry, dict):
                             continue
-                        task = _sanitize_for_tool_output(str(entry.get("task", "?")))
-                        summary = _sanitize_for_tool_output(str(entry.get("summary", "?")))
+                        task = _sanitize_for_tool_output(str(entry.get("task", "?")), memory_api)
+                        summary = _sanitize_for_tool_output(str(entry.get("summary", "?")), memory_api)
                         content = f"{task} {summary}"
                         if not any(kw in content.lower() for kw in keywords):
                             continue
@@ -311,7 +299,7 @@ async def _create_episode(
         return f"Error generating episode: {type(e).__name__}: {e}"
 
 
-def _update_episode(mem_dir: Path, episode_id: str, content: str) -> str:
+def _update_episode(mem_dir: Path, episode_id: str, content: str, memory_api: Any) -> str:
     if Path(episode_id).name != episode_id:
         return "Error: invalid episode_id"
     ep_path = mem_dir / "episodes" / f"{episode_id}.md"
@@ -321,11 +309,11 @@ def _update_episode(mem_dir: Path, episode_id: str, content: str) -> str:
     if not ep_path.resolve().is_relative_to(ep_root):
         return "Error: invalid episode path"
 
-    _engine_memory().atomic_write_text(ep_path, content)
+    memory_api.atomic_write_text(ep_path, content)
     return f"OK: updated episode '{episode_id}'"
 
 
-async def _remove_episode(mem_dir: Path, episode_id: str) -> str:
+async def _remove_episode(mem_dir: Path, episode_id: str, memory_api: Any) -> str:
     if Path(episode_id).name != episode_id:
         return "Error: invalid episode_id"
     ep_path = mem_dir / "episodes" / f"{episode_id}.md"
@@ -337,14 +325,7 @@ async def _remove_episode(mem_dir: Path, episode_id: str) -> str:
 
     ep_path.unlink()
     try:
-        _engine_memory()  # ensure repo root is importable in standalone mode
-        from engine.memory.search import SearchIndex
-        idx = SearchIndex(mem_dir / "episodes")
-        await idx.open()
-        try:
-            await idx.remove_entry(episode_id)
-        finally:
-            await idx.close()
+        await memory_api.remove_episode_from_index(mem_dir, episode_id)
     except Exception:
         return f"OK: removed episode '{episode_id}' (search index update failed — will self-heal)"
     return f"OK: removed episode '{episode_id}'"

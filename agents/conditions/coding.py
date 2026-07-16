@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import re
 
-from engine.execution.pipeline_context import output_key
-
 
 def needs_architecture(ctx: dict) -> bool:
     """Skip architecture for small, single-module changes."""

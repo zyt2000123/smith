@@ -1,6 +1,6 @@
-"""Skill loader tool provider — loads a SKILL.md by name from the skills directory."""
+"""Skill loader tool provider — reads the runtime's registered skill catalog."""
 
-import os
+from collections.abc import Callable
 
 TOOL_META = {
     "name": "skill_load",
@@ -21,31 +21,18 @@ TOOL_META = {
     "execution_environment": "host",
 }
 
-# Default skills directory — resolved relative to this file
-_SKILLS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills")
+SkillLoader = Callable[[str], tuple[str | None, list[str]]]
 
 
-async def execute(*, name: str) -> str:
-    safe_name = os.path.basename(name)
-    skill_path = os.path.join(_SKILLS_DIR, safe_name, "SKILL.md")
+async def execute(*, name: str, skill_loader: SkillLoader | None = None) -> str:
+    safe_name = name.strip()
+    if not safe_name or "/" in safe_name or "\\" in safe_name:
+        return "Error: invalid skill name"
+    if skill_loader is None:
+        return "Error: runtime skill catalog was not provided"
 
-    if not os.path.isfile(skill_path):
-        available = []
-        if os.path.isdir(_SKILLS_DIR):
-            for entry in sorted(os.listdir(_SKILLS_DIR)):
-                candidate = os.path.join(_SKILLS_DIR, entry, "SKILL.md")
-                if os.path.isfile(candidate):
-                    available.append(entry)
+    content, available = skill_loader(safe_name)
+    if content is None:
         available_str = ", ".join(available) if available else "(none found)"
-        return (
-            f"Error: skill '{safe_name}' not found at {skill_path}\n"
-            f"Available skills: {available_str}"
-        )
-
-    try:
-        with open(skill_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except Exception as e:
-        return f"Error reading skill: {e}"
-
+        return f"Error: skill '{safe_name}' not found\nAvailable skills: {available_str}"
     return f"# Skill: {safe_name}\n\n{content}"

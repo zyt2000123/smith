@@ -34,6 +34,7 @@ const HELP_TEXT = [
   "- `/skill [name] [prompt]` / `/skills` — inspect or run a standard SKILL.md skill",
   "- `/mcp` — inspect configured MCP servers and tools",
   "- `/resume <id>` — resume session",
+  "- `/run resume [id]` — recover the last failed or interrupted run",
   "- `/compact` — switch to compact view; Ctrl+O toggles compact/transcript",
   "- `/exit` — quit",
 ].join("\n");
@@ -103,6 +104,14 @@ export function buildSlashItems(_skills: SkillSummary[]): SlashItem[] {
       title: "/resume",
       command: "/resume",
       description: "Resume a recent session by ID.",
+      category: "Commands",
+    },
+    {
+      id: "run",
+      kind: "command",
+      title: "/run resume [id]",
+      command: "/run resume",
+      description: "Recover the last failed or interrupted run.",
       category: "Commands",
     },
     {
@@ -209,6 +218,14 @@ async function resumeSession(args: string[], context: CommandContext): Promise<v
   if (session) await context.bridge.resumeSession(session);
 }
 
+async function resumeRun(args: string[], context: CommandContext): Promise<void> {
+  if (args[0] !== "resume" || args.length > 2) {
+    context.getState().set({ statusLine: "Usage: /run resume [run-id]" });
+    return;
+  }
+  await context.bridge.resumeRun(args[1]);
+}
+
 const COMMAND_HANDLERS: Record<string, CommandHandler> = {
   // process.exit 由 index.tsx 的 waitUntilExit() 在 Ink 卸载后统一触发
   "/exit": (_args, context) => context.exit(),
@@ -301,6 +318,7 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
     await context.bridge.clearCurrentSession();
   },
   "/resume": resumeSession,
+  "/run": resumeRun,
   "/help": (_args, context) => {
     const state = context.getState();
     state.pushSystemLine(HELP_TEXT);

@@ -19,7 +19,7 @@ test("slash filtering keeps only general commands", () => {
   const skills = Array.from({ length: 8 }, (_, index) => skill(`skill-${index + 1}`));
   const items = filterSlash(buildSlashItems(skills), "/");
 
-  assert.equal(items.length, 15);
+  assert.equal(items.length, 16);
   assert.equal(
     items.some((item) => item.command === "/init"),
     true,
@@ -36,6 +36,21 @@ test("slash filtering keeps only general commands", () => {
     items.some((item) => item.kind === "skill"),
     false,
   );
+});
+
+test("run resume delegates an explicit or retained run id to the bridge", async () => {
+  const store = createAppStore();
+  const calls: Array<string | undefined> = [];
+  const bridge = {
+    resumeRun: async (runId?: string) => {
+      calls.push(runId);
+    },
+  } as unknown as NodeBridge;
+
+  await runShellCommand("/run resume run-123", { bridge, exit: () => {}, getState: store.getState });
+  await runShellCommand("/run resume", { bridge, exit: () => {}, getState: store.getState });
+
+  assert.deepEqual(calls, ["run-123", undefined]);
 });
 
 test("new keeps the old session while clear delegates deletion", async () => {

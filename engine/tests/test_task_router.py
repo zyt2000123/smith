@@ -73,13 +73,13 @@ def test_smith_identity_routes_git_branch_requests_directly() -> None:
     assert decision.pipeline_id is None
 
 
-def test_smith_identity_routes_work_directly_without_removed_skill_pipelines() -> None:
+def test_smith_identity_routes_coding_work_through_the_shipped_pipeline() -> None:
     identities_dir = Path(__file__).resolve().parents[2] / "agents" / "identities"
     catalog = IdentityCatalog.load(identities_dir)
 
-    assert route_task("修复登录报错", catalog).pipeline_id is None
-    assert route_task("新增导出功能", catalog).pipeline_id is None
-    assert route_task("重构用户模块", catalog).pipeline_id is None
+    assert route_task("修复登录报错", catalog).pipeline_id == "coding"
+    assert route_task("新增导出功能", catalog).pipeline_id == "coding"
+    assert route_task("重构用户模块", catalog).pipeline_id == "coding"
 
 
 def test_eval_sensitive_positive():

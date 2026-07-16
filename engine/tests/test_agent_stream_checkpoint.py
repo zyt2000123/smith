@@ -587,9 +587,10 @@ def test_domain_gate_retry_hint_reaches_retry_attempt() -> None:
                 return GateResult("fail", "too vague", retry_hint="ADD-EVIDENCE-HINT")
             return GateResult("pass", "ok")
 
-    async def run() -> RecordingStreamingLLM:
+    async def run() -> tuple[RecordingStreamingLLM, list[ExecutionEvent]]:
         llm = RecordingStreamingLLM()
-        async for _ in run_agent_stream(
+        events: list[ExecutionEvent] = []
+        async for event in run_agent_stream(
             llm,
             "system prompt",
             "build a feature",
@@ -599,12 +600,39 @@ def test_domain_gate_retry_hint_reaches_retry_attempt() -> None:
             SkillChain([SkillNode("planning", RetryHintGate())]),
             FailureLoopGuard(),
         ):
-            pass
-        return llm
+            events.append(event)
+        return llm, events
 
-    llm = asyncio.run(run())
+    llm, events = asyncio.run(run())
     assert len(llm.calls) == 2
     first = "".join(str(m.get("content", "")) for m in llm.calls[0])
     second = "".join(str(m.get("content", "")) for m in llm.calls[1])
     assert "ADD-EVIDENCE-HINT" not in first
     assert "ADD-EVIDENCE-HINT" in second
+    assert [event.data["status"] for event in events if event.type is EventType.SKILL_END] == ["retry", "passed"]
+
+
+def test_pipeline_closes_the_started_skill_when_a_base_gate_blocks() -> None:
+    class RejectingBaseGate:
+        async def check(self, output: str, context: dict) -> GateResult:
+            return GateResult("retry", "missing required evidence")
+
+    async def run() -> list[ExecutionEvent]:
+        events: list[ExecutionEvent] = []
+        async for event in run_agent_stream(
+            RetryingStreamingFakeLLM(),
+            "system prompt",
+            "build a feature",
+            FakeToolRegistry(),
+            FakeSkillRegistry(),
+            FEATURE_ROUTE,
+            SkillChain([SkillNode("planning", PassingGate())], base_gates=[RejectingBaseGate()]),
+            FailureLoopGuard(),
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    assert [(event.type, event.data.get("status")) for event in events if event.type is EventType.SKILL_END] == [
+        (EventType.SKILL_END, "blocked"),
+    ]

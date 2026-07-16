@@ -102,6 +102,37 @@ class FakeAgentProfileRepo:
         return {"id": agent_id, "name": "Smith"}
 
 
+@pytest.mark.asyncio
+async def test_prepare_stream_message_validates_before_returning_a_generator(tmp_path: Path) -> None:
+    class MissingSessionRepo(FakeSessionRepo):
+        async def get_owned(self, session_id: str, agent_id: str) -> dict | None:
+            return None
+
+    service = SessionService(MissingSessionRepo(), FakeAgentProfileRepo(), identity_catalog=_identity_catalog(tmp_path))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await service.prepare_stream_message("smith-id", "missing", "hello")
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_messages_rejects_a_session_not_owned_by_the_agent() -> None:
+    class ForeignSessionRepo(FakeSessionRepo):
+        async def get_owned(self, session_id: str, agent_id: str) -> dict | None:
+            return None
+
+        async def get_messages(self, *args, **kwargs) -> list[dict]:
+            raise AssertionError("foreign session messages must not be read")
+
+    service = SessionService(ForeignSessionRepo(), FakeAgentProfileRepo())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await service.list_messages("smith-id", "foreign-session")
+
+    assert exc_info.value.status_code == 404
+
+
 def _identity_catalog(tmp_path: Path) -> IdentityCatalog:
     (tmp_path / "smith.yaml").write_text(
         """
@@ -352,7 +383,6 @@ async def test_resume_run_reuses_session_scope_and_discards_partial_reply(
     def fake_resume_stream(request, runtime, services, run_id):
         return FakeRun(fake_resume_events(request, runtime, services, run_id))
 
-    monkeypatch.setattr(session_service_module, "AGENT_DIR", tmp_path)
     monkeypatch.setattr(session_service_module, "build_engine_runtime", fake_build_engine_runtime)
     monkeypatch.setattr(
         session_service_module,
@@ -366,6 +396,7 @@ async def test_resume_run_reuses_session_scope_and_discards_partial_reply(
             repo,
             FakeAgentProfileRepo(),
             identity_catalog=_identity_catalog(identities_dir),
+            run_state_store=store,
         ).resume_run("smith-id", "run-1")
     ]
 
@@ -409,19 +440,56 @@ async def test_resume_run_rejects_an_older_run_without_deleting_later_turns(
     )
     store.transition("run-1", "running")
     store.transition("run-1", "incomplete")
-    monkeypatch.setattr(session_service_module, "AGENT_DIR", tmp_path)
-
     with pytest.raises(HTTPException, match="newer user turn") as exc_info:
         _ = [
             event
             async for event in SessionService(
                 repo,
                 FakeAgentProfileRepo(),
+                run_state_store=store,
             ).resume_run("smith-id", "run-1")
         ]
 
     assert exc_info.value.status_code == 409
     assert [message["id"] for message in repo.messages] == ["u-1", "a-1", "u-2", "a-2"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_resume_rejects_a_retired_identity_without_discarding_partial_reply(
+    tmp_path: Path,
+) -> None:
+    """Resume preflight must be read-only until the identity is known to be valid."""
+    from engine.execution.run_state import RunStateStore
+
+    repo = FakeSessionRepo()
+    repo.identity_id = "smith"
+    identities_dir = tmp_path / "identities"
+    identities_dir.mkdir()
+    repo.messages = [
+        {"id": "u-current", "session_id": "sess-1", "role": "user", "content": "continue audit", "created_at": "1"},
+        {"id": "a-partial", "session_id": "sess-1", "role": "assistant", "content": "partial", "created_at": "2"},
+    ]
+    store = RunStateStore(tmp_path)
+    store.create(
+        "run-1",
+        agent_id="smith-id",
+        session_id="sess-1",
+        message_id="u-current",
+        identity_id="retired",
+    )
+    store.transition("run-1", "running")
+    store.transition("run-1", "incomplete")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await SessionService(
+            repo,
+            FakeAgentProfileRepo(),
+            identity_catalog=_identity_catalog(identities_dir),
+            run_state_store=store,
+        ).prepare_resume_run("smith-id", "run-1")
+
+    assert exc_info.value.status_code == 422
+    assert [message["id"] for message in repo.messages] == ["u-current", "a-partial"]
 
 
 @pytest.mark.asyncio

@@ -9,9 +9,16 @@ gate here (or in a sibling domain directory) requires no engine change.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
-from engine.execution.gate import GateResult, LLMGate
-from engine.execution.pipeline_context import output_key
+
+@dataclass(frozen=True)
+class GateResult:
+    """Content-only gate decision; the engine adapts this duck-typed value."""
+
+    verdict: str
+    reason: str
+    retry_hint: str | None = None
 
 
 class UnderstandingGate:
@@ -86,9 +93,12 @@ class PlanningGate:
         )
 
 
-def planning_gate_with_llm() -> LLMGate:
-    return LLMGate(PlanningGate(),
-        "Verify this plan is substantive (not boilerplate). Does it have concrete, actionable steps specific to the task? Does each step have a real verification point?\n\nPlan output:\n{output}")
+class PlanningLLMGate(PlanningGate):
+    llm_prompt = (
+        "Verify this plan is substantive (not boilerplate). Does it have concrete, actionable "
+        "steps specific to the task? Does each step have a real verification point?\n\n"
+        "Plan output:\n{output}"
+    )
 
 
 class ReviewGate:
@@ -173,7 +183,7 @@ class ContractAlignmentGate:
 GATES = {
     "understanding": UnderstandingGate,
     "planning": PlanningGate,
-    "planning_llm": planning_gate_with_llm,
+    "planning_llm": PlanningLLMGate,
     "review": ReviewGate,
     "contract_alignment": ContractAlignmentGate,
 }

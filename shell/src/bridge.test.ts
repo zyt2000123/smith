@@ -4,6 +4,7 @@ import test from "node:test";
 import { NodeBridge } from "./bridge.js";
 import { MAX_QUEUED_MESSAGES } from "./queue.js";
 import { createAppStore } from "./store.js";
+import { createTurnEntry } from "./transcript-state.js";
 
 test("request errors keep details in the transcript without duplicating them in the status line", () => {
   const store = createAppStore();
@@ -207,6 +208,128 @@ test("a failed resume keeps the current session and removes a stale 404 target",
   );
   assert.equal(store.getState().inputLocked, false);
   globalThis.fetch = originalFetch;
+});
+
+test("resuming a recoverable run replaces the partial reply instead of duplicating it", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? "GET"} ${url}`);
+    if (url.endsWith("/api/agent/runs/run-1")) {
+      return new Response(
+        JSON.stringify({
+          run_id: "run-1",
+          agent_id: "agent-1",
+          session_id: "session-1",
+          status: "cancelled",
+          created_at: "now",
+          updated_at: "now",
+          event_seq: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.endsWith("/api/agent/sessions/session-1/messages")) {
+      return new Response(
+        JSON.stringify([
+          { id: "user-1", session_id: "session-1", role: "user", content: "fix it", created_at: "now" },
+          { id: "assistant-1", session_id: "session-1", role: "assistant", content: "partial", created_at: "now" },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.endsWith("/api/agent/runs/run-1/resume")) {
+      return new Response(
+        'event: run_started\ndata: {"run_id":"run-1"}\n\nevent: message\ndata: {"text":"fresh"}\n\nevent: done\ndata: {"run_id":"run-1"}\n\n',
+        {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        },
+      );
+    }
+    if (url.endsWith("/api/agent/sessions")) {
+      return new Response(
+        JSON.stringify([{ id: "session-1", agent_id: "agent-1", title: "work", created_at: "now", message_count: 1 }]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const session = { id: "session-1", agent_id: "agent-1", title: "work", created_at: "now", message_count: 1 };
+    const store = createAppStore();
+    store.getState().set({
+      baseUrl: "http://127.0.0.1:8140",
+      agent: { id: "agent-1", name: "Smith", role: "agent" },
+      sessions: [session],
+      recoverableRunId: "run-1",
+    });
+
+    await new NodeBridge(store).resumeRun();
+
+    const turn = store.getState().transcript.find((entry) => entry.kind === "turn");
+    assert.equal(turn?.kind === "turn" ? turn.assistantText : "", "fresh");
+    assert.equal(store.getState().recoverableRunId, null);
+    assert.equal(calls.includes("POST http://127.0.0.1:8140/api/agent/runs/run-1/resume"), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a rejected run resume preserves the existing partial reply", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/agent/runs/run-1")) {
+      return new Response(
+        JSON.stringify({
+          run_id: "run-1",
+          agent_id: "agent-1",
+          session_id: "session-1",
+          status: "incomplete",
+          created_at: "now",
+          updated_at: "now",
+          event_seq: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.endsWith("/api/agent/runs/run-1/resume")) {
+      return new Response(JSON.stringify({ detail: "identity is no longer available" }), {
+        status: 422,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const session = { id: "session-1", agent_id: "agent-1", title: "work", created_at: "now", message_count: 1 };
+    const store = createAppStore();
+    store.getState().set({
+      baseUrl: "http://127.0.0.1:8140",
+      agent: { id: "agent-1", name: "Smith", role: "agent" },
+      currentSession: session,
+      sessions: [session],
+      recoverableRunId: "run-1",
+      transcript: [
+        {
+          ...createTurnEntry("fix it"),
+          assistantText: "partial",
+          streaming: false,
+        },
+      ],
+    });
+
+    await new NodeBridge(store).resumeRun();
+
+    const turn = store.getState().transcript.find((entry) => entry.kind === "turn");
+    assert.equal(turn?.kind === "turn" ? turn.assistantText : "", "partial");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("changing a session model locks out session switches until the patch finishes", async () => {

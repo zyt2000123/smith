@@ -401,7 +401,9 @@ async def prepare_runtime(
 
     services.tool_registry.load_providers(runtime.agents_dir / "tools")
     services.tool_registry.bind_working_directory(wd)
+    _bind_snapshot_tools(services, runtime.session_id)
     _bind_memory_ops_tool(services, state_dir)
+    _bind_skill_manage_tool(services, state_dir)
     _bind_todo_tool(services, state_dir, runtime.session_id)
     profile_config = await _load_profile_config(runtime)
     await _register_mcp_tools(profile_config, runtime, services)
@@ -429,6 +431,7 @@ async def prepare_runtime(
         services.skill_registry.load_agent_skills(profile_skills)
     if identity.enabled_skills is not None:
         services.skill_registry.restrict_to(identity.enabled_skills)
+    _bind_skill_load_tool(services)
 
     from engine.memory.compile import assemble_memory
     from engine.memory.store import retrieve_relevant_memory
@@ -453,6 +456,7 @@ async def prepare_runtime(
         runtime_guidance=runtime_guidance,
         eval_guidance=eval_guidance,
         runtime_control=initial_runtime_control_prompt(),
+        output_style_path=runtime.agents_dir / "output_style.md",
         max_tokens=prompt_budget_for_llm(services.llm),
     )
 
@@ -470,6 +474,7 @@ async def prepare_runtime(
 
 def _bind_memory_ops_tool(services: RuntimeServices, state_dir: Path) -> None:
     memory_dir = state_dir / "memory"
+    memory_api = _MemoryToolApi()
 
     async def episode_runner(memory_dir: Path, topic: str, related: list[dict]):
         from engine.memory.compile import compact_episode
@@ -485,10 +490,94 @@ def _bind_memory_ops_tool(services: RuntimeServices, state_dir: Path) -> None:
         async def execute_with_memory_context(**kwargs):
             kwargs["memory_dir"] = memory_dir
             kwargs["episode_runner"] = episode_runner
+            kwargs["memory_api"] = memory_api
             return await func(**kwargs)
         return execute_with_memory_context
 
     services.tool_registry.wrap_tool("memory_ops", wrapper)
+
+
+class _MemoryToolApi:
+    """Engine-owned memory capability injected into the generic tool provider."""
+
+    def __init__(self) -> None:
+        from engine import memory
+
+        self.MANUAL_MEMORY_KINDS = memory.MANUAL_MEMORY_KINDS
+        self.MANUAL_EVIDENCE_TYPES = memory.MANUAL_EVIDENCE_TYPES
+        self.MEMORY_LAYER_FILES = memory.MEMORY_LAYER_FILES
+        self.contains_secret = memory.contains_secret
+        self.contains_injection = memory.contains_injection
+        self.sanitize_memory_text = memory.sanitize_memory_text
+        self.sanitize_event_value = memory.sanitize_event_value
+        self.safe_file_in_dir = memory.safe_file_in_dir
+        self.safe_markdown_files = memory.safe_markdown_files
+        self.atomic_write_text = memory.atomic_write_text
+
+    async def remove_episode_from_index(self, memory_dir: Path, episode_id: str) -> None:
+        from engine.memory.search import SearchIndex
+
+        index = SearchIndex(memory_dir / "episodes")
+        await index.open()
+        try:
+            await index.remove_entry(episode_id)
+        finally:
+            await index.close()
+
+
+def _bind_snapshot_tools(services: RuntimeServices, session_id: str | None) -> None:
+    """Inject session-scoped snapshots into generic write/edit tool content."""
+    from engine.snapshot import get_snapshot
+
+    tracker = get_snapshot(session_id or "default").track
+
+    def wrapper(func):
+        async def execute_with_snapshot(**kwargs):
+            kwargs["_snapshot_tracker"] = tracker
+            result = func(**kwargs)
+            return await result if inspect.isawaitable(result) else result
+
+        return execute_with_snapshot
+
+    for tool_name in ("write_file", "edit_file"):
+        services.tool_registry.wrap_tool(tool_name, wrapper)
+
+
+def _bind_skill_manage_tool(services: RuntimeServices, state_dir: Path) -> None:
+    """Inject profile-local skill storage into the content-layer manager."""
+    from engine.skill.store import SkillStore
+
+    skills_dir = state_dir / "skills"
+    store = SkillStore(skills_dir)
+
+    def wrapper(func):
+        async def execute_with_skill_storage(**kwargs):
+            kwargs["agent_skills_dir"] = skills_dir
+            kwargs["skill_store"] = store
+            result = func(**kwargs)
+            return await result if inspect.isawaitable(result) else result
+
+        return execute_with_skill_storage
+
+    services.tool_registry.wrap_tool("skill_manage", wrapper)
+
+
+def _bind_skill_load_tool(services: RuntimeServices) -> None:
+    """Expose only the same per-request registry used for prompt and execution."""
+    def load_skill(name: str) -> tuple[str | None, list[str]]:
+        skill = services.skill_registry.get(name)
+        available = sorted(summary["name"] for summary in services.skill_registry.list_summaries())
+        return (skill.content if skill is not None else None, available)
+
+    def wrapper(func):
+        async def execute_with_skill_catalog(**kwargs):
+            kwargs["skill_loader"] = load_skill
+            result = func(**kwargs)
+            return await result if inspect.isawaitable(result) else result
+
+        return execute_with_skill_catalog
+
+    services.tool_registry.wrap_tool("skill_load", wrapper)
 
 
 def _bind_working_directory_tools(services: RuntimeServices, working_dir: Path) -> None:
@@ -792,6 +881,19 @@ def _record_run_event(
                     reason=str(event.data.get("reason") or "Approval required"),
                 )
                 return
+            approval_outcome = str(event.data.get("approval_outcome") or "")
+            if approval_outcome in {"denied", "timed_out"}:
+                state = store.get(run_id)
+                if state is not None and state.status is RunStatus.WAITING_APPROVAL:
+                    approval_id = str(event.data.get("approval_id") or "")
+                    store.resolve_approval(
+                        run_id,
+                        approval_id,
+                        approved=False,
+                        event_type=event_type,
+                        reason=f"approval_{approval_outcome}",
+                    )
+                    return
             kwargs["clear_tool"] = True
         store.record_event(run_id, event_type, **kwargs)
     except (RunStateError, ValueError, TypeError):

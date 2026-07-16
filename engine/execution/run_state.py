@@ -291,7 +291,21 @@ class RunStateStore:
         self.save(state)
         return state
 
-    def resolve_approval(self, run_id: str, approval_id: str, *, approved: bool) -> RunState:
+    def resolve_approval(
+        self,
+        run_id: str,
+        approval_id: str,
+        *,
+        approved: bool,
+        event_type: str | None = None,
+        reason: str | None = None,
+    ) -> RunState:
+        """Clear a pending approval and return the run to its execution state.
+
+        ``event_type`` and ``reason`` let the engine record automatic
+        resolutions such as an approval timeout without pretending that the
+        user explicitly denied the request.
+        """
         state = self._require(run_id)
         if state.status is not RunStatus.WAITING_APPROVAL:
             raise RunStateTransitionError(
@@ -303,13 +317,44 @@ class RunStateStore:
         state.approval_tool = None
         state.approval_level = None
         state.approval_reason = None
-        state.record_event("approval_granted" if approved else "approval_denied")
+        resolution = "approval_granted" if approved else "approval_denied"
+        state.record_event(event_type or resolution)
         state.transition(
             RunStatus.RUNNING,
-            reason="approval_granted" if approved else "approval_denied",
+            reason=reason or resolution,
         )
         self.save(state)
         return state
+
+    def recover_interrupted(self) -> list[str]:
+        """Mark runs left active by a previous server process as resumable.
+
+        A live approval continuation only exists in that process's memory, so
+        neither a queued/running run nor a waiting approval can safely remain
+        active after startup.  ``CANCELLED`` is intentionally resumable and
+        preserves the existing ledger-based replay safeguards.
+        """
+        recovered: list[str] = []
+        for path in sorted(self.root.glob("*.json")):
+            run_id = path.stem
+            if not _RUN_ID_RE.fullmatch(run_id):
+                continue
+            state = self.get(run_id)
+            if state is None or state.status not in {
+                RunStatus.QUEUED,
+                RunStatus.RUNNING,
+                RunStatus.WAITING_APPROVAL,
+            }:
+                continue
+            state.approval_id = None
+            state.approval_tool = None
+            state.approval_level = None
+            state.approval_reason = None
+            state.record_event("run_interrupted", clear_skill=True, clear_tool=True)
+            state.transition(RunStatus.CANCELLED, reason="server_restarted")
+            self.save(state)
+            recovered.append(run_id)
+        return recovered
 
     def get(self, run_id: str) -> RunState | None:
         path = self._path(run_id)

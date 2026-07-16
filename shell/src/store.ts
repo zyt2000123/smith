@@ -82,6 +82,8 @@ export type AppState = {
   busy: boolean;
   compressing: boolean;
   runStartedAt: number | null;
+  /** Last non-completed run, retained so a disconnected Shell can resume it. */
+  recoverableRunId: string | null;
   pendingApproval: PendingApproval | null;
   approvalIndex: number;
   approvalResolving: boolean;
@@ -186,10 +188,19 @@ function applyStreamState(state: AppState, event: StreamEvent): Partial<AppState
     return {
       pendingApproval: null,
       approvalResolving: false,
+      recoverableRunId: event.status === "completed" ? null : (event.runId ?? state.recoverableRunId),
       toolActivity: applyToolActivity(state.toolActivity, event),
       transcript: state.pendingApproval
         ? removeApprovalNotice(transcript, state.pendingApproval.approvalId)
         : transcript,
+    };
+  }
+
+  if (event.type === "run_started") {
+    return {
+      recoverableRunId: event.runId || state.recoverableRunId,
+      toolActivity: applyToolActivity(state.toolActivity, event),
+      transcript: applyStreamEvent(state.transcript, event),
     };
   }
 
@@ -243,6 +254,7 @@ export function createAppStore(initialHistory: string[] = []) {
     busy: false,
     compressing: false,
     runStartedAt: null,
+    recoverableRunId: null,
     pendingApproval: null,
     approvalIndex: 0,
     approvalResolving: false,

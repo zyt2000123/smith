@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from .backtrack import FailureLoopGuard, FailureSignature
 from .events import EventType, ExecutionEvent, raw_text_delta
-from .gate import Gate, GateResult, LLMGate
+from .gate import Gate, GateResult, LLMGate, coerce_gate_result
 from .pipeline_context import (
     CTX_AGENT_ID,
     CTX_IDENTITY_ID,
@@ -143,6 +143,10 @@ async def run_pipeline(
                     if result.text:
                         yield ExecutionEvent(EventType.TEXT_DELTA, {"text": result.text})
                     _clear_checkpoint(context)
+                    yield ExecutionEvent(EventType.SKILL_END, {
+                        "skill": node.skill_name,
+                        "status": "incomplete" if result.incomplete_reason else "error",
+                    })
                     yield ExecutionEvent(EventType.DONE, {})
                     return
                 output = result.text
@@ -166,6 +170,7 @@ async def run_pipeline(
 
             if not base_passed:
                 _clear_checkpoint(context)
+                yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "blocked"})
                 yield ExecutionEvent(EventType.BLOCKED, {
                     "skill": node.skill_name,
                     "reason": base_result.reason if base_result else "base gate failed",
@@ -175,7 +180,7 @@ async def run_pipeline(
 
             if isinstance(node.gate, LLMGate):
                 node.gate.set_llm(gate_llm or llm)
-            gate_result = await node.gate.check(output, context)
+            gate_result = coerce_gate_result(await node.gate.check(output, context))
             yield ExecutionEvent(EventType.GATE_RESULT, {
                 "skill": node.skill_name, "verdict": gate_result.verdict, "reason": gate_result.reason,
             })
@@ -204,6 +209,7 @@ async def run_pipeline(
 
             if action == "blocked":
                 _clear_checkpoint(context)
+                yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "blocked"})
                 yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": gate_result.reason})
                 yield ExecutionEvent(EventType.DONE, {})
                 return
@@ -212,6 +218,7 @@ async def run_pipeline(
                 backtrack_count += 1
                 if backtrack_count > max_backtracks:
                     _clear_checkpoint(context)
+                    yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "blocked"})
                     yield ExecutionEvent(EventType.BLOCKED, {"skill": node.skill_name, "reason": "max backtracks"})
                     yield ExecutionEvent(EventType.DONE, {})
                     return
@@ -222,6 +229,7 @@ async def run_pipeline(
                     # 会重跑已通过的步骤且与 BACKTRACK 事件宣称的目标不符。
                     logger.warning("backtrack target %r for node %r not in chain", target, node.skill_name)
                     _clear_checkpoint(context)
+                    yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "blocked"})
                     yield ExecutionEvent(EventType.BLOCKED, {
                         "skill": node.skill_name, "reason": f"backtrack target {target!r} not found",
                     })
@@ -241,6 +249,7 @@ async def run_pipeline(
                 yield ExecutionEvent(EventType.PROVISIONAL_RETRACT, {
                     "provision_id": provision_id, "reason": "execution_error",
                 })
+            yield ExecutionEvent(EventType.SKILL_END, {"skill": node.skill_name, "status": "error"})
             # 进程内异常与 blocked/incomplete/failed 一样是终态：错误已上抛给
             # 调用方，重跑应从头开始。只有真正的进程崩溃（走不到这里）才留下
             # checkpoint，由 agent_loop 的 crash-resume 消费。
@@ -278,7 +287,7 @@ async def _check_base_gates(
     for gate in gates:
         if isinstance(gate, LLMGate):
             gate.set_llm(llm)
-        result = await gate.check(output, context)
+        result = coerce_gate_result(await gate.check(output, context))
         if result.verdict != "pass":
             return result
     return GateResult("pass", "base gates passed")

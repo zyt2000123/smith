@@ -10,6 +10,7 @@ import { CodeBlock, type CodeHighlighter } from "./code-block.js";
 import { splitMarkdownLayoutBlocks } from "./markdown-layout.js";
 import { renderMermaidDiagram, splitMarkdownBlocks } from "./mermaid.js";
 import { stripEmojiIcons } from "./output.js";
+import { skillPresentation } from "./skill-presentation.js";
 import { ACCENT, ASSISTANT, BORDER, ERROR, INFO, MUTED, SKILL, SUCCESS, WARNING } from "./theme.js";
 import type {
   SkillBlock,
@@ -315,21 +316,86 @@ function ToolGroupMessage({ group }: { group: ToolGroupBlock }) {
   );
 }
 
-function SkillMessage({ block }: { block: SkillBlock }) {
-  const color = block.state === "error" ? ERROR : SKILL;
-  const statusText = block.state === "running" ? "running" : block.state;
+const SKILL_AGENT_NAMES: Record<string, string> = {
+  understanding: "Explore",
+  planning: "Plan",
+  architecture: "Architect",
+  implementation: "Implement",
+  validation: "Verify",
+};
+
+function agentName(skillName: string): string {
+  return SKILL_AGENT_NAMES[skillName] ?? skillName;
+}
+
+function actionName(name: string): string {
+  const normalized = name.replace(/[_-]+/g, " ").trim();
+  if (!normalized) return "Run tool";
+  return normalized.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function SkillActivityMessage({
+  activity,
+  viewMode,
+}: {
+  activity: SkillBlock["activities"][number];
+  viewMode: TranscriptViewMode;
+}) {
+  const presentation = TOOL_PRESENTATION[activity.state];
+  const { text, hidden } = truncateLines(activity.summary, viewMode === "transcript" ? 3 : 1);
 
   return (
-    <Box marginTop={1} paddingLeft={2}>
-      <Text color={color}>◦ </Text>
-      <Text color={color} bold>
-        skill
-      </Text>
-      <Text color={INFO}> {block.name}</Text>
-      <Text color={MUTED}>
-        {"  "}
-        {statusText}
-      </Text>
+    <Box flexDirection="column" paddingLeft={2}>
+      <Box>
+        <Text color={presentation.color}>{presentation.marker} </Text>
+        <Text color={INFO}>{actionName(activity.name)}</Text>
+        {activity.hint ? <Text color={MUTED}> {truncate(activity.hint, 64)}</Text> : null}
+        <Text color={MUTED}> {presentation.label}</Text>
+      </Box>
+      {text ? <Text color={toolSummaryColor(activity.state)}> {text}</Text> : null}
+      {hidden > 0 ? (
+        <Text color={BORDER}>
+          {" "}
+          … {hidden} more line{hidden === 1 ? "" : "s"}
+        </Text>
+      ) : null}
+    </Box>
+  );
+}
+
+function SkillMessage({ block, viewMode }: { block: SkillBlock; viewMode: TranscriptViewMode }) {
+  const presentation = skillPresentation(block.state);
+  const color = presentation.tone === "error" ? ERROR : presentation.tone === "warning" ? WARNING : SUCCESS;
+  const active = block.state === "running" || block.state === "retry";
+  const activities = viewMode === "compact" ? block.activities.slice(-1) : block.activities;
+  const hiddenCount = Math.max(0, block.activities.length - activities.length);
+
+  return (
+    <Box borderColor={color} borderStyle="round" flexDirection="column" marginTop={1} paddingX={1}>
+      <Box>
+        <Text color={color}>{active ? "◉ " : "● "}</Text>
+        <Text color={INFO} bold>
+          {presentation.heading}
+        </Text>
+        <Text color={MUTED}>{viewMode === "compact" ? " (workflow step · Ctrl+O to expand)" : " (workflow step)"}</Text>
+      </Box>
+      <Box paddingLeft={1}>
+        <Text color={SKILL} bold>
+          {agentName(block.name)}
+        </Text>
+        <Text color={MUTED}> · {block.name}</Text>
+      </Box>
+      {activities.length > 0 ? (
+        activities.map((activity) => <SkillActivityMessage key={activity.id} activity={activity} viewMode={viewMode} />)
+      ) : (
+        <Text color={BORDER}> waiting for the first action…</Text>
+      )}
+      {hiddenCount > 0 ? (
+        <Text color={BORDER}>
+          {" "}
+          … {hiddenCount} earlier action{hiddenCount === 1 ? "" : "s"}
+        </Text>
+      ) : null}
     </Box>
   );
 }
@@ -396,7 +462,7 @@ function TurnView({
           case "tool_summary":
             return <ToolSummaryMessage key={block.id} block={block} />;
           case "skill":
-            return <SkillMessage key={block.id} block={block} />;
+            return <SkillMessage key={block.id} block={block} viewMode={viewMode} />;
           default:
             return null;
         }

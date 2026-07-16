@@ -130,16 +130,15 @@ async def stream_message(
     body: MessageCreate,
     svc: AgentService = Depends(get_agent_service),
 ):
-    return EventSourceResponse(
-        svc.stream_message(
-            session_id,
-            body.content,
-            context=body.context,
-            skill_name=body.skill_name,
-            identity_id=body.identity_id,
-            working_dir=body.working_dir,
-        )
+    stream = await svc.prepare_stream_message(
+        session_id,
+        body.content,
+        context=body.context,
+        skill_name=body.skill_name,
+        identity_id=body.identity_id,
+        working_dir=body.working_dir,
     )
+    return EventSourceResponse(stream)
 
 
 @router.get("/skills", response_model=list[SkillSummaryOut])
@@ -208,7 +207,8 @@ async def resume_run(
     run_id: str,
     svc: AgentService = Depends(get_agent_service),
 ):
-    return EventSourceResponse(svc.resume_run(run_id))
+    stream = await svc.prepare_resume_run(run_id)
+    return EventSourceResponse(stream)
 
 
 @router.post("/runs/{run_id}/approval", response_model=RunStateOut)

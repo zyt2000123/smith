@@ -73,3 +73,15 @@ test("terminal approval notices are removed when a run terminates", () => {
     false,
   );
 });
+
+test("failed runs retain their id for recovery while completed runs clear it", () => {
+  const store = createAppStore();
+
+  store.getState().applyEvent({ type: "run_started", runId: "run-1" });
+  store.getState().applyEvent({ type: "done", runId: "run-1", status: "failed" });
+  assert.equal(store.getState().recoverableRunId, "run-1");
+
+  store.getState().applyEvent({ type: "run_started", runId: "run-2" });
+  store.getState().applyEvent({ type: "done", runId: "run-2", status: "completed" });
+  assert.equal(store.getState().recoverableRunId, null);
+});

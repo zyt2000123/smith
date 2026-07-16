@@ -12,6 +12,7 @@ import {
   deleteSession,
   ensureAgentProfile,
   getLlmConfig,
+  getRun,
   getTokenStats,
   initializeProjectInstructions,
   type LlmConfigInput,
@@ -20,12 +21,14 @@ import {
   listRelayModels,
   listSessions,
   listSkills,
+  type RunState,
   resolveRunApproval,
   type Session,
   type StreamEvent,
   type StreamTerminalStatus,
   setLlmConfig,
   streamMessage,
+  streamRunResume,
   updateSessionModel,
 } from "./api.js";
 import { ensureLocalServer } from "./dev-server.js";
@@ -34,7 +37,7 @@ import { MAX_QUEUED_MESSAGES, type QueuedMessage } from "./queue.js";
 import { createSetupDraft } from "./setup.js";
 import { type AppStore, TRANSCRIPT_LIMIT } from "./store.js";
 import { clearTerminal } from "./term.js";
-import { limitTranscript, removeApprovalNotice, restoreTranscript } from "./transcript-state.js";
+import { limitTranscript, removeApprovalNotice, restartLatestTurn, restoreTranscript } from "./transcript-state.js";
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -555,6 +558,10 @@ export class NodeBridge {
       this.s.set({ statusLine: "Finish the current shell operation before resuming a session." });
       return;
     }
+    await this.loadSession(session);
+  }
+
+  private async loadSession(session: Session): Promise<boolean> {
     const { baseUrl } = this.s;
     this.s.set({ inputLocked: true, statusLine: `Loading ${session.id}…` });
     try {
@@ -580,6 +587,7 @@ export class NodeBridge {
         panel: "chat",
         statusLine: `Resumed ${session.id} (${messages.length} messages).`,
       });
+      return true;
     } catch (error) {
       const message = errorMessage(error);
       if (/HTTP 404\b/.test(message)) {
@@ -587,9 +595,84 @@ export class NodeBridge {
       }
       this.s.pushSystemLine(`Could not resume ${session.id}: ${message}`, "error");
       this.s.set({ statusLine: "Resume failed. The current session was kept." });
+      return false;
     } finally {
       this.s.set({ inputLocked: false });
     }
+  }
+
+  async resumeRun(requestedRunId?: string): Promise<void> {
+    if ((this.activeRequest && !this.activeRequest.signal.aborted) || this.s.compressing || this.s.inputLocked) {
+      this.s.set({ statusLine: "Finish the current shell operation before recovering a run." });
+      return;
+    }
+
+    const runId = requestedRunId ?? this.s.recoverableRunId;
+    if (!runId) {
+      this.s.set({ statusLine: "No recoverable run is known. Use /run resume <run-id>." });
+      return;
+    }
+
+    const session = await this.prepareRunRecovery(runId);
+    if (!session) return;
+
+    const controller = this.startRequest();
+    try {
+      await this.streamResumedRun(this.s.baseUrl, runId, controller.signal);
+      if (controller.signal.aborted) return;
+      this.s.closeTurn();
+      await this.refreshSessions(this.s.baseUrl, session, false, controller.signal);
+    } catch (error) {
+      if (!controller.signal.aborted) this.reportRequestError(error);
+    } finally {
+      this.finishRequest(controller);
+    }
+  }
+
+  private async prepareRunRecovery(runId: string): Promise<Session | null> {
+    this.s.set({ inputLocked: true, statusLine: `Checking run ${runId}…` });
+    try {
+      const run = await getRun(this.s.baseUrl, runId);
+      if (!this.isResumableRun(run)) return null;
+
+      const session = await this.sessionForRun(run, runId);
+      if (!session) return null;
+      if (this.s.currentSession?.id !== session.id && !(await this.loadSession(session))) return null;
+      return session;
+    } catch (error) {
+      this.s.pushSystemLine(`Could not recover ${runId}: ${errorMessage(error)}`, "error");
+      this.s.set({ statusLine: "Run recovery failed. The current session was kept." });
+      return null;
+    } finally {
+      this.s.set({ inputLocked: false });
+    }
+  }
+
+  private isResumableRun(run: RunState): boolean {
+    if (!run.session_id) {
+      this.s.set({ statusLine: `Run ${run.run_id} is missing its session and cannot be recovered.` });
+      return false;
+    }
+    if (new Set(["cancelled", "failed", "incomplete"]).has(run.status)) return true;
+
+    this.s.set({ statusLine: `Run ${run.run_id} cannot be recovered from ${run.status}.` });
+    return false;
+  }
+
+  private async sessionForRun(run: RunState, runId: string): Promise<Session | null> {
+    const sessionId = run.session_id;
+    if (!sessionId) return null;
+
+    let session = this.s.sessions.find((candidate) => candidate.id === sessionId);
+    if (!session) {
+      const sessions = await listSessions(this.s.baseUrl);
+      this.s.set({ sessions });
+      session = sessions.find((candidate) => candidate.id === sessionId);
+    }
+    if (session) return session;
+
+    this.s.set({ statusLine: `Run ${runId} refers to a session that is no longer available.` });
+    return null;
   }
 
   async sendMessage(text: string, skillName?: string): Promise<boolean> {
@@ -693,6 +776,47 @@ export class NodeBridge {
     skillName: string | undefined,
     signal: AbortSignal,
   ): Promise<void> {
+    const terminalStatus = await this.consumeStream(
+      streamMessage(baseUrl, session.id, text, {
+        skillName,
+        workingDir: process.env.SMITH_PROJECT_CWD?.trim() || process.cwd(),
+        signal,
+      }),
+      signal,
+    );
+    this.reportTerminalStatus(terminalStatus, signal);
+  }
+
+  private async streamResumedRun(baseUrl: string, runId: string, signal: AbortSignal): Promise<void> {
+    const terminalStatus = await this.consumeStream(
+      this.resetTranscriptWhenResumeStarts(streamRunResume(baseUrl, runId, { signal }), runId),
+      signal,
+    );
+    this.reportTerminalStatus(terminalStatus, signal);
+  }
+
+  private async *resetTranscriptWhenResumeStarts(
+    events: AsyncIterable<StreamEvent>,
+    runId: string,
+  ): AsyncGenerator<StreamEvent, void, void> {
+    let reset = false;
+    for await (const event of events) {
+      if (!reset && event.type === "run_started") {
+        this.s.set({
+          transcript: restartLatestTurn(this.s.transcript),
+          transcriptEpoch: this.s.transcriptEpoch + 1,
+          recoverableRunId: runId,
+        });
+        reset = true;
+      }
+      yield event;
+    }
+  }
+
+  private async consumeStream(
+    events: AsyncIterable<StreamEvent>,
+    signal: AbortSignal,
+  ): Promise<StreamTerminalStatus | null> {
     let terminalStatus: StreamTerminalStatus | null = null;
     const messageBatcher = createTextBatcher((batched) => this.s.applyEvent({ type: "message", text: batched }));
     const provisionalBatcher = createProvisionalBatcher((provisionId, batched) =>
@@ -700,11 +824,7 @@ export class NodeBridge {
     );
 
     try {
-      for await (const event of streamMessage(baseUrl, session.id, text, {
-        skillName,
-        workingDir: process.env.SMITH_PROJECT_CWD?.trim() || process.cwd(),
-        signal,
-      })) {
+      for await (const event of events) {
         if (signal.aborted) break;
         const status = applyBatchedStreamEvent(event, messageBatcher, provisionalBatcher, (next) =>
           this.s.applyEvent(next),
@@ -722,8 +842,13 @@ export class NodeBridge {
       }
     }
 
-    if (signal.aborted) return;
+    if (signal.aborted) return null;
 
+    return terminalStatus;
+  }
+
+  private reportTerminalStatus(terminalStatus: StreamTerminalStatus | null, signal: AbortSignal): void {
+    if (signal.aborted) return;
     if (!terminalStatus) throw new Error("SSE stream ended before completion.");
     if (terminalStatus === "completed") {
       this.s.set({ statusLine: "Ready. Type the next task or /help." });

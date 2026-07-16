@@ -8,8 +8,16 @@ own directory next to this one.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
-from engine.execution.gate import GateResult, LLMGate
+
+@dataclass(frozen=True)
+class GateResult:
+    """Content-only gate decision; the engine adapts this duck-typed value."""
+
+    verdict: str
+    reason: str
+    retry_hint: str | None = None
 
 
 class TestGate:
@@ -82,9 +90,12 @@ class ValidationGate:
         )
 
 
-def validation_gate_with_llm() -> LLMGate:
-    return LLMGate(ValidationGate(),
-        "Verify this validation report shows REAL evidence of execution (actual command outputs, test results, file changes). Not just claims of 'tests passed' without evidence.\n\nValidation output:\n{output}")
+class ValidationLLMGate(ValidationGate):
+    llm_prompt = (
+        "Verify this validation report shows REAL evidence of execution (actual command outputs, "
+        "test results, file changes). Not just claims of 'tests passed' without evidence.\n\n"
+        "Validation output:\n{output}"
+    )
 
 
 class RootCauseGate:
@@ -389,7 +400,7 @@ class TestDeliveryGate:
 
 GATES = {
     "test": TestGate,
-    "validation_llm": validation_gate_with_llm,
+    "validation_llm": ValidationLLMGate,
     "root_cause": RootCauseGate,
     "rubric": SkillRubricGate,
     "design": DesignGate,

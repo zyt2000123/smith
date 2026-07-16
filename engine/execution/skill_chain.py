@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import sys
 from dataclasses import dataclass
+from hashlib import sha1
 from pathlib import Path
 from typing import Callable
 
-from .gate import Gate
+from .gate import Gate, LLMGate
+from .pipeline_context import output_key
 
 logger = logging.getLogger(__name__)
 
@@ -72,16 +75,25 @@ def _scan_content_dir(content_dir: Path, attr: str, registry: dict) -> None:
     for py_file in sorted(content_dir.rglob("*.py")):
         if py_file.name.startswith("_"):
             continue
-        module_name = f"agent_smith_content_{py_file.parent.name}_{py_file.stem}"
+        module_name = f"agent_smith_content_{sha1(str(py_file.resolve()).encode()).hexdigest()}"
         try:
             spec = importlib.util.spec_from_file_location(module_name, py_file)
             if spec is None or spec.loader is None:
                 raise GateContentError(f"cannot load module spec for {py_file}")
             mod = importlib.util.module_from_spec(spec)
+            # Content files stay independent from engine imports.  Expose the
+            # stable output-key helper as an injected capability instead.
+            mod.output_key = output_key
+            # Some declarative content uses standard decorators (for example
+            # dataclasses). They resolve annotations through sys.modules,
+            # so register the transient module before executing it.
+            sys.modules[module_name] = mod
             spec.loader.exec_module(mod)
         except GateContentError:
+            sys.modules.pop(module_name, None)
             raise
         except Exception as exc:
+            sys.modules.pop(module_name, None)
             raise GateContentError(f"failed to load gate content {py_file}: {exc}") from exc
 
         mapping = getattr(mod, attr, None)
@@ -112,7 +124,9 @@ def _resolve_gate(
             f"valid gates: {', '.join(sorted(gates))}"
         )
     gate_factory = gates[gate_key]
-    return gate_factory() if callable(gate_factory) else gate_factory
+    gate = gate_factory() if callable(gate_factory) else gate_factory
+    llm_prompt = getattr(gate, "llm_prompt", None)
+    return LLMGate(gate, llm_prompt) if isinstance(llm_prompt, str) and llm_prompt else gate
 
 
 @dataclass

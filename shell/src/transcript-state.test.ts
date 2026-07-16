@@ -131,6 +131,20 @@ test("an unmatched tool_result creates a fallback block instead of being dropped
 test("skill start/end events pair by name", () => {
   let entries = freshTurn();
   entries = applyStreamEvent(entries, { type: "skill", name: "debug", status: "start" });
+  entries = applyStreamEvent(entries, {
+    type: "tool_call",
+    id: "t1",
+    name: "read_file",
+    hint: "engine/safety/tool_guard.py",
+  });
+  entries = applyStreamEvent(entries, {
+    type: "tool_result",
+    id: "t1",
+    error: false,
+    blocked: false,
+    preflight: false,
+    summary: "Read 120 lines",
+  });
   entries = applyStreamEvent(entries, { type: "skill", name: "debug", status: "end" });
 
   const turn = lastTurn(entries);
@@ -138,6 +152,49 @@ test("skill start/end events pair by name", () => {
   const block = turn.blocks[0];
   assert.ok(block?.type === "skill");
   assert.equal(block.state, "done");
+  assert.equal(block.activities.length, 1);
+  assert.deepEqual(block.activities[0], {
+    id: "t1",
+    name: "read_file",
+    hint: "engine/safety/tool_guard.py",
+    state: "success",
+    summary: "Read 120 lines",
+  });
+});
+
+test("workflow retries and blocks settle the active card without claiming success", () => {
+  let entries = freshTurn();
+  entries = applyStreamEvent(entries, { type: "skill", name: "planning", status: "start" });
+  entries = applyStreamEvent(entries, { type: "skill", name: "planning", status: "retry" });
+
+  let turn = lastTurn(entries);
+  assert.ok(turn.blocks[0]?.type === "skill");
+  assert.equal(turn.blocks[0]?.state, "retry");
+
+  entries = applyStreamEvent(entries, { type: "skill", name: "planning", status: "start" });
+  entries = applyStreamEvent(entries, { type: "skill", name: "planning", status: "blocked" });
+  entries = applyStreamEvent(entries, { type: "done", status: "incomplete" });
+
+  turn = lastTurn(entries);
+  assert.deepEqual(
+    turn.blocks.filter((block) => block.type === "skill").map((block) => block.state),
+    ["retry", "blocked"],
+  );
+  assert.equal(turn.streaming, false);
+});
+
+test("tool calls remain standalone when no workflow skill is running", () => {
+  let entries = freshTurn();
+  entries = applyStreamEvent(entries, {
+    type: "tool_call",
+    id: "t1",
+    name: "read_file",
+    hint: "engine/safety/tool_guard.py",
+  });
+
+  const turn = lastTurn(entries);
+  assert.equal(turn.blocks.length, 1);
+  assert.ok(turn.blocks[0]?.type === "tool");
 });
 
 test("done closes the streaming turn", () => {

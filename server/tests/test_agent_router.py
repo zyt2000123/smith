@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.routers.agent import get_agent_service, router
@@ -79,9 +79,13 @@ def test_resume_run_route_delegates_to_the_streaming_agent_service() -> None:
     calls: list[str] = []
 
     class FakeAgentService:
-        async def resume_run(self, run_id: str):
+        async def prepare_resume_run(self, run_id: str):
             calls.append(run_id)
-            yield {"event": "done", "data": '{"run_id":"run-1","status":"completed"}'}
+
+            async def stream():
+                yield {"event": "done", "data": '{"run_id":"run-1","status":"completed"}'}
+
+            return stream()
 
     app = FastAPI()
     app.include_router(router)
@@ -93,3 +97,38 @@ def test_resume_run_route_delegates_to_the_streaming_agent_service() -> None:
     assert response.status_code == 200
     assert "event: done" in response.text
     assert calls == ["run-1"]
+
+
+def test_resume_run_route_returns_preflight_errors_before_opening_sse() -> None:
+    class FakeAgentService:
+        async def prepare_resume_run(self, _run_id: str):
+            raise HTTPException(409, "Run cannot be resumed from completed")
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_agent_service] = lambda: FakeAgentService()
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/api/agent/runs/run-1/resume")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Run cannot be resumed from completed"
+
+
+def test_stream_route_returns_preflight_errors_before_opening_sse() -> None:
+    class FakeAgentService:
+        async def prepare_stream_message(self, *_args, **_kwargs):
+            raise HTTPException(404, "Session not found")
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_agent_service] = lambda: FakeAgentService()
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/agent/sessions/missing/messages/stream",
+            json={"content": "hello"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Session not found"
