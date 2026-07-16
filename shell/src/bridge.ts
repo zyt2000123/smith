@@ -609,7 +609,7 @@ export class NodeBridge {
 
     const runId = requestedRunId ?? this.s.recoverableRunId;
     if (!runId) {
-      this.s.set({ statusLine: "No recoverable run is known. Use /run resume <run-id>." });
+      this.s.set({ statusLine: "No recoverable run is known. Use /resume run <run-id>." });
       return;
     }
 

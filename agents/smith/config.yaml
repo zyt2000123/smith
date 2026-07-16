@@ -24,3 +24,4 @@ tools:
     - web_fetch
     - git_ops
     - todo
+    - render_ui

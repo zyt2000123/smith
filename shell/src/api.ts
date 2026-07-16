@@ -1,4 +1,5 @@
 import { localAuthHeaders } from "./auth.js";
+import { parseSmithUiPayload, type SmithUiPayload } from "./smith-ui-schema.js";
 
 export const CONTEXT_DISPLAY_WINDOW = 256_000;
 
@@ -145,6 +146,8 @@ export type PendingApproval = {
 
 export type StreamEvent =
   | { type: "message"; text: string }
+  | { type: "smith_ui"; payload: SmithUiPayload }
+  | { type: "smith_ui_fallback"; reason: string; code: string }
   | { type: "run_started"; runId: string }
   | ({ type: "approval_required" } & PendingApproval)
   | { type: "provisional_text_delta"; provisionId: string; text: string }
@@ -477,7 +480,7 @@ function parseSseChunk(rawChunk: string): ParsedSseChunk | null {
   }
 }
 
-type SseEventDecoder = (payload: Record<string, unknown>) => StreamEvent;
+type SseEventDecoder = (payload: Record<string, unknown>) => StreamEvent | null;
 
 function terminalStatus(payload: Record<string, unknown>): StreamTerminalStatus {
   if (payload.status === "failed" || payload.status === "incomplete") return payload.status;
@@ -511,8 +514,23 @@ function approvalPresentation(payload: Record<string, unknown>): ApprovalPresent
   };
 }
 
+function smithUiFallback(payload: Record<string, unknown>, defaultReason: string): StreamEvent {
+  const reason = typeof payload.reason === "string" && payload.reason ? payload.reason.slice(0, 500) : defaultReason;
+  const directCode = payload.code;
+  if (typeof directCode === "string" && directCode.length <= 16_000) {
+    return { type: "smith_ui_fallback", reason, code: directCode };
+  }
+  const code = JSON.stringify(payload, null, 2);
+  return { type: "smith_ui_fallback", reason, code: code.length <= 16_000 ? code : `${code.slice(0, 15_980)}\n…` };
+}
+
 const SSE_EVENT_DECODERS: Partial<Record<string, SseEventDecoder>> = {
   message: (payload) => ({ type: "message", text: String(payload.text ?? "") }),
+  smith_ui: (payload) => {
+    const parsed = parseSmithUiPayload(payload);
+    return parsed ? { type: "smith_ui", payload: parsed } : smithUiFallback(payload, "Unsupported smith-ui payload");
+  },
+  smith_ui_fallback: (payload) => smithUiFallback(payload, "Smith-ui validation failed"),
   run_started: (payload) => ({ type: "run_started", runId: String(payload.run_id ?? "") }),
   approval_required: (payload) => {
     const presentation = approvalPresentation(payload);

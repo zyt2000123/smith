@@ -15,11 +15,11 @@ function skill(name: string) {
   };
 }
 
-test("slash filtering keeps only general commands", () => {
+test("slash filtering exposes one resume command", () => {
   const skills = Array.from({ length: 8 }, (_, index) => skill(`skill-${index + 1}`));
   const items = filterSlash(buildSlashItems(skills), "/");
 
-  assert.equal(items.length, 16);
+  assert.equal(items.length, 15);
   assert.equal(
     items.some((item) => item.command === "/init"),
     true,
@@ -27,6 +27,10 @@ test("slash filtering keeps only general commands", () => {
   assert.equal(
     items.some((item) => item.command === "/resume"),
     true,
+  );
+  assert.equal(
+    items.some((item) => item.command === "/run resume"),
+    false,
   );
   assert.equal(
     items.some((item) => item.command === "/approve" || item.command === "/deny"),
@@ -38,7 +42,7 @@ test("slash filtering keeps only general commands", () => {
   );
 });
 
-test("run resume delegates an explicit or retained run id to the bridge", async () => {
+test("resume recovers the retained or explicitly named run", async () => {
   const store = createAppStore();
   const calls: Array<string | undefined> = [];
   const bridge = {
@@ -47,10 +51,35 @@ test("run resume delegates an explicit or retained run id to the bridge", async 
     },
   } as unknown as NodeBridge;
 
-  await runShellCommand("/run resume run-123", { bridge, exit: () => {}, getState: store.getState });
-  await runShellCommand("/run resume", { bridge, exit: () => {}, getState: store.getState });
+  await runShellCommand("/resume", { bridge, exit: () => {}, getState: store.getState });
+  await runShellCommand("/resume run run-123", { bridge, exit: () => {}, getState: store.getState });
 
-  assert.deepEqual(calls, ["run-123", undefined]);
+  assert.deepEqual(calls, [undefined, "run-123"]);
+});
+
+test("resume with a session ID keeps the existing session selection behavior", async () => {
+  const store = createAppStore();
+  const session = { id: "session-123", agent_id: "agent-1", title: "old", created_at: "now", message_count: 1 };
+  store.getState().set({ sessions: [session] });
+  const calls: string[] = [];
+  const bridge = {
+    resumeSession: async (target: { id: string }) => {
+      calls.push(target.id);
+    },
+  } as unknown as NodeBridge;
+
+  await runShellCommand("/resume session-12", { bridge, exit: () => {}, getState: store.getState });
+
+  assert.deepEqual(calls, ["session-123"]);
+});
+
+test("resume run requires an explicit run ID", async () => {
+  const store = createAppStore();
+  const bridge = { resumeRun: async () => {} } as unknown as NodeBridge;
+
+  await runShellCommand("/resume run", { bridge, exit: () => {}, getState: store.getState });
+
+  assert.equal(store.getState().statusLine, "Usage: /resume [session-id] | /resume run <run-id>");
 });
 
 test("new keeps the old session while clear delegates deletion", async () => {

@@ -15,6 +15,7 @@ from engine.execution.agent_loop import (
     reply_with_runtime as engine_reply_with_runtime,
 )
 from engine.execution.events import raw_text_delta
+from engine.execution.smith_ui import smith_ui_fallback, validate_smith_ui_call
 from engine.execution.compression import CONTEXT_DISPLAY_WINDOW, compact_history
 from engine.execution.run_state import RunStateError, RunStateStore, RunStatus
 from engine.execution.runtime import EngineRequest
@@ -541,6 +542,37 @@ class SessionService:
                     if delta is not None:
                         visible_raw_reply.append(delta)
                         yield sse("message", {"text": delta})
+                elif t == "smith_ui":
+                    try:
+                        ui_working_dir = Path(working_dir).resolve() if working_dir else None
+                        ui_call = {
+                            "spec": ev.data.get("spec"),
+                            "images": ev.data.get("images", []),
+                        }
+                        validated = (
+                            validate_smith_ui_call(ui_call, working_dir=ui_working_dir)
+                            if ev.data.get("version") == 1
+                            else None
+                        )
+                    except (OSError, ValueError):
+                        validated = None
+                    if validated is not None and validated.ok and validated.payload is not None:
+                        yield sse("smith_ui", validated.payload)
+                    else:
+                        reason = (
+                            validated.reason
+                            if validated is not None and validated.reason
+                            else "Invalid smith-ui event"
+                        )
+                        logger.warning("fell back from invalid smith-ui event for session=%s", session_id)
+                        yield sse("smith_ui_fallback", smith_ui_fallback(ev.data, reason))
+                elif t == "smith_ui_fallback":
+                    reason = ev.data.get("reason")
+                    code = ev.data.get("code")
+                    if isinstance(reason, str) and isinstance(code, str) and len(reason) <= 500 and len(code) <= 16_000:
+                        yield sse("smith_ui_fallback", {"reason": reason, "code": code})
+                    else:
+                        yield sse("smith_ui_fallback", smith_ui_fallback(ev.data, "Invalid smith-ui fallback"))
                 elif t == "provisional_text_delta":
                     provision_id = str(ev.data.get("provision_id", ""))
                     text = ev.data.get("text")

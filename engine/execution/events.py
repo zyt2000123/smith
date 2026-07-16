@@ -37,6 +37,8 @@ class EventType(str, Enum):
     PROVISIONAL_TEXT_DELTA = "provisional_text_delta"  # 技能链内未过门禁的草稿文本
     PROVISIONAL_COMMIT = "provisional_commit"        # 门禁通过，草稿转正
     PROVISIONAL_RETRACT = "provisional_retract"      # 门禁失败，撤回草稿
+    SMITH_UI = "smith_ui"                    # 经过白名单验证的终端组件树
+    SMITH_UI_FALLBACK = "smith_ui_fallback"  # 不能安全渲染的组件树，回退 JSON 代码块
     INCOMPLETE = "incomplete"               # 因预算或模型输出限制而未完成
     FAILED = "failed"                       # 执行异常，未能正常完成
     DONE = "done"                           # 执行完成

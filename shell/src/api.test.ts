@@ -35,6 +35,37 @@ test("SSE decoder exposes context usage and compression state", () => {
   });
 });
 
+test("SSE decoder accepts a validated smith-ui event", () => {
+  assert.deepEqual(
+    decodeSseEvent(
+      'event: smith_ui\ndata: {"version":1,"spec":{"root":"summary","elements":{"summary":{"type":"Heading","props":{"text":"Deployment","level":"h1"},"children":[]}}},"images":[]}',
+    ),
+    {
+      type: "smith_ui",
+      payload: {
+        version: 1,
+        spec: {
+          root: "summary",
+          elements: {
+            summary: { type: "Heading", props: { text: "Deployment", level: "h1" }, children: [] },
+          },
+        },
+        images: [],
+      },
+    },
+  );
+});
+
+test("SSE decoder sends an invalid smith-ui event to the CodeBlock fallback", () => {
+  const event = decodeSseEvent(
+    'event: smith_ui\ndata: {"version":1,"spec":{"root":"input","elements":{"input":{"type":"TextInput","props":{},"children":[]}}},"images":[]}',
+  );
+
+  assert.equal(event?.type, "smith_ui_fallback");
+  assert.equal(event?.type === "smith_ui_fallback" && event.reason, "Unsupported smith-ui payload");
+  assert.match(event?.type === "smith_ui_fallback" ? event.code : "", /TextInput/);
+});
+
 test("request timeout signals abort and identify timeout rather than user cancellation", async () => {
   const request = createTimeoutSignal(5);
   try {

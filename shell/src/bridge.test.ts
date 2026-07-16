@@ -332,6 +332,14 @@ test("a rejected run resume preserves the existing partial reply", async () => {
   }
 });
 
+test("run recovery points users to the consolidated resume command", async () => {
+  const store = createAppStore();
+
+  await new NodeBridge(store).resumeRun();
+
+  assert.equal(store.getState().statusLine, "No recoverable run is known. Use /resume run <run-id>.");
+});
+
 test("changing a session model locks out session switches until the patch finishes", async () => {
   const originalFetch = globalThis.fetch;
   let release!: (response: Response) => void;
