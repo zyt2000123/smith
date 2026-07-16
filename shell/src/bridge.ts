@@ -523,6 +523,12 @@ export class NodeBridge {
     return true;
   }
 
+  reloadContext(): boolean {
+    // PromptAssembler reads context files for each new run. A fresh session makes
+    // the reload boundary explicit while preserving the old session in history.
+    return this.startNewSession();
+  }
+
   async clearCurrentSession(): Promise<boolean> {
     if ((this.activeRequest && !this.activeRequest.signal.aborted) || this.s.compressing || this.s.inputLocked) {
       this.s.set({ statusLine: "Cancel the current task before clearing the session." });

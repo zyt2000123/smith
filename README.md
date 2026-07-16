@@ -70,6 +70,12 @@ uv run smith agent ensure
 uv run smith sessions list
 ```
 
+### Context files
+
+`~/.agent-smith/SMITH.md` is your user-wide instruction file: it applies to every Smith run. Use a repository's `.smith/SMITH.md` only for rules that belong to that project. Both files are read when Smith builds a run, so edits apply to the next request without restarting the backend.
+
+In the terminal, run `/reload` after editing context files to start a fresh session while keeping the prior session in history. The next task then starts with the current context.
+
 ## Architecture
 
 ```

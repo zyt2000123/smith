@@ -19,13 +19,17 @@ test("slash filtering exposes one resume command", () => {
   const skills = Array.from({ length: 8 }, (_, index) => skill(`skill-${index + 1}`));
   const items = filterSlash(buildSlashItems(skills), "/");
 
-  assert.equal(items.length, 14);
+  assert.equal(items.length, 15);
   assert.equal(
     items.some((item) => item.command === "/init"),
     true,
   );
   assert.equal(
     items.some((item) => item.command === "/resume"),
+    true,
+  );
+  assert.equal(
+    items.some((item) => item.command === "/reload"),
     true,
   );
   assert.equal(
@@ -130,6 +134,42 @@ test("new keeps the old session while clear delegates deletion", async () => {
   assert.equal(clearCalls, 1);
   assert.equal(clearStore.getState().currentSession, null);
   assert.deepEqual(clearStore.getState().sessions, []);
+});
+
+test("reload starts a fresh session so the next run reads the current context files", async () => {
+  const oldSession = {
+    id: "session-1",
+    agent_id: "agent-1",
+    title: "old",
+    created_at: "now",
+    message_count: 1,
+  };
+  const store = createAppStore();
+  store.getState().set({ currentSession: oldSession, sessions: [oldSession], inputValue: "draft" });
+  let reloadCalls = 0;
+  const bridge = {
+    reloadContext: () => {
+      reloadCalls += 1;
+      store.getState().startFreshSession();
+      return true;
+    },
+  } as unknown as NodeBridge;
+
+  await runShellCommand("/reload", { bridge, exit: () => {}, getState: store.getState });
+
+  assert.equal(reloadCalls, 1);
+  assert.equal(store.getState().currentSession, null);
+  assert.equal(store.getState().sessions[0]?.id, "session-1");
+  assert.equal(store.getState().statusLine, "Context reloaded. Send the next task to start fresh.");
+});
+
+test("reload rejects arguments", async () => {
+  const store = createAppStore();
+  const bridge = { reloadContext: () => true } as unknown as NodeBridge;
+
+  await runShellCommand("/reload now", { bridge, exit: () => {}, getState: store.getState });
+
+  assert.equal(store.getState().statusLine, "Usage: /reload");
 });
 
 test("clear keeps the current session when deletion fails", async () => {

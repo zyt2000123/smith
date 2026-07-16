@@ -24,6 +24,7 @@ type CommandHandler = (args: string[], context: CommandContext) => Promise<void>
 
 const HELP_TEXT = [
   "- `/new` — start a fresh session and keep the current session in history",
+  "- `/reload` — start fresh after changing SMITH.md or other context files",
   "- `/init` — create a project .smith/SMITH.md instruction template",
   "- `/clear` — delete the current session and start fresh",
   "- `/compress` — summarize and persist the active session context",
@@ -55,6 +56,14 @@ export function buildSlashItems(_skills: SkillSummary[]): SlashItem[] {
       title: "/new",
       command: "/new",
       description: "New session; keep history.",
+      category: "Commands",
+    },
+    {
+      id: "reload",
+      kind: "command",
+      title: "/reload",
+      command: "/reload",
+      description: "Start fresh with current context files.",
       category: "Commands",
     },
     {
@@ -221,6 +230,16 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
   "/exit": (_args, context) => context.exit(),
   "/new": async (_args, context) => {
     context.bridge.startNewSession();
+  },
+  "/reload": async (args, context) => {
+    const state = context.getState();
+    if (args.length > 0) {
+      state.set({ statusLine: "Usage: /reload" });
+      return;
+    }
+    if (context.bridge.reloadContext()) {
+      state.set({ statusLine: "Context reloaded. Send the next task to start fresh." });
+    }
   },
   "/init": async (args, context) => {
     const state = context.getState();
