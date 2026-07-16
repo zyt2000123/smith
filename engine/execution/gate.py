@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Mapping, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,28 @@ class GateResult:
 
 
 class Gate(Protocol):
-    async def check(self, output: str, context: dict) -> GateResult: ...
+    async def check(self, output: str, context: dict) -> GateResult | object: ...
+
+
+def coerce_gate_result(value: object) -> GateResult:
+    """Adapt declarative content decisions without importing engine types there."""
+    if isinstance(value, GateResult):
+        return value
+
+    if isinstance(value, Mapping):
+        verdict = value.get("verdict")
+        reason = value.get("reason")
+        retry_hint = value.get("retry_hint")
+    else:
+        verdict = getattr(value, "verdict", None)
+        reason = getattr(value, "reason", None)
+        retry_hint = getattr(value, "retry_hint", None)
+
+    if verdict not in {"pass", "fail", "retry"} or not isinstance(reason, str):
+        raise TypeError("gate must return verdict=pass|fail|retry and a string reason")
+    if retry_hint is not None and not isinstance(retry_hint, str):
+        raise TypeError("gate retry_hint must be a string when provided")
+    return GateResult(verdict, reason, retry_hint=retry_hint)
 
 
 class LLMGate:
@@ -42,7 +63,7 @@ class LLMGate:
 
     async def check(self, output: str, context: dict) -> GateResult:
         # First run the heuristic pre-filter
-        result = await self._inner.check(output, context)
+        result = coerce_gate_result(await self._inner.check(output, context))
         if result.verdict == "fail":
             return result  # pre-filter already caught it, no need for LLM
 

@@ -81,3 +81,81 @@ def test_server_lifespan_syncs_token_stats_before_serving_requests(
 
     with TestClient(main.app):
         assert calls == ["sync"]
+
+
+def test_server_lifespan_recovers_interrupted_runs_before_serving_requests(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeRunStateStore:
+        def __init__(self, _profile_dir: Path) -> None:
+            calls.append("store")
+
+        def recover_interrupted(self) -> list[str]:
+            calls.append("recover")
+            return ["run-1"]
+
+    class FakeTokenStatsService:
+        async def sync_from_traces(self) -> int:
+            return 0
+
+    async def fake_get_app_db():
+        return None
+
+    async def fake_close_db() -> None:
+        return None
+
+    async def fake_close_clients() -> None:
+        return None
+
+    async def fake_scheduler() -> None:
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(main, "get_local_token", lambda: "test-token")
+    monkeypatch.setattr(main, "get_app_db", fake_get_app_db)
+    monkeypatch.setattr(main, "close_db", fake_close_db)
+    monkeypatch.setattr(main, "close_shared_llm_clients", fake_close_clients)
+    monkeypatch.setattr(main, "run_scheduler", fake_scheduler)
+    monkeypatch.setattr(main, "load_runtime_identity_catalog", lambda force=False: None)
+    monkeypatch.setattr(main, "TokenStatsService", FakeTokenStatsService)
+    monkeypatch.setattr(main, "RunStateStore", FakeRunStateStore)
+
+    with TestClient(main.app):
+        assert calls == ["store", "recover"]
+
+
+def test_server_lifespan_survives_unavailable_run_state_storage(
+    monkeypatch,
+) -> None:
+    class UnavailableRunStateStore:
+        def __init__(self, _profile_dir: Path) -> None:
+            raise OSError("permission denied")
+
+    class FakeTokenStatsService:
+        async def sync_from_traces(self) -> int:
+            return 0
+
+    async def fake_get_app_db():
+        return None
+
+    async def fake_close_db() -> None:
+        return None
+
+    async def fake_close_clients() -> None:
+        return None
+
+    async def fake_scheduler() -> None:
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(main, "get_local_token", lambda: "test-token")
+    monkeypatch.setattr(main, "get_app_db", fake_get_app_db)
+    monkeypatch.setattr(main, "close_db", fake_close_db)
+    monkeypatch.setattr(main, "close_shared_llm_clients", fake_close_clients)
+    monkeypatch.setattr(main, "run_scheduler", fake_scheduler)
+    monkeypatch.setattr(main, "load_runtime_identity_catalog", lambda force=False: None)
+    monkeypatch.setattr(main, "TokenStatsService", FakeTokenStatsService)
+    monkeypatch.setattr(main, "RunStateStore", UnavailableRunStateStore)
+
+    with TestClient(main.app):
+        pass

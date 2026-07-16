@@ -1,6 +1,7 @@
 """Write file tool provider — writes content to a file within the work directory."""
 
 import os
+from collections.abc import Callable
 
 TOOL_META = {
     "name": "write_file",
@@ -41,7 +42,12 @@ def _is_within_workdir(path: str, work_dir: str) -> bool:
 
 
 async def execute(
-    *, path: str, content: str, append: bool = False, _work_dir: str = ""
+    *,
+    path: str,
+    content: str,
+    append: bool = False,
+    _work_dir: str = "",
+    _snapshot_tracker: Callable[[str], object] | None = None,
 ) -> str:
     if _work_dir and not _is_within_workdir(path, _work_dir):
         return (
@@ -57,11 +63,11 @@ async def execute(
         except OSError as e:
             return f"Error: cannot create directory {parent}: {e}"
 
-    # ponytail: snapshot before overwrite; skip on append (no data loss)
-    if not append:
+    # The engine injects this runtime capability per session. Content stays
+    # portable and never imports engine internals.
+    if not append and _snapshot_tracker is not None:
         try:
-            from engine.snapshot import get_snapshot
-            get_snapshot().track(resolved)
+            _snapshot_tracker(resolved)
         except Exception:
             pass
 

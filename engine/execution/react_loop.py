@@ -772,9 +772,11 @@ async def react_event_loop(
                         try:
                             approved = await broker.wait(approval_request)
                             denial = "User denied approval"
+                            approval_outcome = "denied"
                         except ApprovalTimeoutError:
                             approved = False
                             denial = "Approval timed out"
+                            approval_outcome = "timed_out"
                         if approved:
                             # The hard guard already passed. Continue with the
                             # exact suspended call instead of asking the model
@@ -795,6 +797,8 @@ async def react_event_loop(
                                 "reason": denial,
                                 "level": decision.level.value,
                                 "needs_confirmation": False,
+                                "approval_id": approval_request.approval_id,
+                                "approval_outcome": approval_outcome,
                             })
                             round_had_failure = True
                             consecutive_errors += 1

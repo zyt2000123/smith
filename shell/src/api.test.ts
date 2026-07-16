@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTimeoutSignal, decodeSseEvent, streamMessage } from "./api.js";
+import { createTimeoutSignal, decodeSseEvent, streamMessage, streamRunResume } from "./api.js";
 
 test("SSE decoder accepts standard data fields without a trailing space", () => {
   const event = decodeSseEvent('event: done\ndata:{"id":"message-1"}');
@@ -58,6 +58,38 @@ test("SSE decoder preserves an incomplete terminal status", () => {
   const event = decodeSseEvent('event: done\ndata: {"id":"message-1","status":"incomplete"}');
 
   assert.deepEqual(event, { type: "done", id: "message-1", status: "incomplete" });
+});
+
+test("SSE decoder retains the run id on a terminal event", () => {
+  assert.deepEqual(decodeSseEvent('event: done\ndata: {"id":"message-1","run_id":"run-1","status":"failed"}'), {
+    type: "done",
+    id: "message-1",
+    runId: "run-1",
+    status: "failed",
+  });
+});
+
+test("streamRunResume posts to the run resume endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; method: string }> = [];
+  globalThis.fetch = async (input, init) => {
+    requests.push({ url: String(input), method: init?.method ?? "GET" });
+    return new Response('event: done\ndata: {"run_id":"run-1"}\n\n', {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  };
+
+  try {
+    const events = [];
+    for await (const event of streamRunResume("http://127.0.0.1:8140", "run-1", { timeoutMs: 1_000 })) {
+      events.push(event);
+    }
+    assert.deepEqual(requests, [{ url: "http://127.0.0.1:8140/api/agent/runs/run-1/resume", method: "POST" }]);
+    assert.deepEqual(events, [{ type: "done", id: undefined, runId: "run-1", status: "completed" }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("SSE decoding accepts CR-only line endings", () => {

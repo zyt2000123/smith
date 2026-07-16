@@ -6,8 +6,26 @@ from pathlib import Path
 
 import aiosqlite
 import pytest
+import pytest_asyncio
 
 from app.services.token_stats_service import TokenStatsService
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def close_test_connections(monkeypatch: pytest.MonkeyPatch):
+    """Ensure each in-memory aiosqlite worker stops before pytest exits."""
+    connections: list[aiosqlite.Connection] = []
+    connect = aiosqlite.connect
+
+    async def tracked_connect(*args, **kwargs) -> aiosqlite.Connection:
+        connection = await connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(aiosqlite, "connect", tracked_connect)
+    yield
+    for connection in connections:
+        await connection.close()
 
 
 @pytest.mark.asyncio

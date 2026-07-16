@@ -26,10 +26,6 @@ TOOL_META = {
                 "enum": ["list", "get", "create", "edit", "patch", "versions", "rollback"],
                 "description": "The skill management operation to perform",
             },
-            "agent_id": {
-                "type": "string",
-                "description": "Agent identifier (used to locate skills directory)",
-            },
             "skill_name": {
                 "type": "string",
                 "description": "Skill name (required for get/create/edit/patch/versions/rollback)",
@@ -51,7 +47,7 @@ TOOL_META = {
                 "description": "Version id (required for rollback)",
             },
         },
-        "required": ["action", "agent_id"],
+        "required": ["action"],
     },
     "is_write_tool": True,
     "permission_level": "write",
@@ -66,14 +62,10 @@ TOOL_META = {
 _BUILTIN_SKILLS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills")
 
 
-def _agent_skills_dir(agent_id: str) -> Path:
-    try:
-        from common.config import AGENT_DIR
-    except ModuleNotFoundError:
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from common.config import AGENT_DIR
-    return AGENT_DIR / "skills"
+def _agent_skills_dir(agent_skills_dir: str | Path | None) -> Path:
+    if agent_skills_dir is None:
+        raise RuntimeError("agent skill storage was not provided by the runtime")
+    return Path(agent_skills_dir)
 
 
 def _is_builtin(skill_name: str) -> bool:
@@ -103,7 +95,7 @@ def _parse_frontmatter(raw: str) -> dict:
     return {}
 
 
-def _list_all_skills(agent_id: str) -> list[dict]:
+def _list_all_skills(agent_skills_dir: Path) -> list[dict]:
     """List builtin + agent-installed skills with metadata."""
     skills: list[dict] = []
 
@@ -122,7 +114,6 @@ def _list_all_skills(agent_id: str) -> list[dict]:
                 })
 
     # Agent-installed
-    agent_skills_dir = _agent_skills_dir(agent_id)
     if agent_skills_dir.is_dir():
         for child in sorted(agent_skills_dir.iterdir()):
             sf = child / "SKILL.md"
@@ -138,17 +129,17 @@ def _list_all_skills(agent_id: str) -> list[dict]:
     return skills
 
 
-def _get_skill_content(agent_id: str, skill_name: str) -> tuple[str, str]:
+def _get_skill_content(agent_skills_dir: Path, skill_name: str) -> tuple[str, str]:
     """Return (content, source) for a skill. Checks agent first, then builtin."""
     if not _is_safe_skill_name(skill_name):
         return "", ""
 
     # Agent-installed first
     try:
-        agent_path = _agent_skill_dir(_agent_skills_dir(agent_id), skill_name) / "SKILL.md"
+        agent_path = _agent_skill_dir(agent_skills_dir, skill_name) / "SKILL.md"
     except ValueError:
-        agent_path = None
-    if agent_path is not None and not agent_path.is_symlink() and agent_path.is_file():
+        return "", ""
+    if not agent_path.is_symlink() and agent_path.is_file():
         return agent_path.read_text(encoding="utf-8"), "agent"
 
     # Builtin
@@ -207,18 +198,21 @@ def _patch_section(raw: str, section_heading: str, new_content: str) -> str:
 async def execute(
     *,
     action: str,
-    agent_id: str,
     skill_name: str | None = None,
     content: str | None = None,
     section: str | None = None,
     section_content: str | None = None,
     version_id: str | None = None,
+    agent_skills_dir: str | Path | None = None,
+    skill_store: object | None = None,
 ) -> str:
-    # Lazy import to avoid circular deps at module level
-    from engine.skill.store import SkillStore
-
-    agent_skills_dir = _agent_skills_dir(agent_id)
-    store = SkillStore(agent_skills_dir)
+    try:
+        resolved_skills_dir = _agent_skills_dir(agent_skills_dir)
+    except RuntimeError as exc:
+        return f"Error: {exc}"
+    if skill_store is None:
+        return "Error: skill version store was not provided by the runtime"
+    store = skill_store
 
     if skill_name is not None and not _is_safe_skill_name(skill_name):
         return "Error: skill_name must be a single non-relative path component"
@@ -227,7 +221,7 @@ async def execute(
     # list
     # ------------------------------------------------------------------
     if action == "list":
-        skills = _list_all_skills(agent_id)
+        skills = _list_all_skills(resolved_skills_dir)
         if not skills:
             return "No skills found."
         lines = [f"Found {len(skills)} skill(s):\n"]
@@ -242,7 +236,7 @@ async def execute(
     if action == "get":
         if not skill_name:
             return "Error: 'skill_name' is required for get action"
-        raw, source = _get_skill_content(agent_id, skill_name)
+        raw, source = _get_skill_content(resolved_skills_dir, skill_name)
         if not raw:
             return f"Error: skill '{skill_name}' not found"
         return f"# Skill: {skill_name} [{source}]\n\n{raw}"
@@ -258,7 +252,10 @@ async def execute(
         if _is_builtin(skill_name):
             return f"Error: '{skill_name}' is a built-in skill name. Choose a different name."
 
-        skill_dir = _agent_skill_dir(agent_skills_dir, skill_name)
+        try:
+            skill_dir = _agent_skill_dir(resolved_skills_dir, skill_name)
+        except ValueError:
+            return "Error: skill directory must not escape agent skills storage"
         skill_file = skill_dir / "SKILL.md"
         if skill_file.is_symlink():
             return "Error: skill file must not be a symlink"
@@ -280,7 +277,10 @@ async def execute(
         if _is_builtin(skill_name):
             return "Error: built-in skills are read-only. Cannot edit."
 
-        skill_file = _agent_skill_dir(agent_skills_dir, skill_name) / "SKILL.md"
+        try:
+            skill_file = _agent_skill_dir(resolved_skills_dir, skill_name) / "SKILL.md"
+        except ValueError:
+            return "Error: skill directory must not escape agent skills storage"
         if skill_file.is_symlink():
             return "Error: skill file must not be a symlink"
         if not skill_file.is_file():
@@ -306,7 +306,10 @@ async def execute(
         if _is_builtin(skill_name):
             return "Error: built-in skills are read-only. Cannot patch."
 
-        skill_file = _agent_skill_dir(agent_skills_dir, skill_name) / "SKILL.md"
+        try:
+            skill_file = _agent_skill_dir(resolved_skills_dir, skill_name) / "SKILL.md"
+        except ValueError:
+            return "Error: skill directory must not escape agent skills storage"
         if skill_file.is_symlink():
             return "Error: skill file must not be a symlink"
         if not skill_file.is_file():

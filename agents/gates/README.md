@@ -1,8 +1,9 @@
 # Gates — pipeline 门禁内容层
 
-门禁实现是**内容**,不是引擎代码。引擎 (`engine/execution/gate.py`) 只提供
-`Gate` 接口、`GateResult`、`LLMGate` 包装器;具体的检查规则住在这里,按领域
-分目录组织,由 `engine.execution.skill_chain.load_gate_content()` 启动时扫描注册。
+门禁实现是**内容**,不是引擎代码。引擎只负责调用约定、将内容层返回的
+`verdict` / `reason` / `retry_hint` 适配为内部结果，并在有 `llm_prompt` 时自动
+注入 LLM gate。具体检查规则住在这里，按领域分目录组织，由
+`engine.execution.skill_chain.load_gate_content()` 启动时扫描注册。
 
 ## 目录约定
 
@@ -18,7 +19,11 @@ agents/conditions/      步骤条件(pipeline YAML 的 condition: 键)
 任意 `.py` 文件(`_` 开头的除外),导出模块级 `GATES` 字典:
 
 ```python
-from engine.execution.gate import GateResult
+class GateResult:
+    def __init__(self, verdict: str, reason: str, retry_hint: str | None = None):
+        self.verdict = verdict
+        self.reason = reason
+        self.retry_hint = retry_hint
 
 class MyGate:
     async def check(self, output: str, context: dict) -> GateResult:
@@ -32,8 +37,10 @@ class MyGate:
 GATES = {"my_gate": MyGate}
 ```
 
+- 不要从 `engine`、`server` 或 `common` 导入。内容文件可直接调用运行时注入的
+  `output_key("planning")` 读取某个步骤产物。
 - `GateResult.verdict`: `"pass"` 通过 / `"retry"` 同节点重试 / `"fail"` 走回退或阻断
-- 需要 LLM 语义复核时用 `LLMGate(内层门禁, prompt 模板)` 包装,引擎会自动注入 gate LLM
+- 需要 LLM 语义复核时，在 gate 上声明 `llm_prompt = "..."`；引擎会自动包装并注入 gate LLM
 - 条件文件同理,导出 `CONDITIONS = {"key": fn}`,`fn(ctx: dict) -> bool`
 
 ## pipeline YAML 引用

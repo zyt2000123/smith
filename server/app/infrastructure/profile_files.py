@@ -30,12 +30,14 @@ def init_smith_profile_files(
     dest.mkdir(parents=True, exist_ok=True)
 
     if profile_seed_dir.is_dir():
-        for item in profile_seed_dir.iterdir():
-            target = dest / item.name
-            if item.is_file():
+        for item in profile_seed_dir.rglob("*"):
+            relative = item.relative_to(profile_seed_dir)
+            target = dest / relative
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif item.is_file() and not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(item, target)
-            elif item.is_dir():
-                shutil.copytree(item, target, dirs_exist_ok=True)
 
     for sub in ("memory", "sessions", "skills"):
         (dest / sub).mkdir(exist_ok=True)

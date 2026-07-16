@@ -112,6 +112,39 @@ def test_run_state_waits_for_and_resolves_approval(tmp_path: Path) -> None:
     assert resumed.reason == "approval_granted"
 
 
+def test_run_state_recovers_interrupted_active_runs_as_resumable(tmp_path: Path) -> None:
+    store = RunStateStore(tmp_path)
+    store.create("waiting", agent_id="smith-id")
+    store.create("running", agent_id="smith-id")
+    store.create("completed", agent_id="smith-id")
+    store.transition("waiting", RunStatus.RUNNING)
+    store.request_approval(
+        "waiting",
+        approval_id="approval-1",
+        tool_name="shell",
+        level="execute",
+        reason="Approval required for shell",
+    )
+    store.transition("running", RunStatus.RUNNING)
+    store.transition("completed", RunStatus.RUNNING)
+    store.transition("completed", RunStatus.COMPLETED)
+
+    recovered = store.recover_interrupted()
+
+    assert recovered == ["running", "waiting"]
+    waiting = store.get("waiting")
+    running = store.get("running")
+    completed = store.get("completed")
+    assert waiting is not None and waiting.status is RunStatus.CANCELLED
+    assert waiting.reason == "server_restarted"
+    assert waiting.approval_id is None
+    assert running is not None and running.status is RunStatus.CANCELLED
+    assert completed is not None and completed.status is RunStatus.COMPLETED
+
+    resumed = store.resume("waiting")
+    assert resumed.status is RunStatus.RUNNING
+
+
 def test_run_state_store_uses_private_atomic_files(tmp_path: Path) -> None:
     store = RunStateStore(tmp_path)
     store.create("run-1", agent_id="smith-id")

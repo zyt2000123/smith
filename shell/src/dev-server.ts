@@ -19,6 +19,8 @@ const REQUIRED_PATHS = [
   "/api/agent/sessions/{session_id}/compress",
   "/api/agent/sessions/{session_id}",
   "/api/agent/token-stats",
+  "/api/agent/runs/{run_id}",
+  "/api/agent/runs/{run_id}/resume",
   "/api/agent/runs/{run_id}/approval",
 ] as const;
 

@@ -109,6 +109,18 @@ export type ContextUsage = {
 
 export type StreamTerminalStatus = "completed" | "failed" | "incomplete";
 
+export type RunState = {
+  run_id: string;
+  agent_id: string;
+  session_id?: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  event_seq: number;
+  reason?: string | null;
+  error?: string | null;
+};
+
 export type ApprovalDetail = {
   label: string;
   value: string;
@@ -145,7 +157,7 @@ export type StreamEvent =
   | ({ type: "token_usage" } & TokenUsage)
   | ({ type: "context_usage" } & ContextUsage)
   | { type: "compression"; active: boolean }
-  | { type: "done"; id?: string; status: StreamTerminalStatus };
+  | { type: "done"; id?: string; runId?: string; status: StreamTerminalStatus };
 
 type RequestOptions = {
   method?: string;
@@ -398,18 +410,25 @@ export async function resolveRunApproval(
   });
 }
 
+export async function getRun(baseUrl: string, runId: string): Promise<RunState> {
+  return request<RunState>(baseUrl, `/api/agent/runs/${encodeURIComponent(runId)}`);
+}
+
 export async function deleteSession(baseUrl: string, sessionId: string): Promise<void> {
   await request<void>(baseUrl, `/api/agent/sessions/${sessionId}`, {
     method: "DELETE",
   });
 }
 
-type StreamMessageOptions = {
+type StreamOptions = {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+};
+
+type StreamMessageOptions = StreamOptions & {
   context?: string;
   skillName?: string;
   workingDir?: string;
-  signal?: AbortSignal;
-  timeoutMs?: number;
 };
 
 type ParsedSseChunk = {
@@ -566,6 +585,7 @@ const SSE_EVENT_DECODERS: Partial<Record<string, SseEventDecoder>> = {
   done: (payload) => ({
     type: "done",
     id: payload.id ? String(payload.id) : undefined,
+    ...(payload.run_id ? { runId: String(payload.run_id) } : {}),
     status: terminalStatus(payload),
   }),
 };
@@ -638,17 +658,17 @@ async function* readSseEvents(
   }
 }
 
-export async function* streamMessage(
+async function* streamRequest(
   baseUrl: string,
-  sessionId: string,
-  content: string,
-  options: StreamMessageOptions = {},
+  pathname: string,
+  body: unknown,
+  options: StreamOptions = {},
 ): AsyncGenerator<StreamEvent, void, void> {
   const authHeaders = await localAuthHeaders();
   const timeoutMs = options.timeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS;
   const timeout = createTimeoutSignal(timeoutMs, options.signal);
   try {
-    const response = await fetch(buildUrl(baseUrl, `/api/agent/sessions/${sessionId}/messages/stream`), {
+    const response = await fetch(buildUrl(baseUrl, pathname), {
       method: "POST",
       headers: {
         Accept: "text/event-stream",
@@ -656,12 +676,7 @@ export async function* streamMessage(
         ...authHeaders,
       },
       signal: timeout.signal,
-      body: JSON.stringify({
-        content,
-        context: options.context,
-        skill_name: options.skillName,
-        working_dir: options.workingDir,
-      }),
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
 
     if (!response.ok) {
@@ -680,4 +695,31 @@ export async function* streamMessage(
   } finally {
     timeout.dispose();
   }
+}
+
+export async function* streamMessage(
+  baseUrl: string,
+  sessionId: string,
+  content: string,
+  options: StreamMessageOptions = {},
+): AsyncGenerator<StreamEvent, void, void> {
+  yield* streamRequest(
+    baseUrl,
+    `/api/agent/sessions/${sessionId}/messages/stream`,
+    {
+      content,
+      context: options.context,
+      skill_name: options.skillName,
+      working_dir: options.workingDir,
+    },
+    options,
+  );
+}
+
+export async function* streamRunResume(
+  baseUrl: string,
+  runId: string,
+  options: StreamOptions = {},
+): AsyncGenerator<StreamEvent, void, void> {
+  yield* streamRequest(baseUrl, `/api/agent/runs/${encodeURIComponent(runId)}/resume`, undefined, options);
 }

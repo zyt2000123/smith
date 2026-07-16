@@ -8,13 +8,16 @@ import pytest
 
 from engine.execution import agent_loop as agent_loop_module
 from engine.execution.agent_loop import (
+    _record_run_event,
     _bind_working_directory_tools,
     prepare_runtime,
     reply_events_with_runtime,
     reply_with_runtime,
     resume_stream_with_runtime,
     run_stream_with_runtime,
+    run_agent_stream,
 )
+from engine.execution.backtrack import FailureLoopGuard
 from engine.execution.events import EventType, ExecutionEvent, raw_text_delta
 from engine.execution.run_state import RunStateStore, RunStatus
 from engine.execution.runtime import EngineRequest, RuntimeContext, RuntimeServices
@@ -122,6 +125,38 @@ class PassReviewer(FakeLLM):
         return ChatResponse(
             text='{"pass": true, "hard_fail": [], "soft_fail": [], "feedback": ""}'
         )
+
+
+class LlmGatePassReviewer(FakeLLM):
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        prefix_cache_key: str | None = None,
+    ) -> ChatResponse:
+        self.messages = messages
+        return ChatResponse(text="PASS")
+
+
+class CodingPipelineLLM(FakeLLM):
+    def __init__(self) -> None:
+        super().__init__()
+        self.responses = [
+            "需求：修复登录报错，目标是保证认证恢复正常。边界：不改动注册流程；约束：保持现有 API；风险：兼容旧 token。",
+            "1. 检查 auth/login.py 的错误路径并确认现有契约。\n2. 修改 server/app/auth.py 的验证分支。\n3. 在 shell/src/login.tsx 补充回归测试。\n验证：执行 pytest tests/test_auth.py 确认结果。",
+            "涉及文件 server/app/auth.py、shell/src/login.tsx 和 tests/test_auth.py。数据流：请求 -> 鉴权 -> 响应。依赖：复用现有 token 校验器。",
+            "实现方案与计划一致：按第 1 步定位 auth/login.py，按第 2 步修改 server/app/auth.py，按第 3 步更新 shell/src/login.tsx；整体对齐，无偏差。",
+            "执行 pytest tests/test_auth.py，结果 3 passed, 0 failed。",
+        ]
+
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        prefix_cache_key: str | None = None,
+    ) -> ChatResponse:
+        self.messages = messages
+        return ChatResponse(text=self.responses.pop(0))
 
 
 def _write_profile(profile_dir: Path) -> None:
@@ -361,6 +396,60 @@ def test_run_stream_persists_queued_and_terminal_run_state(tmp_path: Path) -> No
     assert run_id
     assert status is RunStatus.COMPLETED
     assert event_seq > 1
+
+
+def test_timeout_settles_waiting_approval_before_terminal_run_state(tmp_path: Path) -> None:
+    store = RunStateStore(tmp_path)
+    store.create("run-1", agent_id="smith")
+    _record_run_event(
+        store,
+        "run-1",
+        ExecutionEvent(EventType.RUN_STARTED, {"run_id": "run-1"}),
+    )
+    _record_run_event(
+        store,
+        "run-1",
+        ExecutionEvent(
+            EventType.TOOL_CALL_RESULT,
+            {
+                "approval_required": True,
+                "approval_id": "approval-1",
+                "tool": "shell",
+                "level": "execute",
+                "reason": "Approval required for shell",
+            },
+        ),
+    )
+    _record_run_event(
+        store,
+        "run-1",
+        ExecutionEvent(
+            EventType.TOOL_CALL_RESULT,
+            {
+                "approval_id": "approval-1",
+                "approval_outcome": "timed_out",
+                "blocked": True,
+                "reason": "Approval timed out",
+            },
+        ),
+    )
+
+    settled = store.get("run-1")
+    assert settled is not None
+    assert settled.status is RunStatus.RUNNING
+    assert settled.reason == "approval_timed_out"
+    assert settled.approval_id is None
+
+    _record_run_event(
+        store,
+        "run-1",
+        ExecutionEvent(
+            EventType.RUN_FINISHED,
+            {"run_id": "run-1", "status": "completed"},
+        ),
+    )
+    terminal = store.get("run-1")
+    assert terminal is not None and terminal.status is RunStatus.COMPLETED
 
 
 def test_resume_setup_failure_is_exposed_as_terminal_stream(
@@ -683,6 +772,60 @@ GATES = {"runtime_contract_planning": AlwaysPassGate}
     assert setup.route.pipeline_id == "refactor"
     assert setup.chain is not None
     assert [node.skill_name for node in setup.chain.nodes] == ["planning"]
+
+
+def test_shipped_coding_pipeline_routes_through_gates_and_conditions(tmp_path: Path) -> None:
+    async def run() -> tuple[object, list[ExecutionEvent]]:
+        runtime, services, _ = _runtime(tmp_path)
+        agents_dir = Path(__file__).resolve().parents[2] / "agents"
+        runtime = RuntimeContext(
+            agent_id=runtime.agent_id,
+            agent_name=runtime.agent_name,
+            profile_dir=runtime.profile_dir,
+            agents_dir=agents_dir,
+            session_id=runtime.session_id,
+            identity_catalog=IdentityCatalog.load(agents_dir / "identities"),
+        )
+        llm = CodingPipelineLLM()
+        services.llm = llm  # type: ignore[assignment]
+        services.gate_llm = LlmGatePassReviewer()  # type: ignore[assignment]
+        request = EngineRequest(message="修复登录报错")
+        setup = await prepare_runtime(request, runtime, services)
+        assert setup.chain is not None
+        events = [
+            event
+            async for event in run_agent_stream(
+                llm,
+                setup.system_prompt,
+                request.message,
+                services.tool_registry,
+                services.skill_registry,
+                setup.route,
+                setup.chain,
+                FailureLoopGuard(),
+                gate_llm=services.gate_llm,
+            )
+        ]
+        return setup, events
+
+    setup, events = asyncio.run(run())
+
+    assert setup.route.pipeline_id == "coding"
+    assert [event.data["skill"] for event in events if event.type is EventType.SKILL_START] == [
+        "understanding",
+        "planning",
+        "architecture",
+        "implementation",
+        "validation",
+    ]
+    assert [event.data["verdict"] for event in events if event.type is EventType.GATE_RESULT] == [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+    ]
+    assert events[-1].type is EventType.DONE
 
 
 def test_reply_events_with_runtime_emits_decision_reply_and_closes(tmp_path: Path) -> None:

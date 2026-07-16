@@ -1,6 +1,7 @@
 """Edit file tool — precise string replacement without full rewrite."""
 
 import os
+from collections.abc import Callable
 
 TOOL_META = {
     "name": "edit_file",
@@ -41,7 +42,7 @@ def _is_within_workdir(path: str, work_dir: str) -> bool:
 
 async def execute(
     *, path: str, old_string: str, new_string: str, replace_all: bool = False,
-    _work_dir: str = "",
+    _work_dir: str = "", _snapshot_tracker: Callable[[str], object] | None = None,
 ) -> str:
     if old_string == new_string:
         return "Error: new_string must differ from old_string"
@@ -73,11 +74,11 @@ async def execute(
             "Provide more surrounding context to make it unique, or set replace_all=true."
         )
 
-    try:
-        from engine.snapshot import get_snapshot
-        get_snapshot().track(resolved)
-    except Exception:
-        pass
+    if _snapshot_tracker is not None:
+        try:
+            _snapshot_tracker(resolved)
+        except Exception:
+            pass
 
     updated = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
 

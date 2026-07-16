@@ -194,6 +194,7 @@ class PromptAssembler:
         runtime_guidance: str = "",
         eval_guidance: str = "",
         runtime_control: str = "",
+        output_style_path: Path | None = None,
     ) -> str:
         """Compatibility wrapper that returns only the provider-facing text."""
         return self.assemble_detailed(
@@ -210,6 +211,7 @@ class PromptAssembler:
             runtime_guidance=runtime_guidance,
             eval_guidance=eval_guidance,
             runtime_control=runtime_control,
+            output_style_path=output_style_path,
         ).text
 
     def assemble_detailed(
@@ -227,6 +229,7 @@ class PromptAssembler:
         runtime_guidance: str = "",
         eval_guidance: str = "",
         runtime_control: str = "",
+        output_style_path: Path | None = None,
     ) -> AssembledPrompt:
         """Build prompt text and a redacted provenance receipt for one run."""
         layers = self.build_layers(
@@ -242,6 +245,7 @@ class PromptAssembler:
             runtime_guidance=runtime_guidance,
             eval_guidance=eval_guidance,
             runtime_control=runtime_control,
+            output_style_path=output_style_path,
         )
 
         # Compute hash of the stable profile and capability prefix.
@@ -279,6 +283,7 @@ class PromptAssembler:
         runtime_guidance: str = "",
         eval_guidance: str = "",
         runtime_control: str = "",
+        output_style_path: Path | None = None,
     ) -> tuple[PromptLayer, ...]:
         """Build the ordered prompt layers without applying a token budget."""
         layers: list[PromptLayer] = []
@@ -389,13 +394,11 @@ class PromptAssembler:
         ))
 
         # Layer 12: output style
-        output_style_path = (
-            Path(__file__).resolve().parents[2] / "agents" / "output_style.md"
-        )
+        style_path = output_style_path or agent_dir / "output_style.md"
         layers.append(PromptLayer(
-            "output_style", self._read(output_style_path), PromptSource.ENGINE,
+            "output_style", self._read(style_path), PromptSource.ENGINE,
             PromptAuthority.AGENT_POLICY, PromptTrust.CONFIGURED, trim_priority=10,
-            source_ref="engine:output_style.md", display_name="Output Style",
+            source_ref="agents:output_style.md", display_name="Output Style",
         ))
 
         # Layer 13: engine-owned memory governance applies even when no memory

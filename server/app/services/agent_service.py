@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, AsyncGenerator
 
+from common.config import AGENT_DIR
+from engine.execution.run_state import RunStateStore
 from engine.llm.model_config import SMITH_TEMPLATE_ID
 
 from ..infrastructure.repositories.auto_task_repo import AutoTaskRepo
@@ -54,12 +56,18 @@ class AgentService:
         agent_profile_repo = AgentProfileRepo()
         session_repo = SessionRepo()
         auto_task_repo = AutoTaskRepo()
+        run_state_store = (
+            RunStateStore(AGENT_DIR)
+            if session_service is None or run_state_service is None
+            else None
+        )
         self.token_stats_service = token_stats_service or TokenStatsService()
         self.agent_profile_service = agent_profile_service or AgentProfileService(agent_profile_repo)
         self.session_service = session_service or SessionService(
             session_repo,
             agent_profile_repo,
             token_stats_service=self.token_stats_service,
+            run_state_store=run_state_store,
         )
         self.task_service = task_service or TaskService(TaskRepo(), agent_profile_repo)
         self.auto_task_service = auto_task_service or AutoTaskService(
@@ -70,7 +78,7 @@ class AgentService:
         self.profile_file_service = profile_file_service or ProfileFileService()
         self.skill_service = skill_service or SkillService(agent_profile_repo)
         self.stats_service = stats_service or StatsService()
-        self.run_state_service = run_state_service or RunStateService()
+        self.run_state_service = run_state_service or RunStateService(run_state_store or RunStateStore(AGENT_DIR))
         self.mcp_service = mcp_service or McpService()
         self.project_instruction_service = project_instruction_service or ProjectInstructionService()
 
@@ -149,6 +157,7 @@ class AgentService:
         offset: int = 0,
     ) -> list[MessageOut]:
         return await self.session_service.list_messages(
+            await self._profile_id(),
             session_id,
             limit=limit,
             offset=offset,
@@ -184,7 +193,28 @@ class AgentService:
         identity_id: str | None = None,
         working_dir: str | None = None,
     ) -> AsyncGenerator[dict, None]:
-        async for event in self.session_service.stream_message(
+        stream = await self.prepare_stream_message(
+            session_id,
+            content,
+            context=context,
+            skill_name=skill_name,
+            identity_id=identity_id,
+            working_dir=working_dir,
+        )
+        async for event in stream:
+            yield event
+
+    async def prepare_stream_message(
+        self,
+        session_id: str,
+        content: str,
+        *,
+        context: str | None = None,
+        skill_name: str | None = None,
+        identity_id: str | None = None,
+        working_dir: str | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        return await self.session_service.prepare_stream_message(
             await self._profile_id(),
             session_id,
             content,
@@ -192,15 +222,18 @@ class AgentService:
             skill_name=skill_name,
             identity_id=identity_id,
             working_dir=working_dir,
-        ):
-            yield event
+        )
 
     async def resume_run(self, run_id: str) -> AsyncGenerator[dict, None]:
-        async for event in self.session_service.resume_run(
+        stream = await self.prepare_resume_run(run_id)
+        async for event in stream:
+            yield event
+
+    async def prepare_resume_run(self, run_id: str) -> AsyncGenerator[dict, None]:
+        return await self.session_service.prepare_resume_run(
             await self._profile_id(),
             run_id,
-        ):
-            yield event
+        )
 
     async def list_skills(self):
         return await self.skill_service.list_skills(await self._profile_id())

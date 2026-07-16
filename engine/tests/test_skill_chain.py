@@ -49,6 +49,41 @@ def test_valid_pipeline_still_loads(tmp_path: Path) -> None:
     assert chain.nodes[1].condition is not None
 
 
+def test_shipped_coding_pipeline_loads_gates_and_conditions() -> None:
+    content = load_gate_content(ROOT / "agents")
+
+    pipelines = SkillChain.load_pipelines(
+        ROOT / "agents" / "pipelines",
+        gate_registry=content.gates,
+        condition_registry=content.conditions,
+    )
+
+    chain = pipelines["coding"]
+    assert [node.skill_name for node in chain.nodes] == [
+        "understanding",
+        "planning",
+        "architecture",
+        "implementation",
+        "validation",
+    ]
+    assert chain.nodes[2].condition is not None
+
+
+def test_shipped_gate_and_condition_content_do_not_import_engine_or_common() -> None:
+    content_files = [
+        *(ROOT / "agents" / "gates").rglob("*.py"),
+        *(ROOT / "agents" / "conditions").rglob("*.py"),
+        *(ROOT / "agents" / "tools").glob("*.py"),
+    ]
+
+    for path in content_files:
+        source = path.read_text(encoding="utf-8")
+        assert "from engine" not in source
+        assert "import engine" not in source
+        assert "from common" not in source
+        assert "import common" not in source
+
+
 def test_malformed_pipeline_step_fails_loudly(tmp_path: Path) -> None:
     path = _write(
         tmp_path,
@@ -111,7 +146,11 @@ def test_custom_domain_gate_extends_registry_without_engine_change(tmp_path: Pat
     gates_dir = tmp_path / "gates" / "legal"
     gates_dir.mkdir(parents=True)
     (gates_dir / "gates.py").write_text(
-        "from engine.execution.gate import GateResult\n"
+        "class GateResult:\n"
+        "    def __init__(self, verdict, reason, retry_hint=None):\n"
+        "        self.verdict = verdict\n"
+        "        self.reason = reason\n"
+        "        self.retry_hint = retry_hint\n"
         "class ComplianceGate:\n"
         "    async def check(self, output, context):\n"
         "        return GateResult('pass', 'ok')\n"
@@ -123,6 +162,20 @@ def test_custom_domain_gate_extends_registry_without_engine_change(tmp_path: Pat
     chain = SkillChain.from_yaml(path)
     assert chain is not None
     assert chain.nodes[0].skill_name == "contract-review"
+
+
+def test_content_conditions_receive_the_output_key_helper_without_importing_engine(tmp_path: Path) -> None:
+    conditions_dir = tmp_path / "conditions"
+    conditions_dir.mkdir()
+    (conditions_dir / "conditions.py").write_text(
+        "def has_plan(context):\n"
+        "    return bool(context.get(output_key('planning')))\n"
+        "CONDITIONS = {'has_plan': has_plan}\n",
+        encoding="utf-8",
+    )
+
+    content = load_gate_content(tmp_path)
+    assert content.conditions["has_plan"]({"planning_output": "a concrete plan"}) is True
 
 
 def test_gate_content_registries_are_scoped_per_agents_directory(tmp_path: Path) -> None:

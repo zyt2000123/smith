@@ -36,16 +36,7 @@ import {
   setupFields,
 } from "./setup.js";
 import { type AppStore, createAppStore } from "./store.js";
-import {
-  ACCENT,
-  BORDER,
-  ERROR,
-  INFO,
-  MUTED,
-  SELECTED_BACKGROUND,
-  SELECTED_FOREGROUND,
-  WARNING,
-} from "./theme.js";
+import { ACCENT, BORDER, ERROR, INFO, MUTED, SELECTED_BACKGROUND, SELECTED_FOREGROUND, WARNING } from "./theme.js";
 import { TokenStatsPanel } from "./token-panel.js";
 import { TranscriptEntryView } from "./transcript.js";
 import { splitTranscript, type TranscriptEntry, type TranscriptViewMode } from "./transcript-state.js";

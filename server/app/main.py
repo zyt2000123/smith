@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Depends
 
 from common.database import close_db
+from common.config import AGENT_DIR
+from engine.execution.run_state import RunStateError, RunStateStore
 
 from .infrastructure.auth import get_local_token, require_auth
 from .infrastructure.database import get_app_db
@@ -27,6 +29,12 @@ async def lifespan(app: FastAPI):
     get_local_token()
     await get_app_db()
     load_runtime_identity_catalog(force=True)
+    try:
+        recovered = RunStateStore(AGENT_DIR).recover_interrupted()
+        if recovered:
+            logger.warning("marked interrupted runs as resumable: %s", ", ".join(recovered))
+    except (RunStateError, OSError):
+        logger.warning("failed to recover interrupted runs during startup", exc_info=True)
     try:
         await TokenStatsService().sync_from_traces()
     except Exception:

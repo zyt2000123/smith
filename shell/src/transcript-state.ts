@@ -7,7 +7,7 @@ import { type ToolState, toolStateFromResult } from "./activity.js";
 import type { Message, StreamEvent } from "./api.js";
 
 type SystemTone = "info" | "error";
-export type SkillState = "running" | "done" | "error";
+export type SkillState = "running" | "retry" | "done" | "blocked" | "error";
 export type TranscriptViewMode = "compact" | "transcript";
 
 export function limitTranscript(entries: TranscriptEntry[], limit: number): TranscriptEntry[] {
@@ -44,6 +44,15 @@ export type SkillBlock = {
   type: "skill";
   name: string;
   state: SkillState;
+  activities: SkillActivity[];
+};
+
+export type SkillActivity = {
+  id: string;
+  name: string;
+  hint: string;
+  state: ToolState;
+  summary: string;
 };
 
 export type ProvisionalText = {
@@ -124,13 +133,152 @@ function updateLastTurn(entries: TranscriptEntry[], updater: (turn: TurnEntry) =
 }
 
 function nextSkillState(status: string): SkillState {
-  if (status === "error") {
-    return "error";
-  }
-  if (status === "start") {
-    return "running";
-  }
+  if (status === "start") return "running";
+  if (status === "retry") return "retry";
+  if (status === "blocked") return "blocked";
+  if (status === "error" || status === "incomplete") return "error";
   return "done";
+}
+
+function updateSkillActivity(
+  blocks: TurnBlock[],
+  toolCallId: string,
+  updater: (activity: SkillActivity) => SkillActivity,
+): TurnBlock[] | null {
+  for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+    const block = blocks[blockIndex];
+    if (block?.type !== "skill") continue;
+
+    const activityIndex = block.activities.findIndex((activity) => activity.id === toolCallId);
+    if (activityIndex === -1) continue;
+
+    const activity = block.activities[activityIndex];
+    if (!activity) return blocks;
+    const activities = [...block.activities];
+    activities[activityIndex] = updater(activity);
+    const next = [...blocks];
+    next[blockIndex] = { ...block, activities };
+    return next;
+  }
+  return null;
+}
+
+function activeSkillIndex(blocks: TurnBlock[]): number {
+  return [...blocks].reverse().findIndex((block) => block.type === "skill" && block.state === "running");
+}
+
+type ToolCallEvent = Extract<StreamEvent, { type: "tool_call" }>;
+type ToolResultEvent = Extract<StreamEvent, { type: "tool_result" }>;
+
+function appendToolActivityToActiveSkill(blocks: TurnBlock[], event: ToolCallEvent): TurnBlock[] | null {
+  const reversedSkillIndex = activeSkillIndex(blocks);
+  if (reversedSkillIndex < 0) return null;
+
+  const skillIndex = blocks.length - 1 - reversedSkillIndex;
+  const skill = blocks[skillIndex];
+  if (skill?.type !== "skill") return null;
+
+  const activityIndex = skill.activities.findIndex((activity) => activity.id === event.id);
+  const activities = [...skill.activities];
+  if (activityIndex >= 0) {
+    const existing = activities[activityIndex];
+    if (!existing) return blocks;
+    activities[activityIndex] = {
+      ...existing,
+      name: event.name || existing.name,
+      hint: event.hint || existing.hint,
+      state: "running",
+    };
+  } else {
+    activities.push({
+      id: event.id,
+      name: event.name || "tool",
+      hint: event.hint || "",
+      state: "running",
+      summary: "",
+    });
+  }
+
+  const next = [...blocks];
+  next[skillIndex] = { ...skill, activities };
+  return next;
+}
+
+function applyStandaloneToolCall(blocks: TurnBlock[], event: ToolCallEvent): TurnBlock[] {
+  const existingIndex = blocks.findIndex((block) => block.type === "tool" && block.toolCallId === event.id);
+  if (existingIndex < 0) {
+    return [
+      ...blocks,
+      {
+        id: createId(),
+        type: "tool",
+        toolCallId: event.id,
+        name: event.name || "tool",
+        hint: event.hint || "",
+        state: "running",
+        summary: "",
+      },
+    ];
+  }
+
+  const existing = blocks[existingIndex];
+  if (existing?.type !== "tool") return blocks;
+  const next = [...blocks];
+  next[existingIndex] = {
+    ...existing,
+    name: event.name || existing.name,
+    hint: event.hint || existing.hint,
+    state: "running",
+  };
+  return next;
+}
+
+function applyToolCallToTurn(turn: TurnEntry, event: ToolCallEvent): TurnEntry {
+  const blocks = finishThinkingBlocks(turn.blocks);
+  const skillBlocks = appendToolActivityToActiveSkill(blocks, event);
+  return { ...turn, blocks: skillBlocks ?? applyStandaloneToolCall(blocks, event) };
+}
+
+function applyStandaloneToolResult(blocks: TurnBlock[], event: ToolResultEvent, state: ToolState): TurnBlock[] {
+  const reversedIndex = [...blocks]
+    .reverse()
+    .findIndex((block) => block.type === "tool" && block.toolCallId === event.id);
+  if (reversedIndex < 0) {
+    return [
+      ...blocks,
+      {
+        id: createId(),
+        type: "tool",
+        toolCallId: event.id,
+        name: "tool",
+        hint: "",
+        state,
+        summary: event.summary || "",
+      },
+    ];
+  }
+
+  const index = blocks.length - 1 - reversedIndex;
+  const existing = blocks[index];
+  if (existing?.type !== "tool") return blocks;
+  const next = [...blocks];
+  next[index] = {
+    ...existing,
+    state,
+    summary: event.summary || existing.summary,
+  };
+  return next;
+}
+
+function applyToolResultToTurn(turn: TurnEntry, event: ToolResultEvent): TurnEntry {
+  const blocks = finishThinkingBlocks(turn.blocks);
+  const state = toolStateFromResult(event);
+  const skillBlocks = updateSkillActivity(blocks, event.id, (activity) => ({
+    ...activity,
+    state,
+    summary: event.summary || activity.summary,
+  }));
+  return { ...turn, blocks: skillBlocks ?? applyStandaloneToolResult(blocks, event, state) };
 }
 
 export function createSystemEntry(text: string, tone: SystemTone = "info"): SystemEntry {
@@ -164,6 +312,17 @@ export function closeLatestTurn(entries: TranscriptEntry[]): TranscriptEntry[] {
     blocks: finishThinkingBlocks(turn.blocks),
     provisional: [],
     streaming: false,
+  }));
+}
+
+/** Clear the incomplete assistant output while retaining the user turn for a run retry. */
+export function restartLatestTurn(entries: TranscriptEntry[]): TranscriptEntry[] {
+  return updateLastTurn(entries, (turn) => ({
+    ...turn,
+    assistantText: "",
+    provisional: [],
+    blocks: [],
+    streaming: true,
   }));
 }
 
@@ -277,90 +436,17 @@ export function applyStreamEvent(entries: TranscriptEntry[], event: StreamEvent)
       });
 
     case "tool_call":
-      return updateLastTurn(entries, (turn) => {
-        const blocks = finishThinkingBlocks(turn.blocks);
-        const existingIndex = blocks.findIndex((block) => block.type === "tool" && block.toolCallId === event.id);
-
-        if (existingIndex >= 0) {
-          const existing = blocks[existingIndex];
-          if (existing?.type !== "tool") {
-            return turn;
-          }
-
-          const nextBlocks = [...blocks];
-          nextBlocks[existingIndex] = {
-            ...existing,
-            name: event.name || existing.name,
-            hint: event.hint || existing.hint,
-            state: "running",
-          };
-          return { ...turn, blocks: nextBlocks };
-        }
-
-        return {
-          ...turn,
-          blocks: [
-            ...blocks,
-            {
-              id: createId(),
-              type: "tool",
-              toolCallId: event.id,
-              name: event.name || "tool",
-              hint: event.hint || "",
-              state: "running",
-              summary: "",
-            },
-          ],
-        };
-      });
+      return updateLastTurn(entries, (turn) => applyToolCallToTurn(turn, event));
 
     case "tool_result":
-      return updateLastTurn(entries, (turn) => {
-        const blocks = finishThinkingBlocks(turn.blocks);
-        const nextState = toolStateFromResult(event);
-        const existingIndex = [...blocks]
-          .reverse()
-          .findIndex((block) => block.type === "tool" && block.toolCallId === event.id);
-
-        if (existingIndex >= 0) {
-          const realIndex = blocks.length - 1 - existingIndex;
-          const existing = blocks[realIndex];
-          if (existing?.type !== "tool") {
-            return turn;
-          }
-
-          const nextBlocks = [...blocks];
-          nextBlocks[realIndex] = {
-            ...existing,
-            state: nextState,
-            summary: event.summary || existing.summary,
-          };
-          return { ...turn, blocks: nextBlocks };
-        }
-
-        return {
-          ...turn,
-          blocks: [
-            ...blocks,
-            {
-              id: createId(),
-              type: "tool",
-              toolCallId: event.id,
-              name: "tool",
-              hint: "",
-              state: nextState,
-              summary: event.summary || "",
-            },
-          ],
-        };
-      });
+      return updateLastTurn(entries, (turn) => applyToolResultToTurn(turn, event));
 
     case "skill":
       return updateLastTurn(entries, (turn) => {
         const blocks = finishThinkingBlocks(turn.blocks);
         const state = nextSkillState(event.status);
 
-        if (state === "running") {
+        if (event.status === "start") {
           return {
             ...turn,
             blocks: [
@@ -370,6 +456,7 @@ export function applyStreamEvent(entries: TranscriptEntry[], event: StreamEvent)
                 type: "skill",
                 name: event.name || "skill",
                 state,
+                activities: [],
               },
             ],
           };
@@ -405,6 +492,7 @@ export function applyStreamEvent(entries: TranscriptEntry[], event: StreamEvent)
               type: "skill",
               name: event.name || "skill",
               state,
+              activities: [],
             },
           ],
         };
