@@ -5,6 +5,7 @@
 
 import { type ToolState, toolStateFromResult } from "./activity.js";
 import type { Message, StreamEvent } from "./api.js";
+import type { SmithUiPayload } from "./smith-ui-schema.js";
 
 type SystemTone = "info" | "error";
 export type SkillState = "running" | "retry" | "done" | "blocked" | "error";
@@ -55,12 +56,25 @@ export type SkillActivity = {
   summary: string;
 };
 
+export type SmithUiBlock = {
+  id: string;
+  type: "smith_ui";
+  payload: SmithUiPayload;
+};
+
+export type SmithUiFallbackBlock = {
+  id: string;
+  type: "smith_ui_fallback";
+  reason: string;
+  code: string;
+};
+
 export type ProvisionalText = {
   provisionId: string;
   text: string;
 };
 
-export type TurnBlock = ThinkingBlock | ToolBlock | SkillBlock;
+export type TurnBlock = ThinkingBlock | ToolBlock | SkillBlock | SmithUiBlock | SmithUiFallbackBlock;
 
 export type TurnEntry = {
   id: string;
@@ -389,6 +403,21 @@ export function applyStreamEvent(entries: TranscriptEntry[], event: StreamEvent)
         ...turn,
         blocks: finishThinkingBlocks(turn.blocks),
         assistantText: turn.assistantText + event.text,
+      }));
+
+    case "smith_ui":
+      return updateLastTurn(entries, (turn) => ({
+        ...turn,
+        blocks: [...finishThinkingBlocks(turn.blocks), { id: createId(), type: "smith_ui", payload: event.payload }],
+      }));
+
+    case "smith_ui_fallback":
+      return updateLastTurn(entries, (turn) => ({
+        ...turn,
+        blocks: [
+          ...finishThinkingBlocks(turn.blocks),
+          { id: createId(), type: "smith_ui_fallback", reason: event.reason, code: event.code },
+        ],
       }));
 
     case "thinking":

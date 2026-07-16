@@ -37,6 +37,39 @@ test("message text accumulates and finalizes an open thinking block", () => {
   );
 });
 
+test("smith-ui adds a structured presentation block without converting it to assistant text", () => {
+  const entries = applyStreamEvent(freshTurn(), {
+    type: "smith_ui",
+    payload: {
+      version: 1,
+      spec: {
+        root: "summary",
+        elements: {
+          summary: { type: "Heading", props: { text: "Deployment", level: "h1" }, children: [] },
+        },
+      },
+      images: [],
+    },
+  });
+
+  const turn = lastTurn(entries);
+  assert.equal(turn.assistantText, "");
+  assert.equal(turn.blocks.length, 1);
+  assert.equal(turn.blocks[0]?.type, "smith_ui");
+});
+
+test("smith-ui fallback adds a CodeBlock payload without converting it to assistant text", () => {
+  const entries = applyStreamEvent(freshTurn(), {
+    type: "smith_ui_fallback",
+    reason: "Unsupported smith-ui payload",
+    code: '{\n  "type": "TextInput"\n}',
+  });
+
+  const turn = lastTurn(entries);
+  assert.equal(turn.assistantText, "");
+  assert.deepEqual(turn.blocks[0]?.type, "smith_ui_fallback");
+});
+
 test("provisional text retracts or commits by provision id", () => {
   let entries = freshTurn();
   entries = applyStreamEvent(entries, { type: "provisional_text_delta", provisionId: "draft-1", text: "discard" });

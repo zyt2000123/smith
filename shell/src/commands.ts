@@ -33,8 +33,7 @@ const HELP_TEXT = [
   "- `/token` — local token usage dashboard",
   "- `/skills` — inspect or run a standard SKILL.md skill",
   "- `/mcp` — inspect configured MCP servers and tools",
-  "- `/resume <id>` — resume session",
-  "- `/run resume [id]` — recover the last failed or interrupted run",
+  "- `/resume [session-id]` — recover the latest interrupted run, or open a session; use `/resume run <run-id>` for a specific run",
   "- `/compact` — switch to compact view; Ctrl+O toggles compact/transcript",
   "- `/exit` — quit",
 ].join("\n");
@@ -103,15 +102,7 @@ export function buildSlashItems(_skills: SkillSummary[]): SlashItem[] {
       kind: "command",
       title: "/resume",
       command: "/resume",
-      description: "Resume a recent session by ID.",
-      category: "Commands",
-    },
-    {
-      id: "run",
-      kind: "command",
-      title: "/run resume [id]",
-      command: "/run resume",
-      description: "Recover the last failed or interrupted run.",
+      description: "Resume an interrupted run or a recent session.",
       category: "Commands",
     },
     {
@@ -190,12 +181,27 @@ function openConfig(context: CommandContext): void {
 }
 
 async function resumeSession(args: string[], context: CommandContext): Promise<void> {
-  const target = args[0];
-  if (!target) {
-    context.getState().set({ statusLine: "Usage: /resume <session-id>" });
+  if (args.length === 0) {
+    await context.bridge.resumeRun();
     return;
   }
 
+  if (args[0] === "run") {
+    const runId = args[1];
+    if (!runId || args.length !== 2) {
+      context.getState().set({ statusLine: "Usage: /resume [session-id] | /resume run <run-id>" });
+      return;
+    }
+    await context.bridge.resumeRun(runId);
+    return;
+  }
+
+  if (args.length !== 1) {
+    context.getState().set({ statusLine: "Usage: /resume [session-id] | /resume run <run-id>" });
+    return;
+  }
+
+  const target = args[0];
   const matches = context.getState().sessions.filter((candidate) => candidate.id.startsWith(target));
   if (matches.length === 0) {
     context.getState().set({ statusLine: `Not found: ${target}` });
@@ -208,14 +214,6 @@ async function resumeSession(args: string[], context: CommandContext): Promise<v
 
   const [session] = matches;
   if (session) await context.bridge.resumeSession(session);
-}
-
-async function resumeRun(args: string[], context: CommandContext): Promise<void> {
-  if (args[0] !== "resume" || args.length > 2) {
-    context.getState().set({ statusLine: "Usage: /run resume [run-id]" });
-    return;
-  }
-  await context.bridge.resumeRun(args[1]);
 }
 
 const COMMAND_HANDLERS: Record<string, CommandHandler> = {
@@ -310,7 +308,6 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
     await context.bridge.clearCurrentSession();
   },
   "/resume": resumeSession,
-  "/run": resumeRun,
   "/help": (_args, context) => {
     const state = context.getState();
     state.pushSystemLine(HELP_TEXT);

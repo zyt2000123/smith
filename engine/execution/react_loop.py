@@ -50,6 +50,7 @@ from .compression import (
     trim_conversation_for_context_limit,
 )
 from .events import EventType, ExecutionEvent
+from .smith_ui import smith_ui_fallback, validate_smith_ui_call
 
 if TYPE_CHECKING:
     from engine.llm.port import LLMPort
@@ -715,6 +716,79 @@ async def react_event_loop(
                     arguments=tc.arguments,
                 )
             )
+
+            # ``render_ui`` is an engine-owned presentation capability. It is
+            # deliberately not executed like a provider tool: rendering it
+            # cannot write files, call the network, or make arbitrary JSON a
+            # client-side component tree. The validated event is sent only to
+            # clients that explicitly understand the smith-ui contract.
+            if call.name == "render_ui":
+                if call.name not in {schema["function"]["name"] for schema in tool_registry.get_schemas()}:
+                    conversation.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": "Error: render_ui is disabled for this agent",
+                    })
+                    yield ExecutionEvent(EventType.TOOL_CALL_START, {
+                        "name": call.name,
+                        "id": tc.id,
+                        "arguments": call.arguments,
+                    })
+                    yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
+                        "id": tc.id,
+                        "error": True,
+                        "blocked": False,
+                        "preflight": False,
+                        "content": "render_ui is disabled for this agent",
+                    })
+                    round_had_failure = True
+                    consecutive_errors += 1
+                    continue
+
+                decision = policy.evaluate(call)
+                if not decision.allowed:
+                    conversation.append({"role": "tool", "tool_call_id": call.id, "content": decision.observation})
+                    yield ExecutionEvent(EventType.TOOL_CALL_START, {
+                        "name": call.name,
+                        "id": tc.id,
+                        "arguments": call.arguments,
+                    })
+                    yield ExecutionEvent(EventType.TOOL_CALL_RESULT, {
+                        "id": tc.id,
+                        "error": False,
+                        "blocked": True,
+                        "preflight": False,
+                        "reason": decision.reason,
+                    })
+                    round_had_failure = True
+                    consecutive_errors += 1
+                    continue
+
+                validated = validate_smith_ui_call(
+                    call.arguments,
+                    working_dir=tool_registry.working_directory,
+                )
+                if not validated.ok or validated.payload is None:
+                    reason = validated.reason or "Invalid smith-ui payload"
+                    conversation.append({"role": "tool", "tool_call_id": call.id, "content": f"Error: {reason}"})
+                    yield ExecutionEvent(EventType.SMITH_UI_FALLBACK, smith_ui_fallback(call.arguments, reason))
+                    round_had_failure = True
+                    consecutive_errors += 1
+                    continue
+
+                conversation.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": "Smith UI rendered successfully. Do not repeat its contents as raw JSON.",
+                })
+                yield ExecutionEvent(EventType.SMITH_UI, validated.payload)
+                round_had_success = True
+                had_successful_tool = True
+                consecutive_errors = 0
+                last_error_key = None
+                identical_error_count = 0
+                continue
+
             yield ExecutionEvent(EventType.TOOL_CALL_START, {"name": tc.name, "id": tc.id, "arguments": call.arguments})
 
             decision = policy.evaluate(call)

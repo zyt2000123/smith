@@ -258,6 +258,11 @@ class ToolRegistry:
         """Bind the root used for relative paths during one agent run."""
         self._working_dir = Path(working_dir).expanduser().resolve() if working_dir else None
 
+    @property
+    def working_directory(self) -> Path | None:
+        """Resolved workspace bound for the current request, if any."""
+        return self._working_dir
+
     def normalize_call(self, call: ToolCall) -> ToolCall:
         """Resolve declared relative paths against the bound project directory.
 

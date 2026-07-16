@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { useShikiHighlighter } from "@assistant-ui/react-ink-markdown";
 import { Box, render, Static, Text, useApp, useWindowSize } from "ink";
+import { InkPictureProvider } from "ink-picture";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -70,13 +71,6 @@ function truncate(text: string, max = 80): string {
 
 function armSkill(skill: SkillSummary): void {
   getState().set({ pendingSkill: skill, panel: "chat", statusLine: "" });
-}
-
-function hasTurnBefore(items: readonly { kind: string }[], index: number): boolean {
-  for (let i = 0; i < index; i += 1) {
-    if (items[i]?.kind === "turn") return true;
-  }
-  return false;
 }
 
 function HeroPanel() {
@@ -253,7 +247,6 @@ function ShellContent({
   mode,
   panel,
   active,
-  hasPriorTurn,
   viewMode,
   welcomeNotice,
   highlighter,
@@ -261,7 +254,6 @@ function ShellContent({
   tokenTab,
 }: Pick<AppStore, "mode" | "panel" | "viewMode" | "welcomeNotice" | "tokenStats" | "tokenTab"> & {
   active: TranscriptEntry[];
-  hasPriorTurn: boolean;
   highlighter?: CodeHighlighter;
 }) {
   if (mode === "boot") {
@@ -286,14 +278,8 @@ function ShellContent({
       {panel === "tokens" ? <TokenStatsPanel stats={tokenStats} selectedTab={tokenTab} /> : null}
       {panel === "tokens"
         ? null
-        : active.map((entry, index) => (
-            <TranscriptEntryView
-              key={entry.id}
-              entry={entry}
-              showDivider={entry.kind === "turn" && (hasPriorTurn || hasTurnBefore(active, index))}
-              viewMode={viewMode}
-              highlighter={highlighter}
-            />
+        : active.map((entry) => (
+            <TranscriptEntryView key={entry.id} entry={entry} viewMode={viewMode} highlighter={highlighter} />
           ))}
     </>
   );
@@ -720,7 +706,6 @@ function SmithApp() {
 
   const { done, active } = useMemo(() => splitTranscript(transcript), [transcript]);
   const staticItems = useMemo<StaticItem[]>(() => [{ kind: "hero", id: "hero" }, ...done], [done]);
-  const hasPriorTurn = useMemo(() => hasTurnBefore(staticItems, staticItems.length), [staticItems]);
 
   useEffect(() => {
     void bridge.boot();
@@ -786,17 +771,12 @@ function SmithApp() {
     <Box flexDirection="column">
       {panel !== "tokens" ? (
         <Static key={`transcript-${transcriptEpoch}`} items={staticItems}>
-          {(item, index) => (
+          {(item) => (
             <Box key={item.id} flexDirection="column" paddingX={2}>
               {item.kind === "hero" ? (
                 <HeroPanel />
               ) : (
-                <TranscriptEntryView
-                  entry={item}
-                  showDivider={hasTurnBefore(staticItems, index)}
-                  viewMode={viewMode}
-                  highlighter={highlighter}
-                />
+                <TranscriptEntryView entry={item} viewMode={viewMode} highlighter={highlighter} />
               )}
             </Box>
           )}
@@ -807,7 +787,6 @@ function SmithApp() {
           mode={mode}
           panel={panel}
           active={active}
-          hasPriorTurn={hasPriorTurn}
           viewMode={viewMode}
           welcomeNotice={welcomeNotice}
           highlighter={highlighter}
@@ -854,7 +833,12 @@ function SmithApp() {
   );
 }
 
-const app = render(<SmithApp />, { exitOnCtrlC: false });
+const app = render(
+  <InkPictureProvider>
+    <SmithApp />
+  </InkPictureProvider>,
+  { exitOnCtrlC: false },
+);
 void app.waitUntilExit().then(
   () => process.exit(0),
   () => process.exit(1),

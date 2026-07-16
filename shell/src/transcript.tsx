@@ -8,12 +8,15 @@ import { useEffect, useState } from "react";
 import type { ToolState } from "./activity.js";
 import { CodeBlock, type CodeHighlighter } from "./code-block.js";
 import { splitMarkdownLayoutBlocks } from "./markdown-layout.js";
-import { renderMermaidDiagram, splitMarkdownBlocks } from "./mermaid.js";
+import { type MarkdownSegment, renderMermaidDiagram, renderSimpleTextDiagram, splitMarkdownBlocks } from "./mermaid.js";
 import { stripEmojiIcons } from "./output.js";
 import { skillPresentation } from "./skill-presentation.js";
+import { SmithUiBlock as SmithUiView } from "./smith-ui.js";
 import { ACCENT, ASSISTANT, BORDER, ERROR, INFO, MUTED, SKILL, SUCCESS, WARNING } from "./theme.js";
 import type {
   SkillBlock,
+  SmithUiBlock,
+  SmithUiFallbackBlock,
   SystemEntry,
   ThinkingBlock,
   ToolBlock,
@@ -36,10 +39,82 @@ const MARKDOWN_OPTIONS = {
   listIndent: 1,
 } as const;
 
+export function userMessageBoxProps(columns: number) {
+  return {
+    width: Math.max(1, columns - 4),
+    borderColor: BORDER,
+    borderStyle: "round",
+    paddingX: 1,
+  } as const;
+}
+
+function DiagramBlock({ diagram }: { diagram: string }) {
+  return (
+    <Box flexDirection="column" marginTop={1} marginBottom={1}>
+      <Text color={ASSISTANT} wrap="truncate">
+        {diagram}
+      </Text>
+    </Box>
+  );
+}
+
+function MarkdownContent({ text }: { text: string }) {
+  const layoutBlocks = splitMarkdownLayoutBlocks(text);
+  const blockKeyCounts = new Map<string, number>();
+
+  return (
+    <Box flexDirection="column">
+      {layoutBlocks.map((block, index) => {
+        const next = layoutBlocks[index + 1];
+        const needsSpacing = block.kind === "content" && next?.kind === "table";
+        const blockBaseKey = `${block.kind}-${block.text}`;
+        const blockOccurrence = blockKeyCounts.get(blockBaseKey) ?? 0;
+        blockKeyCounts.set(blockBaseKey, blockOccurrence + 1);
+        return (
+          <Box key={`${blockBaseKey}-${blockOccurrence}`} marginBottom={needsSpacing ? 1 : 0}>
+            <MarkdownText text={block.text} {...MARKDOWN_OPTIONS} />
+          </Box>
+        );
+      })}
+    </Box>
+  );
+}
+
+function CodeSegment({
+  segment,
+  highlighter,
+}: {
+  segment: Extract<MarkdownSegment, { type: "code" }>;
+  highlighter?: CodeHighlighter;
+}) {
+  const diagram =
+    segment.language === "text" || segment.language === "diagram" ? renderSimpleTextDiagram(segment.text) : null;
+
+  return diagram ? (
+    <DiagramBlock diagram={diagram} />
+  ) : (
+    <CodeBlock code={segment.text} language={segment.language} highlighter={highlighter} />
+  );
+}
+
+function MermaidSegment({ source }: { source: string }) {
+  const diagram = renderMermaidDiagram(source);
+  return diagram ? (
+    <DiagramBlock diagram={diagram} />
+  ) : (
+    <MarkdownText text={`\`\`\`mermaid\n${source}\n\`\`\``} {...MARKDOWN_OPTIONS} />
+  );
+}
+
+function MarkdownSegmentView({ segment, highlighter }: { segment: MarkdownSegment; highlighter?: CodeHighlighter }) {
+  if (segment.type === "markdown") return segment.text ? <MarkdownContent text={segment.text} /> : null;
+  if (segment.type === "code") return <CodeSegment segment={segment} highlighter={highlighter} />;
+  return <MermaidSegment source={segment.text} />;
+}
+
 function MarkdownMessage({ text, highlighter }: { text: string; highlighter?: CodeHighlighter }) {
   const segments = splitMarkdownBlocks(text);
   const keyCounts = new Map<string, number>();
-
   return (
     <>
       {segments.map((segment) => {
@@ -47,51 +122,7 @@ function MarkdownMessage({ text, highlighter }: { text: string; highlighter?: Co
         const occurrence = keyCounts.get(baseKey) ?? 0;
         keyCounts.set(baseKey, occurrence + 1);
         const key = `${baseKey}-${occurrence}`;
-        if (segment.type === "markdown") {
-          if (!segment.text) return null;
-
-          const layoutBlocks = splitMarkdownLayoutBlocks(segment.text);
-          const blockKeyCounts = new Map<string, number>();
-          return (
-            <Box key={key} flexDirection="column">
-              {layoutBlocks.map((block, index) => {
-                const next = layoutBlocks[index + 1];
-                const needsSpacing = block.kind === "content" && next?.kind === "table";
-                const blockBaseKey = `${block.kind}-${block.text}`;
-                const blockOccurrence = blockKeyCounts.get(blockBaseKey) ?? 0;
-                blockKeyCounts.set(blockBaseKey, blockOccurrence + 1);
-                return (
-                  <Box key={`${key}-${blockBaseKey}-${blockOccurrence}`} marginBottom={needsSpacing ? 1 : 0}>
-                    <MarkdownText text={block.text} {...MARKDOWN_OPTIONS} />
-                  </Box>
-                );
-              })}
-            </Box>
-          );
-        }
-
-        if (segment.type === "code") {
-          return <CodeBlock key={key} code={segment.text} language={segment.language} highlighter={highlighter} />;
-        }
-
-        const rendered = renderMermaidDiagram(segment.text);
-        if (!rendered) {
-          return (
-            <MarkdownText
-              key={`${key}-fallback`}
-              text={`\`\`\`mermaid\n${segment.text}\n\`\`\``}
-              {...MARKDOWN_OPTIONS}
-            />
-          );
-        }
-
-        return (
-          <Box key={key} flexDirection="column" marginTop={1} marginBottom={1}>
-            <Text color={ASSISTANT} wrap="truncate">
-              {rendered}
-            </Text>
-          </Box>
-        );
+        return <MarkdownSegmentView key={key} segment={segment} highlighter={highlighter} />;
       })}
     </>
   );
@@ -108,7 +139,14 @@ type ToolSummaryBlock = {
   type: "tool_summary";
   counts: Record<string, number>;
 };
-type RenderBlock = ThinkingBlock | ToolBlock | SkillBlock | ToolGroupBlock | ToolSummaryBlock;
+type RenderBlock =
+  | ThinkingBlock
+  | ToolBlock
+  | SkillBlock
+  | SmithUiBlock
+  | SmithUiFallbackBlock
+  | ToolGroupBlock
+  | ToolSummaryBlock;
 
 function truncate(text: string, max = 80): string {
   if (text.length <= max) {
@@ -229,6 +267,15 @@ function ToolSummaryMessage({ block }: { block: ToolSummaryBlock }) {
     <Box marginTop={1} paddingLeft={2}>
       <Text color={SUCCESS}>✓ </Text>
       <Text color={MUTED}>{parts.join("  ")}</Text>
+    </Box>
+  );
+}
+
+function SmithUiFallbackMessage({ block }: { block: SmithUiFallbackBlock }) {
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Text color={WARNING}>structured result fallback: {block.reason}</Text>
+      <CodeBlock code={block.code} language="json" />
     </Box>
   );
 }
@@ -435,6 +482,7 @@ function TurnView({
   viewMode: TranscriptViewMode;
   highlighter?: CodeHighlighter;
 }) {
+  const { columns } = useWindowSize();
   const hasAssistantBody = entry.assistantText.trim().length > 0;
   const assistantBody = hasAssistantBody ? stripEmojiIcons(entry.assistantText).trimEnd() : "";
   const provisionalBody = stripEmojiIcons(entry.provisional.map((item) => item.text).join(""));
@@ -445,7 +493,7 @@ function TurnView({
   return (
     <Box flexDirection="column" marginBottom={1}>
       {entry.userText ? (
-        <Box>
+        <Box {...userMessageBoxProps(columns)}>
           <Text color={ACCENT}>❯ </Text>
           <Text>{entry.userText}</Text>
         </Box>
@@ -463,13 +511,17 @@ function TurnView({
             return <ToolSummaryMessage key={block.id} block={block} />;
           case "skill":
             return <SkillMessage key={block.id} block={block} viewMode={viewMode} />;
+          case "smith_ui":
+            return <SmithUiView key={block.id} payload={block.payload} />;
+          case "smith_ui_fallback":
+            return <SmithUiFallbackMessage key={block.id} block={block} />;
           default:
             return null;
         }
       })}
 
       {hasAssistantBody || hasProvisionalBody || entry.streaming ? (
-        <Box marginTop={1}>
+        <Box marginTop={1} paddingLeft={2}>
           <AssistantMarker active={entry.streaming} />
           <Box flexDirection="column" flexGrow={1}>
             {hasAssistantBody ? <MarkdownMessage text={assistantBody} highlighter={highlighter} /> : null}
@@ -493,16 +545,6 @@ function TurnView({
   );
 }
 
-function TurnDivider() {
-  const { columns } = useWindowSize();
-  const lineWidth = Math.max(1, columns - 6);
-  return (
-    <Box marginBottom={1} paddingLeft={1} paddingRight={1}>
-      <Text color={BORDER}>{"─".repeat(lineWidth)}</Text>
-    </Box>
-  );
-}
-
 /**
  * Renders one transcript entry. Completed entries go through Ink's <Static>
  * (rendered exactly once, then live in scrollback); the active streaming turn
@@ -510,12 +552,10 @@ function TurnDivider() {
  */
 export function TranscriptEntryView({
   entry,
-  showDivider,
   viewMode,
   highlighter,
 }: {
   entry: TranscriptEntry;
-  showDivider: boolean;
   viewMode: TranscriptViewMode;
   highlighter?: CodeHighlighter;
 }) {
@@ -525,7 +565,6 @@ export function TranscriptEntryView({
 
   return (
     <Box flexDirection="column">
-      {showDivider ? <TurnDivider /> : null}
       <TurnView entry={entry} viewMode={viewMode} highlighter={highlighter} />
     </Box>
   );

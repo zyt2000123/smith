@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import stringWidth from "string-width";
 
-import { renderMermaidDiagram, splitMarkdownBlocks, splitMermaidBlocks } from "./mermaid.js";
+import { renderMermaidDiagram, renderSimpleTextDiagram, splitMarkdownBlocks, splitMermaidBlocks } from "./mermaid.js";
 
 test("splits ordinary fenced code into a code segment", () => {
   assert.deepEqual(splitMarkdownBlocks("Before\n\n```python\nprint('hi')\n```\n\nAfter"), [
@@ -45,6 +45,30 @@ test("renders a basic Mermaid flowchart as terminal Unicode", () => {
     rendered?.split("\n").some((line) => line.endsWith(" ")),
     false,
   );
+});
+
+test("renders Mermaid sequence diagrams as terminal Unicode", () => {
+  const rendered = renderMermaidDiagram("sequenceDiagram\n  云平台->>用户系统: HTTP POST");
+
+  assert.match(rendered ?? "", /云平台/);
+  assert.match(rendered ?? "", /用户系统/);
+  assert.match(rendered ?? "", /HTTP POST/);
+  assert.match(rendered ?? "", /[┌┐└┘]/);
+});
+
+test("turns an unlabelled two-endpoint arrow into a diagram", () => {
+  const rendered = renderSimpleTextDiagram(`用户系统  <——HTTP POST——  云平台
+                      (事件发生时)`);
+
+  assert.match(rendered ?? "", /用户系统/);
+  assert.match(rendered ?? "", /云平台/);
+  assert.match(rendered ?? "", /HTTP.*POST/);
+  assert.match(rendered ?? "", /事件发生时/);
+  assert.match(rendered ?? "", /[┌┐└┘]/);
+});
+
+test("keeps ordinary text outside the simple-diagram grammar", () => {
+  assert.equal(renderSimpleTextDiagram("curl --request POST https://example.test"), null);
 });
 
 test("turns HTML line breaks in node labels into readable terminal text", () => {

@@ -19,7 +19,7 @@ const PLACEHOLDER_START = 0xe000;
 const MAX_INLINE_EDGE_LABEL_WIDTH = 24;
 const EDGE_ANNOTATION_WIDTH = 80;
 
-type NormalizedFlowchart = {
+type NormalizedMermaidDiagram = {
   text: string;
   annotations: string[];
 };
@@ -187,32 +187,40 @@ function wrapTerminalText(value: string, maxWidth: number): string[] {
 }
 
 /**
- * The terminal renderer intentionally supports a small flowchart grammar. Keep
- * Mermaid node IDs and shapes intact so the renderer can preserve the graph
+ * The terminal renderer intentionally supports a small Mermaid grammar. Keep
+ * flowchart node IDs and shapes intact so the renderer can preserve the graph
  * structure and lay out CJK labels correctly.
  */
-function normalizeFlowchart(source: string): NormalizedFlowchart | null {
-  const extracted = extractLongEdgeLabels(source);
-  const lines = extracted.text.split(/\r?\n/);
+function normalizeMermaidDiagram(source: string): NormalizedMermaidDiagram | null {
+  const lines = source.split(/\r?\n/);
   const firstIndex = lines.findIndex((line) => line.trim().length > 0 && !line.trim().startsWith("%%"));
   if (firstIndex < 0) return null;
 
   const direction = lines[firstIndex]?.trim().match(/^(graph|flowchart)\s+(TD|LR)$/i);
-  if (!direction) return null;
+  if (direction) {
+    const extracted = extractLongEdgeLabels(source);
+    const normalizedLines = extracted.text.split(/\r?\n/);
+    return {
+      text: normalizedLines
+        .map((line, index) =>
+          index === firstIndex ? `${direction[1].toLowerCase()} ${direction[2].toUpperCase()}` : line,
+        )
+        .join("\n"),
+      annotations: extracted.annotations,
+    };
+  }
+
+  if (!/^sequenceDiagram$/i.test(lines[firstIndex]?.trim() ?? "")) return null;
 
   return {
-    text: lines
-      .map((line, index) =>
-        index === firstIndex ? `${direction[1].toLowerCase()} ${direction[2].toUpperCase()}` : line,
-      )
-      .join("\n"),
-    annotations: extracted.annotations,
+    text: lines.map((line, index) => (index === firstIndex ? "sequenceDiagram" : line)).join("\n"),
+    annotations: [],
   };
 }
 
 /** Returns a terminal diagram, or null when the input is not supported. */
 export function renderMermaidDiagram(source: string): string | null {
-  const normalized = normalizeFlowchart(source);
+  const normalized = normalizeMermaidDiagram(source);
   if (!normalized) return null;
   const encoded = encodeTerminalWidths(normalized.text);
 
@@ -242,4 +250,63 @@ export function renderMermaidDiagram(source: string): string | null {
   } finally {
     console.debug = previousDebug;
   }
+}
+
+type SimpleDiagram = {
+  left: string;
+  right: string;
+  relation: string;
+  caption: string;
+  direction: "left" | "right";
+};
+
+const RELATION_GLYPHS = /[<>←→—–=-]/u;
+const RELATION_EDGES = /^[<←—–=-].*[>→—–=-]$/u;
+const RELATION_TRIM = /^[\s<>←→—–=-]+|[\s<>←→—–=-]+$/gu;
+const CAPTION_PATTERN = /^[（(](.*?)[）)]$/u;
+
+function parseSimpleDiagram(source: string): SimpleDiagram | null {
+  const lines = source
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0 || lines.length > 2) return null;
+
+  const columns = lines[0]?.split(/\s{2,}/).filter(Boolean);
+  if (columns?.length !== 3) return null;
+  const [left, relation, right] = columns;
+  if (!left || !relation || !right || !RELATION_GLYPHS.test(relation) || !RELATION_EDGES.test(relation)) return null;
+
+  const hasLeftArrow = /[<←]/u.test(relation);
+  const hasRightArrow = /[>→]/u.test(relation);
+  if (hasLeftArrow === hasRightArrow) return null;
+
+  const caption = lines[1]?.match(CAPTION_PATTERN)?.[1]?.trim() ?? "";
+  if (lines.length === 2 && !caption) return null;
+
+  return {
+    left,
+    right,
+    relation: relation.replace(RELATION_TRIM, "").trim(),
+    caption,
+    direction: hasLeftArrow ? "left" : "right",
+  };
+}
+
+function escapeMermaidLabel(value: string): string {
+  return value.replaceAll("[", "(").replaceAll("]", ")").replaceAll('"', "'");
+}
+
+/** Renders an unlabelled, two-endpoint arrow block when its structure is unambiguous. */
+export function renderSimpleTextDiagram(source: string): string | null {
+  const diagram = parseSimpleDiagram(source);
+  if (!diagram) return null;
+
+  const edgeLabel = [diagram.relation, diagram.caption].filter(Boolean).join(" · ");
+  const sourceLabel = diagram.direction === "left" ? diagram.right : diagram.left;
+  const targetLabel = diagram.direction === "left" ? diagram.left : diagram.right;
+  const edge = edgeLabel ? `-->|${escapeMermaidLabel(edgeLabel)}|` : "-->";
+  return renderMermaidDiagram(
+    `flowchart LR\n  source[${escapeMermaidLabel(sourceLabel)}] ${edge} target[${escapeMermaidLabel(targetLabel)}]`,
+  );
 }

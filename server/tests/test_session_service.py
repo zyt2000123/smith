@@ -766,6 +766,94 @@ async def test_stream_message_forwards_provisional_lifecycle_and_persists_only_c
 
 
 @pytest.mark.asyncio
+async def test_stream_message_forwards_validated_smith_ui_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_build_engine_runtime(agent_id: str, name: str, *, session_id: str | None = None):
+        return SimpleNamespace(agent_id=agent_id, agent_name=name, session_id=session_id), object()
+
+    async def fake_engine_reply_events(request, runtime, services):
+        yield SimpleNamespace(
+            type=SimpleNamespace(value="smith_ui"),
+            data={
+                "version": 1,
+                "spec": {
+                    "root": "summary",
+                    "elements": {
+                        "summary": {
+                            "type": "Heading",
+                            "props": {"text": "Deployment", "level": "h1"},
+                            "children": [],
+                        }
+                    },
+                },
+                "images": [],
+            },
+        )
+        yield SimpleNamespace(type=SimpleNamespace(value="text_delta"), data={"text": "Shown above."})
+        yield SimpleNamespace(type=SimpleNamespace(value="run_finished"), data={"status": "completed"})
+
+    monkeypatch.setattr(session_service_module, "build_engine_runtime", fake_build_engine_runtime)
+    monkeypatch.setattr(
+        session_service_module,
+        "engine_run_stream_with_runtime",
+        _fake_run(fake_engine_reply_events),
+    )
+
+    events = [
+        event
+        async for event in SessionService(FakeSessionRepo(), FakeAgentProfileRepo()).stream_message(
+            "smith-id",
+            "sess-1",
+            "show deployment",
+        )
+    ]
+
+    ui = [event for event in events if event["event"] == "smith_ui"]
+    assert len(ui) == 1
+    assert json.loads(ui[0]["data"])["spec"]["root"] == "summary"
+
+
+@pytest.mark.asyncio
+async def test_stream_message_falls_back_to_code_for_invalid_smith_ui_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_build_engine_runtime(agent_id: str, name: str, *, session_id: str | None = None):
+        return SimpleNamespace(agent_id=agent_id, agent_name=name, session_id=session_id), object()
+
+    async def fake_engine_reply_events(request, runtime, services):
+        yield SimpleNamespace(
+            type=SimpleNamespace(value="smith_ui"),
+            data={
+                "version": 1,
+                "spec": {
+                    "root": "input",
+                    "elements": {"input": {"type": "TextInput", "props": {}, "children": []}},
+                },
+                "images": [],
+            },
+        )
+
+    monkeypatch.setattr(session_service_module, "build_engine_runtime", fake_build_engine_runtime)
+    monkeypatch.setattr(
+        session_service_module,
+        "engine_run_stream_with_runtime",
+        _fake_run(fake_engine_reply_events),
+    )
+
+    events = [
+        event
+        async for event in SessionService(FakeSessionRepo(), FakeAgentProfileRepo()).stream_message(
+            "smith-id",
+            "sess-1",
+            "show deployment",
+        )
+    ]
+
+    fallback = [event for event in events if event["event"] == "smith_ui_fallback"]
+    assert len(fallback) == 1
+    payload = json.loads(fallback[0]["data"])
+    assert "not permitted" in payload["reason"]
+    assert '"TextInput"' in payload["code"]
+
+
+@pytest.mark.asyncio
 async def test_stream_message_saves_visible_provisional_reply_on_client_disconnect(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_build_engine_runtime(agent_id: str, name: str, *, session_id: str | None = None):
         return SimpleNamespace(agent_id=agent_id, agent_name=name, session_id=session_id), object()
