@@ -9,6 +9,8 @@ import {
   handleEscape,
   handleModelPickerInput,
   handleQueuedEdit,
+  handleSkillMentionNavigation,
+  handleSkillMentionSelection,
   handleSkillsNavigation,
   handleSkillsSelection,
   handleSlashNavigation,
@@ -42,6 +44,9 @@ function inputOptions(bridge: NodeBridge, store: ReturnType<typeof createAppStor
     slashIndex: 0,
     skills: [],
     skillsIndex: 0,
+    skillMentionMenuOpen: false,
+    skillMentions: [],
+    skillMentionIndex: 0,
     panel: "chat",
     pendingSkill: null,
     configConfigured: true,
@@ -105,6 +110,36 @@ test("enter arms the selected skill and returns to chat", () => {
   assert.equal(store.getState().panel, "chat");
   assert.equal(store.getState().pendingSkill?.name, "research");
   assert.equal(store.getState().statusLine, "");
+});
+
+test("@ skill picker navigates and inserts the selected skill into the input", () => {
+  const store = createAppStore();
+  const options = inputOptions(new NodeBridge(store), store);
+  options.skillMentionMenuOpen = true;
+  options.skillMentions = [
+    {
+      name: "research",
+      description: "Research a topic.",
+      source: "builtin",
+      version: "0.1.0",
+      argument_hint: "",
+    },
+    {
+      name: "security-review",
+      description: "Review a change.",
+      source: "builtin",
+      version: "0.1.0",
+      argument_hint: "",
+    },
+  ];
+
+  assert.equal(handleSkillMentionNavigation({ downArrow: true } as Key, options), true);
+  assert.equal(store.getState().skillMentionIndex, 1);
+  options.skillMentionIndex = 1;
+
+  assert.equal(handleSkillMentionSelection(returnKey(), options), true);
+  assert.equal(store.getState().inputValue, "@security-review ");
+  assert.equal(store.getState().pendingSkill?.name, "security-review");
 });
 
 test("approval options move with arrows and Enter resolves the selected option", async () => {

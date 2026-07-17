@@ -12,6 +12,7 @@ import {
 } from "./list-navigation.js";
 import { advanceModelPicker, moveModelPicker } from "./model-picker.js";
 import { fieldValue, isEditableSetupField, nextSetupIndex, setSetupField, setupFieldAt } from "./setup.js";
+import { selectedSkillMentionState } from "./skill-mention.js";
 import type { AppStore, Mode, Panel } from "./store.js";
 import { TOKEN_TABS } from "./token-stats.js";
 import type { TranscriptViewMode } from "./transcript-state.js";
@@ -28,6 +29,9 @@ export type ShellInputOptions = {
   slashIndex: number;
   skills: SkillSummary[];
   skillsIndex: number;
+  skillMentionMenuOpen: boolean;
+  skillMentions: SkillSummary[];
+  skillMentionIndex: number;
   panel: Panel;
   pendingSkill: SkillSummary | null;
   configConfigured: boolean;
@@ -130,6 +134,35 @@ export function handleSkillsNavigation(key: Key, options: ShellInputOptions): bo
   return true;
 }
 
+export function handleSkillMentionNavigation(key: Key, options: ShellInputOptions): boolean {
+  if (!options.skillMentionMenuOpen) return false;
+  if (key.tab) return true;
+  if (options.skillMentions.length === 0) return false;
+
+  const navigation = navigationFromKey(key);
+  if (!navigation) return false;
+
+  options.getState().set({
+    skillMentionIndex: moveListIndex(
+      options.skillMentionIndex,
+      options.skillMentions.length,
+      navigation,
+      SKILLS_PANEL_VISIBLE_ITEMS,
+    ),
+  });
+  return true;
+}
+
+export function handleSkillMentionSelection(key: Key, options: ShellInputOptions): boolean {
+  if (!key.return || !options.skillMentionMenuOpen || options.skillMentions.length === 0) return false;
+
+  const selected = options.skillMentions[options.skillMentionIndex];
+  if (!selected) return false;
+
+  options.getState().set(selectedSkillMentionState(selected));
+  return true;
+}
+
 export function handleSkillsSelection(key: Key, options: ShellInputOptions): boolean {
   if (!key.return || options.slashMenuOpen || options.panel !== "skills" || options.skills.length === 0) return false;
 
@@ -216,6 +249,10 @@ export function handleEscape(key: Key, options: ShellInputOptions): boolean {
   if (!key.escape) return false;
 
   const state = options.getState();
+  if (options.skillMentionMenuOpen) {
+    state.set({ inputValue: "", skillMentionIndex: 0 });
+    return true;
+  }
   if (options.slashMenuOpen) {
     state.set({ inputValue: "", slashIndex: 0 });
     return true;
@@ -246,7 +283,7 @@ export function handleQueuedEdit(key: Key, options: ShellInputOptions): boolean 
 }
 
 function handleHistoryNavigation(key: Key, options: ShellInputOptions): boolean {
-  if (options.slashMenuOpen || (!key.upArrow && !key.downArrow)) return false;
+  if (options.slashMenuOpen || options.skillMentionMenuOpen || (!key.upArrow && !key.downArrow)) return false;
 
   const state = options.getState();
   if (state.inputHistory.length === 0) return false;
@@ -274,6 +311,14 @@ function cyclePanel(key: Key, options: ShellInputOptions): void {
   options.getState().set({ panel: panels[(index + 1) % panels.length] });
 }
 
+function handlePickerInput(key: Key, options: ShellInputOptions): boolean {
+  if (handleSkillMentionSelection(key, options)) return true;
+  if (handleSlashNavigation(key, options)) return true;
+  if (handleSkillMentionNavigation(key, options)) return true;
+  if (handleSkillsSelection(key, options)) return true;
+  return handleSkillsNavigation(key, options);
+}
+
 function routeInput(input: string, key: Key, options: ShellInputOptions): void {
   if (handleCtrlC(input, key, options)) return;
   if (options.compressing || options.inputLocked) return;
@@ -285,9 +330,7 @@ function routeInput(input: string, key: Key, options: ShellInputOptions): void {
   if (handleApprovalInput(key, options)) return;
   if (handleViewToggle(input, key, options)) return;
   if (handleQueuedEdit(key, options)) return;
-  if (handleSlashNavigation(key, options)) return;
-  if (handleSkillsSelection(key, options)) return;
-  if (handleSkillsNavigation(key, options)) return;
+  if (handlePickerInput(key, options)) return;
   if (handleTokenNavigation(key, options)) return;
   if (handleEscape(key, options)) return;
   if (handleHistoryNavigation(key, options)) return;

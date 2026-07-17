@@ -36,6 +36,12 @@ import {
   setupFieldLabel,
   setupFields,
 } from "./setup.js";
+import {
+  filterSkillMentions,
+  isSkillMentionQuery,
+  parseSkillMention,
+  selectedSkillMentionState,
+} from "./skill-mention.js";
 import { type AppStore, createAppStore } from "./store.js";
 import { ACCENT, BORDER, ERROR, INFO, MUTED, SELECTED_BACKGROUND, SELECTED_FOREGROUND, WARNING } from "./theme.js";
 import { TokenStatsPanel } from "./token-panel.js";
@@ -95,7 +101,9 @@ function HeroPanel() {
         ))
       )}
       <Text> </Text>
-      <Text color={INFO}>Type `/` for commands · Enter confirms · Esc goes back · `/help` for all</Text>
+      <Text color={INFO}>
+        Type `/` for commands · `@` for skills · Enter confirms · Esc goes back · `/help` for all
+      </Text>
     </Box>
   );
 }
@@ -243,6 +251,36 @@ function SlashMenu({ items, selectedIndex }: { items: SlashItem[]; selectedIndex
   );
 }
 
+function SkillMentionMenu({ items, selectedIndex }: { items: SkillSummary[]; selectedIndex: number }) {
+  const visible = getVisibleList(items, selectedIndex, SLASH_MENU_VISIBLE_ITEMS);
+  return (
+    <Box flexDirection="column" marginBottom={1} marginTop={1}>
+      <Text color={ACCENT}>Skill picker</Text>
+      {items.length === 0 ? (
+        <Text color={MUTED}>No matching skills.</Text>
+      ) : (
+        <>
+          {visible.startIndex > 0 ? <Text color={MUTED}>↑ more skills</Text> : null}
+          {visible.items.map((skill, offset) => {
+            const index = visible.startIndex + offset;
+            const selected = index === selectedIndex;
+            return (
+              <Box key={skill.name} width="100%" backgroundColor={selected ? SELECTED_BACKGROUND : undefined}>
+                <Text color={selected ? SELECTED_FOREGROUND : INFO} bold={selected}>
+                  {selected ? ">" : " "} @{skill.name}
+                </Text>
+                <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{`  ${truncate(skill.description, 60)}`}</Text>
+              </Box>
+            );
+          })}
+          {visible.startIndex + visible.items.length < items.length ? <Text color={MUTED}>↓ more skills</Text> : null}
+          <Text color={MUTED}>↑/↓ select · Enter insert · Esc cancel</Text>
+        </>
+      )}
+    </Box>
+  );
+}
+
 function ShellContent({
   mode,
   panel,
@@ -302,6 +340,9 @@ type ShellFooterProps = {
   slashMenuOpen: boolean;
   slashItems: SlashItem[];
   slashIndex: number;
+  skillMentionMenuOpen: boolean;
+  skillMentions: SkillSummary[];
+  skillMentionIndex: number;
   viewMode: TranscriptViewMode;
   config: AppStore["config"];
   selectedModelProfile: AppStore["selectedModelProfile"];
@@ -485,6 +526,9 @@ function FooterInput(props: ShellFooterProps) {
         />
       </Box>
       {props.slashMenuOpen ? <SlashMenu items={props.slashItems} selectedIndex={props.slashIndex} /> : null}
+      {props.skillMentionMenuOpen ? (
+        <SkillMentionMenu items={props.skillMentions} selectedIndex={props.skillMentionIndex} />
+      ) : null}
     </>
   );
 }
@@ -525,6 +569,16 @@ function completeSlashSelection(input: string, slashMenuOpen: boolean, items: Sl
   } else {
     getState().set({ inputValue: selected.command, statusLine: `Ready: ${selected.command}` });
   }
+  return true;
+}
+
+function completeSkillMentionSelection(skillMentionMenuOpen: boolean, items: SkillSummary[], index: number): boolean {
+  if (!skillMentionMenuOpen) return false;
+
+  const selected = items[index];
+  if (!selected) return false;
+
+  getState().set(selectedSkillMentionState(selected));
   return true;
 }
 
@@ -586,14 +640,25 @@ async function submitChat(
   slashMenuOpen: boolean,
   slashItems: SlashItem[],
   slashIndex: number,
+  skillMentionMenuOpen: boolean,
+  skillMentions: SkillSummary[],
+  skillMentionIndex: number,
   exit: () => void,
 ): Promise<void> {
   const input = value.trim();
   if (!input) return;
 
-  const explicitSkill = parseSkill(input, skills);
+  if (completeSkillMentionSelection(skillMentionMenuOpen, skillMentions, skillMentionIndex)) return;
+
+  const explicitSkill = parseSkillMention(input, skills) ?? parseSkill(input, skills);
   const skill = explicitSkill?.skill ?? pendingSkill;
   const payload = explicitSkill?.prompt || input;
+
+  if (explicitSkill && !explicitSkill.prompt) {
+    rememberSubmittedInput(input);
+    armSkill(explicitSkill.skill);
+    return;
+  }
 
   if (busy) {
     await submitWhileBusy(input, payload, skill, slashMenuOpen, slashItems, slashIndex);
@@ -601,10 +666,6 @@ async function submitChat(
   }
 
   rememberSubmittedInput(input);
-  if (explicitSkill && !explicitSkill.prompt) {
-    armSkill(explicitSkill.skill);
-    return;
-  }
   if (input.startsWith("/") && !explicitSkill) {
     if (completeSlashSelection(input, slashMenuOpen, slashItems, slashIndex)) return;
     await runShellCommand(input, { bridge, exit, getState, workingDir: PROJECT_CWD });
@@ -699,10 +760,13 @@ function SmithApp() {
   const setupFlow = useS((state) => state.setupFlow);
   const slashIndex = useS((state) => state.slashIndex);
   const skillsIndex = useS((state) => state.skillsIndex);
+  const skillMentionIndex = useS((state) => state.skillMentionIndex);
 
   const activeSetupField = setupFieldAt(setupIndex, setupFlow);
   const slashItems = useMemo(() => filterSlash(buildSlashItems(skills), inputValue), [inputValue, skills]);
   const slashMenuOpen = mode === "chat" && inputValue.startsWith("/");
+  const skillMentionMenuOpen = mode === "chat" && isSkillMentionQuery(inputValue);
+  const skillMentions = useMemo(() => filterSkillMentions(skills, inputValue), [inputValue, skills]);
 
   const { done, active } = useMemo(() => splitTranscript(transcript), [transcript]);
   const staticItems = useMemo<StaticItem[]>(() => [{ kind: "hero", id: "hero" }, ...done], [done]);
@@ -716,6 +780,9 @@ function SmithApp() {
   useEffect(() => {
     if (skillsIndex >= skills.length) getState().set({ skillsIndex: 0 });
   }, [skills.length, skillsIndex]);
+  useEffect(() => {
+    if (skillMentionIndex >= skillMentions.length) getState().set({ skillMentionIndex: 0 });
+  }, [skillMentionIndex, skillMentions.length]);
   const handleInputChange = useCallback(
     (value: string) => {
       const suppressed = suppressRef.current;
@@ -723,15 +790,42 @@ function SmithApp() {
         suppressRef.current = null;
         if (value === `${inputValue}${suppressed}`) return;
       }
+      if (isSkillMentionQuery(value)) {
+        getState().set({ inputValue: value, pendingSkill: null, skillMentionIndex: 0 });
+        return;
+      }
       getState().set({ inputValue: value });
     },
     [inputValue],
   );
   const handleChatSubmit = useCallback(
     (value: string) => {
-      void submitChat(value, busy, pendingSkill, skills, slashMenuOpen, slashItems, slashIndex, exit);
+      void submitChat(
+        value,
+        busy,
+        pendingSkill,
+        skills,
+        slashMenuOpen,
+        slashItems,
+        slashIndex,
+        skillMentionMenuOpen,
+        skillMentions,
+        skillMentionIndex,
+        exit,
+      );
     },
-    [busy, exit, pendingSkill, skills, slashIndex, slashItems, slashMenuOpen],
+    [
+      busy,
+      exit,
+      pendingSkill,
+      skillMentionIndex,
+      skillMentionMenuOpen,
+      skillMentions,
+      skills,
+      slashIndex,
+      slashItems,
+      slashMenuOpen,
+    ],
   );
   const handleSetupSubmit = useCallback(
     (value: string) => {
@@ -758,6 +852,9 @@ function SmithApp() {
     slashIndex,
     skills,
     skillsIndex,
+    skillMentionMenuOpen,
+    skillMentions,
+    skillMentionIndex,
     panel,
     pendingSkill,
     configConfigured: Boolean(config?.configured),
@@ -818,6 +915,9 @@ function SmithApp() {
             slashIndex={slashIndex}
             slashItems={slashItems}
             slashMenuOpen={slashMenuOpen}
+            skillMentionIndex={skillMentionIndex}
+            skillMentionMenuOpen={skillMentionMenuOpen}
+            skillMentions={skillMentions}
             statusLine={statusLine}
             runStartedAt={runStartedAt}
             turnTokenUsage={turnTokenUsage}
