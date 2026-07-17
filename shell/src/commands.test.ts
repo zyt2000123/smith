@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { NodeBridge } from "./bridge.js";
-import { buildSlashItems, filterSlash, parseSkill, runShellCommand } from "./commands.js";
+import {
+  acceptsComposerSubmission,
+  buildSlashItems,
+  filterSlash,
+  parseSkill,
+  runShellCommand,
+  selectedSlashItem,
+} from "./commands.js";
 import { createAppStore } from "./store.js";
 
 function skill(name: string) {
@@ -70,6 +77,19 @@ test("hooks opens the lifecycle hooks panel", async () => {
   assert.equal(store.getState().panel, "hooks");
   assert.equal(store.getState().hooksIndex, 0);
   assert.match(store.getState().statusLine, /lifecycle hook/);
+});
+
+test("welcome accepts the first command submitted from the composer", () => {
+  assert.equal(acceptsComposerSubmission("welcome"), true);
+  assert.equal(acceptsComposerSubmission("chat"), true);
+  assert.equal(acceptsComposerSubmission("hooks"), false);
+});
+
+test("the highlighted hooks command is confirmed with one Enter", () => {
+  const items = filterSlash(buildSlashItems([]), "/");
+  const hooksIndex = items.findIndex((item) => item.command === "/hooks");
+
+  assert.equal(selectedSlashItem("/", true, items, hooksIndex)?.command, "/hooks");
 });
 
 test("resume recovers the retained or explicitly named run", async () => {

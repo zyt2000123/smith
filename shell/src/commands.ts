@@ -3,7 +3,7 @@ import { errorMessage, type NodeBridge } from "./bridge.js";
 import { LIFECYCLE_HOOKS } from "./hooks.js";
 import { createSetupDraft } from "./setup.js";
 import { isSkillEnabled } from "./skill-mention.js";
-import type { AppStore } from "./store.js";
+import type { AppStore, Panel } from "./store.js";
 
 export type SlashItem = {
   id: string;
@@ -176,6 +176,23 @@ export function filterSlash(items: SlashItem[], input: string): SlashItem[] {
   const query = input.slice(1).trim().toLowerCase();
   if (!query) return items;
   return items.filter((item) => `${item.command} ${item.title} ${item.description}`.toLowerCase().includes(query));
+}
+
+/** Return the highlighted slash entry only while the composer still contains a partial command. */
+export function selectedSlashItem(
+  input: string,
+  slashMenuOpen: boolean,
+  items: SlashItem[],
+  index: number,
+): SlashItem | null {
+  const selected = items[index];
+  if (!slashMenuOpen || !selected || input.split(/\s+/).length !== 1 || input === selected.command) return null;
+  return selected;
+}
+
+/** The welcome screen has the same composer as chat, so it must accept the first command or prompt. */
+export function acceptsComposerSubmission(panel: Panel): boolean {
+  return panel === "welcome" || panel === "chat";
 }
 
 export function parseSkill(raw: string, skills: SkillSummary[]): { skill: SkillSummary; prompt: string } | null {

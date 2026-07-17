@@ -12,7 +12,15 @@ import type { PendingApproval, SkillSummary } from "./api.js";
 import { approvalDetails, approvalReason, approvalSummary, approvalTitle } from "./approval.js";
 import { NodeBridge } from "./bridge.js";
 import type { CodeHighlighter } from "./code-block.js";
-import { buildSlashItems, filterSlash, parseSkill, runShellCommand, type SlashItem } from "./commands.js";
+import {
+  acceptsComposerSubmission,
+  buildSlashItems,
+  filterSlash,
+  parseSkill,
+  runShellCommand,
+  type SlashItem,
+  selectedSlashItem,
+} from "./commands.js";
 import { loadHistory, saveHistory } from "./history.js";
 import { LIFECYCLE_HOOKS } from "./hooks.js";
 import { RunProgress, StatusHud } from "./hud.js";
@@ -719,8 +727,8 @@ function ShellFooter(props: ShellFooterProps) {
 }
 
 function completeSlashSelection(input: string, slashMenuOpen: boolean, items: SlashItem[], index: number): boolean {
-  const selected = items[index];
-  if (!slashMenuOpen || !selected || input.split(/\s+/).length !== 1 || input === selected.command) return false;
+  const selected = selectedSlashItem(input, slashMenuOpen, items, index);
+  if (!selected) return false;
 
   if (selected.kind === "skill" && selected.skill) {
     armSkill(selected.skill);
@@ -790,6 +798,32 @@ async function submitWhileBusy(
   if (skill) getState().set({ pendingSkill: null });
 }
 
+async function submitSlashCommand(
+  input: string,
+  hasExplicitSkill: boolean,
+  slashMenuOpen: boolean,
+  slashItems: SlashItem[],
+  slashIndex: number,
+  exit: () => void,
+): Promise<boolean> {
+  if (!input.startsWith("/") || hasExplicitSkill) return false;
+
+  const selected = selectedSlashItem(input, slashMenuOpen, slashItems, slashIndex);
+  if (selected?.kind === "command") {
+    rememberSubmittedInput(input);
+    await runShellCommand(selected.command, { bridge, exit, getState, workingDir: PROJECT_CWD });
+    return true;
+  }
+  if (completeSlashSelection(input, slashMenuOpen, slashItems, slashIndex)) {
+    rememberSubmittedInput(input);
+    return true;
+  }
+
+  rememberSubmittedInput(input);
+  await runShellCommand(input, { bridge, exit, getState, workingDir: PROJECT_CWD });
+  return true;
+}
+
 async function submitChat(
   value: string,
   panel: AppStore["panel"],
@@ -804,7 +838,7 @@ async function submitChat(
   skillMentionIndex: number,
   exit: () => void,
 ): Promise<void> {
-  if (panel !== "chat") return;
+  if (!acceptsComposerSubmission(panel)) return;
   const input = value.trim();
   if (!input) return;
 
@@ -825,13 +859,9 @@ async function submitChat(
     return;
   }
 
-  rememberSubmittedInput(input);
-  if (input.startsWith("/") && !explicitSkill) {
-    if (completeSlashSelection(input, slashMenuOpen, slashItems, slashIndex)) return;
-    await runShellCommand(input, { bridge, exit, getState, workingDir: PROJECT_CWD });
-    return;
-  }
+  if (await submitSlashCommand(input, Boolean(explicitSkill), slashMenuOpen, slashItems, slashIndex, exit)) return;
 
+  rememberSubmittedInput(input);
   if (skill) getState().set({ pendingSkill: null });
   const accepted = await bridge.sendMessage(payload, skill?.name);
   if (!accepted) getState().set({ inputValue: input });
