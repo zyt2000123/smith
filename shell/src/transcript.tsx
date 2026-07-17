@@ -2,7 +2,6 @@
 
 import { MarkdownText } from "@assistant-ui/react-ink-markdown";
 import { Box, Text, useWindowSize } from "ink";
-import Spinner from "ink-spinner";
 import { useEffect, useState } from "react";
 
 import type { ToolState } from "./activity.js";
@@ -38,6 +37,22 @@ const MARKDOWN_OPTIONS = {
   theme: { listMarker: { color: ASSISTANT } },
   listIndent: 1,
 } as const;
+
+const PROCESSING_LABEL = "Processing";
+const PROCESSING_SCAN_INTERVAL_MS = 110;
+
+export type ProcessingScanSegment = {
+  id: string;
+  text: string;
+  active: boolean;
+};
+
+/** Returns one left-to-right highlight frame for the active reply placeholder. */
+export function processingScanSegments(frame: number): ProcessingScanSegment[] {
+  const activeIndex = ((frame % PROCESSING_LABEL.length) + PROCESSING_LABEL.length) % PROCESSING_LABEL.length;
+
+  return [...PROCESSING_LABEL].map((text, index) => ({ id: String(index), text, active: index === activeIndex }));
+}
 
 export function userMessageBoxProps(columns: number) {
   return {
@@ -473,6 +488,26 @@ function AssistantMarker({ active }: { active: boolean }) {
   );
 }
 
+function ProcessingIndicator() {
+  const [scanFrame, setScanFrame] = useState(0);
+  const segments = processingScanSegments(scanFrame);
+
+  useEffect(() => {
+    const timer = setInterval(() => setScanFrame((frame) => frame + 1), PROCESSING_SCAN_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, []);
+
+  return (
+    <Box>
+      {segments.map((segment) => (
+        <Text key={segment.id} color={WARNING} bold={segment.active} dimColor={!segment.active}>
+          {segment.text}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
 function TurnView({
   entry,
   viewMode,
@@ -533,10 +568,7 @@ function TurnView({
                 <MarkdownMessage text={provisionalBody} highlighter={highlighter} />
               </Box>
             ) : hasAssistantBody ? null : (
-              <Box>
-                <Text color={WARNING}>Processing </Text>
-                <Spinner type="dots" />
-              </Box>
+              <ProcessingIndicator />
             )}
           </Box>
         </Box>

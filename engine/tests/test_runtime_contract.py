@@ -987,6 +987,116 @@ def test_run_stream_reports_terminal_state_only_after_it_is_drained(tmp_path: Pa
     assert stream.status == "completed"
 
 
+def test_run_stream_cleans_up_when_closed_immediately_after_start(tmp_path: Path) -> None:
+    async def run():
+        runtime, services, llm = _runtime(tmp_path)
+        stream = run_stream_with_runtime(EngineRequest(message="hello"), runtime, services)
+        events = stream.stream_events()
+        first_event = await anext(events)
+        await events.aclose()
+        state = RunStateStore(runtime.profile_dir).get(stream.run_id)
+        return stream, first_event, state, llm
+
+    stream, first_event, state, llm = asyncio.run(run())
+
+    assert first_event.type is EventType.RUN_STARTED
+    assert state is not None
+    assert state.status is RunStatus.CANCELLED
+    assert state.reason == "consumer_disconnected"
+    assert llm.closed is True
+    assert stream.is_complete is False
+
+
+def test_run_stream_cleans_up_when_closed_before_first_event(tmp_path: Path) -> None:
+    async def run():
+        runtime, services, llm = _runtime(tmp_path)
+        stream = run_stream_with_runtime(EngineRequest(message="hello"), runtime, services)
+        events = stream.stream_events()
+        await events.aclose()
+        state = RunStateStore(runtime.profile_dir).get(stream.run_id)
+        return stream, state, llm
+
+    stream, state, llm = asyncio.run(run())
+
+    assert state is not None
+    assert state.status is RunStatus.CANCELLED
+    assert state.reason == "consumer_disconnected"
+    assert llm.closed is True
+    assert stream.is_complete is False
+
+
+def test_run_stream_owner_close_cleans_up_an_active_event_iterator(tmp_path: Path) -> None:
+    async def run():
+        runtime, services, llm = _runtime(tmp_path)
+        stream = run_stream_with_runtime(EngineRequest(message="hello"), runtime, services)
+        events = stream.stream_events()
+        first_event = await anext(events)
+        await stream.aclose()
+        state = RunStateStore(runtime.profile_dir).get(stream.run_id)
+        return first_event, state, llm
+
+    first_event, state, llm = asyncio.run(run())
+
+    assert first_event.type is EventType.RUN_STARTED
+    assert state is not None
+    assert state.status is RunStatus.CANCELLED
+    assert state.reason == "consumer_disconnected"
+    assert llm.closed is True
+
+
+def test_run_stream_fails_closed_when_tool_ledger_setup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnavailableLedger:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise OSError("ledger unavailable")
+
+    async def run():
+        runtime, services, llm = _runtime(tmp_path)
+        stream = run_stream_with_runtime(EngineRequest(message="hello"), runtime, services)
+        events = [event async for event in stream.stream_events()]
+        state = RunStateStore(runtime.profile_dir).get(stream.run_id)
+        return stream, events, state, llm
+
+    monkeypatch.setattr(agent_loop_module, "ToolExecutionLedger", UnavailableLedger)
+    stream, events, state, llm = asyncio.run(run())
+
+    assert [event.type for event in events] == [
+        EventType.RUN_STARTED,
+        EventType.FAILED,
+        EventType.DONE,
+        EventType.RUN_FINISHED,
+    ]
+    assert events[-1].data == {
+        "run_id": stream.run_id,
+        "status": "failed",
+        "reason": "tool_ledger_unavailable",
+    }
+    assert state is not None
+    assert state.status is RunStatus.FAILED
+    assert state.reason == "tool_ledger_unavailable"
+    assert llm.closed is True
+
+
+def test_reply_events_cleans_up_when_closed_after_start(tmp_path: Path) -> None:
+    async def run():
+        runtime, services, llm = _runtime(tmp_path)
+        events = reply_events_with_runtime(EngineRequest(message="hello"), runtime, services)
+        first_event = await anext(events)
+        await events.aclose()
+        state = RunStateStore(runtime.profile_dir).get(first_event.data["run_id"])
+        return first_event, state, llm
+
+    first_event, state, llm = asyncio.run(run())
+
+    assert first_event.type is EventType.RUN_STARTED
+    assert state is not None
+    assert state.status is RunStatus.CANCELLED
+    assert state.reason == "consumer_disconnected"
+    assert llm.closed is True
+
+
 def test_reply_events_with_runtime_reports_prepare_failure_and_closes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

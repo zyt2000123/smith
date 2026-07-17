@@ -40,11 +40,12 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.21" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "pdfplumber", specifier = ">=0.11" },
+    { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.50" },
     { name = "pypdf", specifier = ">=6.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
-provides-extras = ["test"]
+provides-extras = ["test", "browser"]
 
 [[package]]
 name = "agent-smith-server"

@@ -162,10 +162,14 @@ routes:
 class FakeRun:
     def __init__(self, events) -> None:
         self._events = events
+        self.closed = False
 
     async def stream_events(self):
         async for event in self._events:
             yield event
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 def _fake_run(factory):
@@ -881,11 +885,14 @@ async def test_stream_message_saves_visible_provisional_reply_on_client_disconne
         )
 
     monkeypatch.setattr(session_service_module, "build_engine_runtime", fake_build_engine_runtime)
-    monkeypatch.setattr(
-        session_service_module,
-        "engine_run_stream_with_runtime",
-        _fake_run(fake_engine_reply_events),
-    )
+    captured: dict[str, FakeRun] = {}
+
+    def fake_run(request, runtime, services) -> FakeRun:
+        run = FakeRun(fake_engine_reply_events(request, runtime, services))
+        captured["run"] = run
+        return run
+
+    monkeypatch.setattr(session_service_module, "engine_run_stream_with_runtime", fake_run)
 
     repo = FakeSessionRepo()
     svc = SessionService(repo, FakeAgentProfileRepo())
@@ -896,6 +903,7 @@ async def test_stream_message_saves_visible_provisional_reply_on_client_disconne
     await stream.aclose()
 
     assert ("sess-1", "assistant", "partial reply") in repo.saved_messages
+    assert captured["run"].closed is True
 
 
 @pytest.mark.asyncio

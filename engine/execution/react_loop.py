@@ -447,6 +447,9 @@ async def react_event_loop(
         except Exception:
             if compression_started:
                 yield ExecutionEvent(EventType.CONTEXT_COMPRESSION_END)
+            for provision_id in active_provision_ids:
+                yield _provisional_retract_event(provision_id, "compression_error")
+            active_provision_ids.clear()
             raise
         if compression_started:
             yield ExecutionEvent(EventType.CONTEXT_COMPRESSION_END)

@@ -509,6 +509,7 @@ class SessionService:
         visible_provisional_reply: dict[str, list[str]] = {}
         msg: dict | None = None
         run_id: str | None = None
+        run = None
         terminal_status = "completed"
         terminal_notice: str | None = None
         try:
@@ -694,6 +695,12 @@ class SessionService:
         finally:
             # 客户端断连/引擎异常时生成器在 yield 处被终止，async for 之后的代码不会执行；
             # 落库放 finally 并用 shield 保护，请求被取消也能保住已生成的部分回复。
+            close_run = getattr(run, "aclose", None)
+            if callable(close_run):
+                try:
+                    await close_run()
+                except Exception:
+                    logger.warning("failed to close agent run (session=%s)", session_id, exc_info=True)
             reply_text = "".join(full_reply)
             if not reply_text:
                 # Direct provider text and active provisional drafts have already

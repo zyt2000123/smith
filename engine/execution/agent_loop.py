@@ -974,7 +974,22 @@ def run_stream_with_runtime(
         ledger: ToolExecutionLedger | None = ToolExecutionLedger(runtime.profile_dir, run_id)
     except Exception:
         logger.warning("failed to initialize tool execution ledger (run=%s)", run_id, exc_info=True)
-        ledger = None
+        if state_store is not None:
+            try:
+                state_store.transition(
+                    run_id,
+                    RunStatus.FAILED,
+                    event_type="run_setup_failed",
+                    reason="tool_ledger_unavailable",
+                    error="tool_ledger_unavailable",
+                )
+            except (RunStateError, OSError, ValueError):
+                logger.warning(
+                    "failed to mark tool ledger setup failure (run=%s)",
+                    run_id,
+                    exc_info=True,
+                )
+        return _failed_setup_stream(run_id, services, "tool_ledger_unavailable")
     return AgentRunStream(
         run_id,
         _run_events_with_runtime(
@@ -986,7 +1001,31 @@ def run_stream_with_runtime(
             trace_store,
             ledger,
         ),
+        on_unstarted_close=lambda: _cancel_unstarted_run(run_id, state_store, services),
     )
+
+
+async def _cancel_unstarted_run(
+    run_id: str,
+    state_store: RunStateStore | None,
+    services: RuntimeServices,
+) -> None:
+    """Clean up a run whose consumer closes the stream before its first event."""
+    if state_store is not None:
+        try:
+            state_store.transition(
+                run_id,
+                RunStatus.CANCELLED,
+                event_type="run_cancelled",
+                reason="consumer_disconnected",
+            )
+        except (RunStateError, OSError, ValueError):
+            logger.warning("failed to mark cancelled run (run=%s)", run_id, exc_info=True)
+    try:
+        await services.close()
+    except Exception:
+        logger.warning("failed to close engine runtime services", exc_info=True)
+    APPROVAL_BROKER.cancel_run(run_id)
 
 
 def _failed_setup_stream(
@@ -995,6 +1034,13 @@ def _failed_setup_stream(
     reason: str,
 ) -> AgentRunStream:
     """Expose setup failures through the same terminal stream contract."""
+
+    async def close_unstarted() -> None:
+        try:
+            await services.close()
+        except Exception:
+            logger.warning("failed to close services after setup failure", exc_info=True)
+
     async def events() -> AsyncGenerator[ExecutionEvent, None]:
         try:
             yield ExecutionEvent(EventType.RUN_STARTED, {"run_id": run_id})
@@ -1010,7 +1056,7 @@ def _failed_setup_stream(
             except Exception:
                 logger.warning("failed to close services after setup failure", exc_info=True)
 
-    return AgentRunStream(run_id, events())
+    return AgentRunStream(run_id, events(), on_unstarted_close=close_unstarted)
 
 
 def resume_stream_with_runtime(
@@ -1073,16 +1119,16 @@ async def _run_events_with_runtime(
     if ledger is not None:
         services.tool_registry.bind_execution_ledger(ledger)
 
-    run_started = ExecutionEvent(
-        EventType.RUN_STARTED,
-        {
-            "run_id": run_id,
-            "project_path": request.working_dir or "",
-        },
-    )
-    _record_run_event(state_store, run_id, run_started, trace_store)
-    yield run_started
     try:
+        run_started = ExecutionEvent(
+            EventType.RUN_STARTED,
+            {
+                "run_id": run_id,
+                "project_path": request.working_dir or "",
+            },
+        )
+        _record_run_event(state_store, run_id, run_started, trace_store)
+        yield run_started
         s = await prepare_runtime(request, runtime, services)
         state_dir = s.state_dir
         if trace_store is not None and hasattr(s, "prompt_manifest"):
@@ -1211,11 +1257,15 @@ async def reply_with_runtime(
     had_tools = False
 
     stream = run_stream_with_runtime(request, runtime, services)
-    async for event in stream.stream_events():
-        if event.type == EventType.TEXT_DELTA:
-            full_text.append(str(event.data.get("text", "")))
-        elif _has_successful_tool_evidence(event):
-            had_tools = True
+    events = stream.stream_events()
+    try:
+        async for event in events:
+            if event.type == EventType.TEXT_DELTA:
+                full_text.append(str(event.data.get("text", "")))
+            elif _has_successful_tool_evidence(event):
+                had_tools = True
+    finally:
+        await events.aclose()
 
     if not stream.is_complete:
         raise RuntimeError("Agent run ended before a terminal state was emitted.")
@@ -1234,8 +1284,12 @@ async def reply_events_with_runtime(
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Compatibility adapter over run_stream_with_runtime."""
     stream = run_stream_with_runtime(request, runtime, services)
-    async for event in stream.stream_events():
-        yield event
+    events = stream.stream_events()
+    try:
+        async for event in events:
+            yield event
+    finally:
+        await events.aclose()
 
 
 async def reply_stream_with_runtime(
