@@ -9,10 +9,12 @@ import {
   handleEscape,
   handleModelPickerInput,
   handleQueuedEdit,
+  handleSkillActionsSelection,
   handleSkillMentionNavigation,
   handleSkillMentionSelection,
   handleSkillsNavigation,
   handleSkillsSelection,
+  handleSkillToggle,
   handleSlashNavigation,
   type ShellInputOptions,
 } from "./input.js";
@@ -44,6 +46,7 @@ function inputOptions(bridge: NodeBridge, store: ReturnType<typeof createAppStor
     slashIndex: 0,
     skills: [],
     skillsIndex: 0,
+    skillActionIndex: 0,
     skillMentionMenuOpen: false,
     skillMentions: [],
     skillMentionIndex: 0,
@@ -110,6 +113,41 @@ test("enter arms the selected skill and returns to chat", () => {
   assert.equal(store.getState().panel, "chat");
   assert.equal(store.getState().pendingSkill?.name, "research");
   assert.equal(store.getState().statusLine, "");
+});
+
+test("skills menu opens the enablement list from its second action", () => {
+  const store = createAppStore();
+  const options = inputOptions(new NodeBridge(store), store);
+  options.panel = "skill-actions";
+  options.skillActionIndex = 1;
+  store.getState().set({ panel: "skill-actions", skillActionIndex: 1 });
+
+  assert.equal(handleSkillActionsSelection(returnKey(), options), true);
+  assert.equal(store.getState().panel, "skill-toggle");
+  assert.equal(store.getState().inputValue, "");
+});
+
+test("Enter toggles the selected skill with its next enabled state", () => {
+  const store = createAppStore();
+  const toggles: Array<{ name: string; enabled: boolean }> = [];
+  const bridge = {
+    setSkillEnabled: (name: string, enabled: boolean) => toggles.push({ name, enabled }),
+  } as unknown as NodeBridge;
+  const options = inputOptions(bridge, store);
+  options.panel = "skill-toggle";
+  options.skills = [
+    {
+      name: "research",
+      description: "Research a topic.",
+      source: "builtin",
+      version: "0.1.0",
+      argument_hint: "",
+      enabled: true,
+    },
+  ];
+
+  assert.equal(handleSkillToggle(returnKey(), options), true);
+  assert.deepEqual(toggles, [{ name: "research", enabled: false }]);
 });
 
 test("@ skill picker navigates and inserts the selected skill into the input", () => {
@@ -327,7 +365,7 @@ test("escape closes the slash palette without cancelling the task", () => {
   assert.equal(cancelled, true);
 });
 
-test("escape returns from a non-chat panel to the chat panel", () => {
+test("escape returns from a skills list to the skills action menu", () => {
   const store = createAppStore();
   const options = inputOptions(new NodeBridge(store), store);
   options.busy = false;
@@ -343,7 +381,7 @@ test("escape returns from a non-chat panel to the chat panel", () => {
   store.getState().set({ panel: "skills", inputValue: "", pendingSkill });
 
   assert.equal(handleEscape(escapeKey(), options), true);
-  assert.equal(store.getState().panel, "chat");
+  assert.equal(store.getState().panel, "skill-actions");
   assert.equal(store.getState().statusLine, "Back.");
   assert.equal(store.getState().pendingSkill?.name, "research");
 });

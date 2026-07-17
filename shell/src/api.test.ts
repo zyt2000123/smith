@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTimeoutSignal, decodeSseEvent, streamMessage, streamRunResume } from "./api.js";
+import { createTimeoutSignal, decodeSseEvent, setSkillEnabled, streamMessage, streamRunResume } from "./api.js";
 
 test("SSE decoder accepts standard data fields without a trailing space", () => {
   const event = decodeSseEvent('event: done\ndata:{"id":"message-1"}');
@@ -118,6 +118,36 @@ test("streamRunResume posts to the run resume endpoint", async () => {
     }
     assert.deepEqual(requests, [{ url: "http://127.0.0.1:8140/api/agent/runs/run-1/resume", method: "POST" }]);
     assert.deepEqual(events, [{ type: "done", id: undefined, runId: "run-1", status: "completed" }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("setSkillEnabled persists a skill toggle through the agent API", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; method: string; body: string | undefined }> = [];
+  globalThis.fetch = async (input, init) => {
+    requests.push({ url: String(input), method: init?.method ?? "GET", body: init?.body?.toString() });
+    return Response.json({
+      name: "research",
+      description: "Research a topic.",
+      source: "builtin",
+      version: "0.1.0",
+      argument_hint: "",
+      enabled: false,
+    });
+  };
+
+  try {
+    const skill = await setSkillEnabled("http://127.0.0.1:8140", "research", false);
+    assert.equal(skill.enabled, false);
+    assert.deepEqual(requests, [
+      {
+        url: "http://127.0.0.1:8140/api/agent/skills/research",
+        method: "PUT",
+        body: '{"enabled":false}',
+      },
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }

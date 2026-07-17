@@ -23,6 +23,7 @@ export type EmptyConversation = {
   historyIndex: number;
   slashIndex: number;
   skillsIndex: number;
+  skillActionIndex: number;
   welcomeNotice: { text: string; tone: "info" | "error" } | null;
   panel: ConversationPanel;
   statusLine: string;
@@ -52,6 +53,7 @@ export function createEmptyConversation(panel: ConversationPanel, statusLine: st
     historyIndex: -1,
     slashIndex: 0,
     skillsIndex: 0,
+    skillActionIndex: 0,
     welcomeNotice: null,
     panel,
     statusLine,

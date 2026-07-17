@@ -238,6 +238,9 @@ class AgentService:
     async def list_skills(self):
         return await self.skill_service.list_skills(await self._profile_id())
 
+    async def set_skill_enabled(self, skill_name: str, enabled: bool):
+        return await self.skill_service.set_skill_enabled(await self._profile_id(), skill_name, enabled)
+
     async def list_mcp_servers(self) -> list[McpServerOut]:
         await self._profile_id()
         return await self.mcp_service.list_servers()

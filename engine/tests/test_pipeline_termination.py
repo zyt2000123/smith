@@ -94,6 +94,29 @@ def test_backtrack_target_missing_terminates_blocked() -> None:
     assert blocked and "not found" in blocked[0].data["reason"]
 
 
+def test_user_disabled_pipeline_skill_is_skipped_without_generic_fallback() -> None:
+    class PassingGate:
+        async def check(self, output, context):
+            return GateResult("pass", "")
+
+    async def run() -> list[ExecutionEvent]:
+        events = []
+        async for event in run_agent_stream(
+            FakeLLM(), "system prompt", "build a feature",
+            FakeToolRegistry(), FakeSkillRegistry(), FEATURE_ROUTE,
+            SkillChain([SkillNode("planning", PassingGate())]), FailureLoopGuard(),
+            disabled_skill_names=frozenset({"planning"}),
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+
+    assert all(event.type is not EventType.SKILL_START for event in events)
+    assert all(event.type is not EventType.SKILL_END for event in events)
+    assert events[-1].type is EventType.DONE
+
+
 def test_guard_escalates_per_node_despite_varying_output_hash() -> None:
     guard = FailureLoopGuard()
     # LLM 输出每次不同（hash 不同）也必须按节点计数收敛

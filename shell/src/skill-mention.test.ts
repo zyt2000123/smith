@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { filterSkillMentions, parseSkillMention, selectedSkillMentionState } from "./skill-mention.js";
+import { filterSkillMentions, filterSkills, parseSkillMention, selectedSkillMentionState } from "./skill-mention.js";
 
 const skills = [
   {
@@ -34,6 +34,20 @@ test("@ opens a skill picker and filters by name or description", () => {
     ["research"],
   );
   assert.deepEqual(filterSkillMentions(skills, "@research investigate the API"), []);
+});
+
+test("disabled skills are excluded from @ mentions but remain searchable in settings", () => {
+  const disabledSkills = [{ ...skills[0], enabled: false }, skills[1]];
+
+  assert.deepEqual(
+    filterSkillMentions(disabledSkills, "@").map((skill) => skill.name),
+    ["research"],
+  );
+  assert.deepEqual(
+    filterSkills(disabledSkills, "attack").map((skill) => skill.name),
+    ["codex-security:attack-path-analysis"],
+  );
+  assert.equal(parseSkillMention("@codex-security:attack-path-analysis audit", disabledSkills), null);
 });
 
 test("parses a selected @skill mention and its prompt", () => {

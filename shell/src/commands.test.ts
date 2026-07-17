@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { NodeBridge } from "./bridge.js";
-import { buildSlashItems, filterSlash, runShellCommand } from "./commands.js";
+import { buildSlashItems, filterSlash, parseSkill, runShellCommand } from "./commands.js";
 import { createAppStore } from "./store.js";
 
 function skill(name: string) {
@@ -52,6 +52,10 @@ test("slash filtering exposes one resume command", () => {
     items.some((item) => item.kind === "skill"),
     false,
   );
+});
+
+test("disabled skills cannot be selected through the direct skill command", () => {
+  assert.equal(parseSkill("/skill research find primary sources", [{ ...skill("research"), enabled: false }]), null);
 });
 
 test("resume recovers the retained or explicitly named run", async () => {

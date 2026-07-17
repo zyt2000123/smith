@@ -1,6 +1,7 @@
 import type { SkillSummary } from "./api.js";
 import { errorMessage, type NodeBridge } from "./bridge.js";
 import { createSetupDraft } from "./setup.js";
+import { isSkillEnabled } from "./skill-mention.js";
 import type { AppStore } from "./store.js";
 
 export type SlashItem = {
@@ -171,7 +172,7 @@ export function parseSkill(raw: string, skills: SkillSummary[]): { skill: SkillS
   const match = raw.trim().match(/^\/skill\s+(\S+)(?:\s+([\s\S]+))?$/);
   if (!match) return null;
 
-  const skill = skills.find((candidate) => candidate.name === match[1]);
+  const skill = skills.find((candidate) => candidate.name === match[1] && isSkillEnabled(candidate));
   return skill ? { skill, prompt: match[2]?.trim() || "" } : null;
 }
 
@@ -268,17 +269,17 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
   },
   "/skills": (_args, context) => {
     const state = context.getState();
-    state.set({ panel: "skills", statusLine: `${state.skills.length} skill(s).` });
+    state.set({ panel: "skill-actions", inputValue: "", skillActionIndex: 0, statusLine: "Choose an action." });
   },
   "/skill": async (args, context) => {
     const state = context.getState();
     if (args.length === 0) {
-      state.set({ panel: "skills", statusLine: `${state.skills.length} skill(s).` });
+      state.set({ panel: "skill-actions", inputValue: "", skillActionIndex: 0, statusLine: "Choose an action." });
       return;
     }
-    const skill = state.skills.find((candidate) => candidate.name === args[0]);
+    const skill = state.skills.find((candidate) => candidate.name === args[0] && isSkillEnabled(candidate));
     if (!skill) {
-      state.set({ statusLine: `Unknown skill: ${args[0]}` });
+      state.set({ statusLine: `Unknown or disabled skill: ${args[0]}` });
       return;
     }
     const prompt = args.slice(1).join(" ").trim();
@@ -343,7 +344,7 @@ export async function runShellCommand(raw: string, context: CommandContext): Pro
   }
 
   const state = context.getState();
-  const skill = state.skills.find((candidate) => candidate.name === command?.slice(1));
+  const skill = state.skills.find((candidate) => candidate.name === command?.slice(1) && isSkillEnabled(candidate));
   if (!skill) {
     state.set({ statusLine: `Unknown: ${command}` });
     return;

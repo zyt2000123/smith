@@ -19,7 +19,7 @@ from ..schemas.session import (
 )
 from ..schemas.project_instruction import ProjectInstructionInit, ProjectInstructionOut
 from ..schemas.run import ApprovalDecision, RunStateOut
-from ..schemas.skill import SkillSummaryOut
+from ..schemas.skill import SkillEnabledUpdate, SkillSummaryOut
 from ..schemas.mcp import McpServerOut
 from ..schemas.task import TaskCreate, TaskOut
 from ..schemas.token_stats import TokenStatsOut
@@ -144,6 +144,15 @@ async def stream_message(
 @router.get("/skills", response_model=list[SkillSummaryOut])
 async def list_skills(svc: AgentService = Depends(get_agent_service)):
     return await svc.list_skills()
+
+
+@router.put("/skills/{skill_name}", response_model=SkillSummaryOut)
+async def set_skill_enabled(
+    skill_name: str,
+    body: SkillEnabledUpdate,
+    svc: AgentService = Depends(get_agent_service),
+):
+    return await svc.set_skill_enabled(skill_name, body.enabled)
 
 
 @router.get("/mcp", response_model=list[McpServerOut])

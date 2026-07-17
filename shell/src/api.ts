@@ -70,6 +70,8 @@ export type SkillSummary = {
   source: string;
   version: string;
   argument_hint: string;
+  /** Absent only when talking to a pre-enablements server; treat it as enabled. */
+  enabled?: boolean;
 };
 
 export type TokenUsage = {
@@ -354,6 +356,13 @@ export async function listMessages(baseUrl: string, sessionId: string): Promise<
 
 export async function listSkills(baseUrl: string): Promise<SkillSummary[]> {
   return request<SkillSummary[]>(baseUrl, "/api/agent/skills");
+}
+
+export async function setSkillEnabled(baseUrl: string, skillName: string, enabled: boolean): Promise<SkillSummary> {
+  return request<SkillSummary>(baseUrl, `/api/agent/skills/${encodeURIComponent(skillName)}`, {
+    method: "PUT",
+    body: { enabled },
+  });
 }
 
 export type McpToolSummary = {

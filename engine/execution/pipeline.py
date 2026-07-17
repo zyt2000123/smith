@@ -60,6 +60,7 @@ async def run_pipeline(
     context: dict,
     gate_llm: "LLMPort | None" = None,
     start_node_idx: int = 0,
+    disabled_skill_names: frozenset[str] = frozenset(),
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Execute a pipeline: walk nodes sequentially, ReAct each, gate-check.
 
@@ -77,6 +78,14 @@ async def run_pipeline(
         node = chain.nodes[node_idx]
 
         if node.condition is not None and not node.condition(context):
+            node_idx += 1
+            continue
+
+        # A user-disabled skill is distinct from one that is simply absent
+        # from the registry.  The latter keeps the historical generic-ReAct
+        # fallback, while the former must not execute at all.
+        if node.skill_name in disabled_skill_names:
+            logger.info("skipping user-disabled pipeline skill %r", node.skill_name)
             node_idx += 1
             continue
 

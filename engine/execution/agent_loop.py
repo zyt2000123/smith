@@ -114,6 +114,7 @@ async def run_agent_stream(
     forced_skill: str | None = None,
     execution_context: dict | None = None,
     gate_llm: LLMPort | None = None,
+    disabled_skill_names: frozenset[str] = frozenset(),
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Route to the right execution path and yield events."""
     if forced_skill:
@@ -156,6 +157,7 @@ async def run_agent_stream(
         tool_registry, skill_registry, tool_guard, guard,
         max_react_iters, context, gate_llm=gate_llm,
         start_node_idx=start_node_idx,
+        disabled_skill_names=disabled_skill_names,
     ):
         yield event
 
@@ -294,6 +296,7 @@ class _AgentSetup(NamedTuple):
     chain: SkillChain | None
     state_dir: Path
     working_dir: Path
+    disabled_skill_names: frozenset[str]
 
 
 def _merge_context(user_message: str, context: str | None) -> str:
@@ -444,6 +447,17 @@ async def prepare_runtime(
     profile_skills = runtime.profile_dir / "skills"
     if profile_skills.is_dir():
         services.skill_registry.load_agent_skills(profile_skills)
+    from engine.skill.settings import disabled_skill_names
+
+    disabled_skills = disabled_skill_names(runtime.profile_dir)
+    if disabled_skills:
+        services.skill_registry.restrict_to(
+            [
+                summary["name"]
+                for summary in services.skill_registry.list_summaries()
+                if summary["name"] not in disabled_skills
+            ]
+        )
     if identity.enabled_skills is not None:
         services.skill_registry.restrict_to(identity.enabled_skills)
     _bind_skill_load_tool(services)
@@ -485,6 +499,7 @@ async def prepare_runtime(
         chain,
         state_dir,
         wd,
+        frozenset(disabled_skills),
     )
 
 
@@ -1091,6 +1106,7 @@ async def _run_events_with_runtime(
                     runtime, s.identity, s.state_dir, s.working_dir,
                 ),
                 gate_llm=services.gate_llm,
+                disabled_skill_names=getattr(s, "disabled_skill_names", frozenset()),
             ):
                 if event.type == EventType.TEXT_DELTA:
                     full_text.append(str(event.data.get("text", "")))

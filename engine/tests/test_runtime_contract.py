@@ -300,6 +300,26 @@ def test_prepare_runtime_binds_memory_ops_but_keeps_it_hidden(tmp_path: Path) ->
     assert all(schema["function"]["name"] != "memory_ops" for schema in schemas)
 
 
+def test_prepare_runtime_excludes_a_disabled_skill_from_the_live_registry(tmp_path: Path) -> None:
+    async def run() -> bool:
+        runtime, services, _ = _runtime(tmp_path)
+        skill_dir = runtime.profile_dir / "skills" / "research"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: research\ndescription: Research a topic.\n---\nResearch.",
+            encoding="utf-8",
+        )
+        (runtime.profile_dir / "skills.yaml").write_text("disabled: [research]\n", encoding="utf-8")
+
+        setup = await prepare_runtime(EngineRequest(message="Research this"), runtime, services)
+        return (
+            services.skill_registry.get("research") is None
+            and setup.disabled_skill_names == frozenset({"research"})
+        )
+
+    assert asyncio.run(run())
+
+
 def test_prepare_runtime_keeps_recent_and_retrieves_only_matching_durable(
     tmp_path: Path,
 ) -> None:

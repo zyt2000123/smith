@@ -34,7 +34,7 @@ import {
   type TranscriptViewMode,
 } from "./transcript-state.js";
 
-export type Panel = "welcome" | "chat" | "sessions" | "skills" | "mcp" | "tokens";
+export type Panel = "welcome" | "chat" | "sessions" | "skill-actions" | "skills" | "skill-toggle" | "mcp" | "tokens";
 export type Mode = "boot" | "setup" | "chat";
 export type SetupFlow = "initial" | "advanced";
 
@@ -97,6 +97,7 @@ export type AppState = {
   setupIndex: number;
   slashIndex: number;
   skillsIndex: number;
+  skillActionIndex: number;
   skillMentionIndex: number;
   welcomeNotice: { text: string; tone: "info" | "error" } | null;
 };
@@ -284,6 +285,7 @@ export function createAppStore(initialHistory: string[] = []) {
     setupIndex: 0,
     slashIndex: 0,
     skillsIndex: 0,
+    skillActionIndex: 0,
     skillMentionIndex: 0,
     welcomeNotice: null,
 
