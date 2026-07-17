@@ -95,7 +95,7 @@ test("slash and skills navigation scrolls through the full lists", () => {
   assert.equal(store.getState().skillsIndex, 0);
 });
 
-test("enter arms the selected skill and returns to chat", () => {
+test("enter arms the selected skill, returns to chat, and inserts its @ mention", () => {
   const store = createAppStore();
   const options = inputOptions(new NodeBridge(store), store);
   options.busy = false;
@@ -115,6 +115,7 @@ test("enter arms the selected skill and returns to chat", () => {
   assert.equal(handleSkillsSelection(returnKey(), options), true);
   assert.equal(store.getState().panel, "chat");
   assert.equal(store.getState().pendingSkill?.name, "research");
+  assert.equal(store.getState().inputValue, "@research ");
   assert.equal(store.getState().statusLine, "");
 });
 

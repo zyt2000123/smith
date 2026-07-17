@@ -222,7 +222,7 @@ export function handleSkillsSelection(key: Key, options: ShellInputOptions): boo
 
   state.set({
     panel: "chat",
-    inputValue: "",
+    inputValue: `@${selected.name} `,
     pendingSkill: selected,
     statusLine: "",
   });
