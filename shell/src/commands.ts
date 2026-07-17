@@ -1,5 +1,6 @@
 import type { SkillSummary } from "./api.js";
 import { errorMessage, type NodeBridge } from "./bridge.js";
+import { LIFECYCLE_HOOKS } from "./hooks.js";
 import { createSetupDraft } from "./setup.js";
 import { isSkillEnabled } from "./skill-mention.js";
 import type { AppStore } from "./store.js";
@@ -34,6 +35,7 @@ const HELP_TEXT = [
   "- `/sessions` — recent sessions",
   "- `/token` — local token usage dashboard",
   "- `/skills` — inspect or run a standard SKILL.md skill",
+  "- `/hooks` — inspect runtime lifecycle hooks",
   "- `/mcp` — inspect configured MCP servers and tools",
   "- `/resume [session-id]` — recover the latest interrupted run, or open a session; use `/resume run <run-id>` for a specific run",
   "- `/compact` — switch to compact view; Ctrl+O toggles compact/transcript",
@@ -137,6 +139,14 @@ export function buildSlashItems(_skills: SkillSummary[]): SlashItem[] {
       title: "/mcp",
       command: "/mcp",
       description: "Inspect MCP servers and tools.",
+      category: "Commands",
+    },
+    {
+      id: "hooks",
+      kind: "command",
+      title: "/hooks",
+      command: "/hooks",
+      description: "View runtime lifecycle hooks.",
       category: "Commands",
     },
     {
@@ -293,6 +303,15 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
     await context.bridge.refreshMcpServers();
     const state = context.getState();
     state.set({ panel: "mcp", statusLine: `${state.mcpServers.length} MCP server(s).` });
+  },
+  "/hooks": (_args, context) => {
+    const state = context.getState();
+    state.set({
+      panel: "hooks",
+      inputValue: "",
+      hooksIndex: 0,
+      statusLine: `${LIFECYCLE_HOOKS.length} built-in lifecycle hooks.`,
+    });
   },
   "/model": async (args, context) => {
     const state = context.getState();

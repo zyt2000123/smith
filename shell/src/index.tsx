@@ -14,6 +14,7 @@ import { NodeBridge } from "./bridge.js";
 import type { CodeHighlighter } from "./code-block.js";
 import { buildSlashItems, filterSlash, parseSkill, runShellCommand, type SlashItem } from "./commands.js";
 import { loadHistory, saveHistory } from "./history.js";
+import { LIFECYCLE_HOOKS } from "./hooks.js";
 import { RunProgress, StatusHud } from "./hud.js";
 import { useShellInput } from "./input.js";
 import { getVisibleList, SKILLS_PANEL_VISIBLE_ITEMS, SLASH_MENU_VISIBLE_ITEMS } from "./list-navigation.js";
@@ -288,6 +289,81 @@ function McpPanel() {
   );
 }
 
+function HooksPanel() {
+  const selectedIndex = useS((state) => state.hooksIndex);
+  return (
+    <Box flexDirection="column">
+      <Text color={ACCENT} bold>
+        Hooks
+      </Text>
+      <Text color={MUTED}>Built-in lifecycle hooks. Handlers register on demand for each runtime.</Text>
+      <Box marginTop={1}>
+        <Box width={35}>
+          <Text color={INFO}>Event</Text>
+        </Box>
+        <Box width={11}>
+          <Text color={INFO}>Installed</Text>
+        </Box>
+        <Box width={9}>
+          <Text color={INFO}>Active</Text>
+        </Box>
+        <Text color={INFO}>Description</Text>
+      </Box>
+      {LIFECYCLE_HOOKS.map((hook, index) => {
+        const selected = index === selectedIndex;
+        const registrations = hook.handler ? 1 : 0;
+        return (
+          <Box key={hook.event} width="100%" backgroundColor={selected ? SELECTED_BACKGROUND : undefined}>
+            <Box width={35}>
+              <Text color={selected ? SELECTED_FOREGROUND : INFO} bold={selected}>
+                {selected ? "> " : "  "}
+                {hook.event}
+              </Text>
+            </Box>
+            <Box width={11}>
+              <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{registrations}</Text>
+            </Box>
+            <Box width={9}>
+              <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{registrations}</Text>
+            </Box>
+            <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{hook.description}</Text>
+          </Box>
+        );
+      })}
+      <Text color={MUTED}>
+        Counts describe built-in registrations; configurable or plugin hooks are not loaded yet.
+      </Text>
+      <Text color={MUTED}>↑/↓ select · Enter view details · Esc close</Text>
+    </Box>
+  );
+}
+
+function HookDetailsPanel() {
+  const selectedIndex = useS((state) => state.hooksIndex);
+  const hook = LIFECYCLE_HOOKS[selectedIndex] ?? LIFECYCLE_HOOKS[0];
+  if (!hook) return null;
+  return (
+    <Box flexDirection="column">
+      <Text color={ACCENT} bold>
+        {hook.event}
+      </Text>
+      <Text color={MUTED}>{hook.description}</Text>
+      <Box marginTop={1} flexDirection="column">
+        <Text color={INFO}>
+          Handler <Text color={MUTED}>{hook.handler}</Text>
+        </Text>
+        <Text color={INFO}>
+          Status <Text color={MUTED}>Enabled on dispatch</Text>
+        </Text>
+        <Text color={INFO}>
+          Details <Text color={MUTED}>{hook.detail}</Text>
+        </Text>
+      </Box>
+      <Text color={MUTED}>Esc back</Text>
+    </Box>
+  );
+}
+
 function SlashMenu({ items, selectedIndex }: { items: SlashItem[]; selectedIndex: number }) {
   const visible = getVisibleList(items, selectedIndex, SLASH_MENU_VISIBLE_ITEMS);
   let category = "";
@@ -386,6 +462,8 @@ function ShellContent({
       {panel === "skills" ? <SkillsPanel /> : null}
       {panel === "skill-toggle" ? <SkillTogglePanel /> : null}
       {panel === "mcp" ? <McpPanel /> : null}
+      {panel === "hooks" ? <HooksPanel /> : null}
+      {panel === "hook-details" ? <HookDetailsPanel /> : null}
       {panel === "sessions" ? <SessionsPanel /> : null}
       {panel === "tokens" ? <TokenStatsPanel stats={tokenStats} selectedTab={tokenTab} /> : null}
       {panel === "tokens"
@@ -550,6 +628,8 @@ function footerPlaceholder(props: ShellFooterProps): string {
   if (props.panel === "skill-actions") return "Use ↑/↓ and Enter to choose…";
   if (props.panel === "skills") return "Use ↑/↓ and Enter to run a skill…";
   if (props.panel === "skill-toggle") return "Type to search skills…";
+  if (props.panel === "hooks") return "Use ↑/↓ and Enter to inspect a hook…";
+  if (props.panel === "hook-details") return "Press Esc to return to hooks…";
   return props.pendingSkill ? `Ask Smith to run ${props.pendingSkill.name}…` : "Tell Smith what to do…";
 }
 
@@ -841,6 +921,7 @@ function SmithApp() {
   const slashIndex = useS((state) => state.slashIndex);
   const skillsIndex = useS((state) => state.skillsIndex);
   const skillActionIndex = useS((state) => state.skillActionIndex);
+  const hooksIndex = useS((state) => state.hooksIndex);
   const skillMentionIndex = useS((state) => state.skillMentionIndex);
 
   const activeSetupField = setupFieldAt(setupIndex, setupFlow);
@@ -945,6 +1026,7 @@ function SmithApp() {
     skills: visibleSkills,
     skillsIndex,
     skillActionIndex,
+    hooksIndex,
     skillMentionMenuOpen,
     skillMentions,
     skillMentionIndex,

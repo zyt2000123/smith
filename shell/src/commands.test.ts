@@ -19,7 +19,7 @@ test("slash filtering exposes one resume command", () => {
   const skills = Array.from({ length: 8 }, (_, index) => skill(`skill-${index + 1}`));
   const items = filterSlash(buildSlashItems(skills), "/");
 
-  assert.equal(items.length, 15);
+  assert.equal(items.length, 16);
   assert.equal(
     items.some((item) => item.command === "/init"),
     true,
@@ -34,6 +34,10 @@ test("slash filtering exposes one resume command", () => {
   );
   assert.equal(
     items.some((item) => item.command === "/skills"),
+    true,
+  );
+  assert.equal(
+    items.some((item) => item.command === "/hooks"),
     true,
   );
   assert.equal(
@@ -56,6 +60,16 @@ test("slash filtering exposes one resume command", () => {
 
 test("disabled skills cannot be selected through the direct skill command", () => {
   assert.equal(parseSkill("/skill research find primary sources", [{ ...skill("research"), enabled: false }]), null);
+});
+
+test("hooks opens the lifecycle hooks panel", async () => {
+  const store = createAppStore();
+
+  await runShellCommand("/hooks", { bridge: {} as NodeBridge, exit: () => {}, getState: store.getState });
+
+  assert.equal(store.getState().panel, "hooks");
+  assert.equal(store.getState().hooksIndex, 0);
+  assert.match(store.getState().statusLine, /lifecycle hook/);
 });
 
 test("resume recovers the retained or explicitly named run", async () => {

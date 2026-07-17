@@ -4,6 +4,7 @@ import type { MutableRefObject } from "react";
 import type { SkillSummary } from "./api.js";
 import type { NodeBridge } from "./bridge.js";
 import type { SlashItem } from "./commands.js";
+import { LIFECYCLE_HOOKS } from "./hooks.js";
 import {
   type ListNavigation,
   moveListIndex,
@@ -30,6 +31,7 @@ export type ShellInputOptions = {
   skills: SkillSummary[];
   skillsIndex: number;
   skillActionIndex: number;
+  hooksIndex: number;
   skillMentionMenuOpen: boolean;
   skillMentions: SkillSummary[];
   skillMentionIndex: number;
@@ -159,6 +161,24 @@ export function handleSkillActionsSelection(key: Key, options: ShellInputOptions
     skillsIndex: 0,
     statusLine: "",
   });
+  return true;
+}
+
+export function handleHooksNavigation(key: Key, options: ShellInputOptions): boolean {
+  if (options.panel !== "hooks") return false;
+
+  const navigation = navigationFromKey(key);
+  if (!navigation) return false;
+  options.getState().set({
+    hooksIndex: moveListIndex(options.hooksIndex, LIFECYCLE_HOOKS.length, navigation, SKILLS_PANEL_VISIBLE_ITEMS),
+  });
+  return true;
+}
+
+export function handleHooksSelection(key: Key, options: ShellInputOptions): boolean {
+  if (!key.return || options.panel !== "hooks") return false;
+
+  options.getState().set({ panel: "hook-details", inputValue: "", statusLine: "" });
   return true;
 }
 
@@ -295,6 +315,10 @@ export function handleEscape(key: Key, options: ShellInputOptions): boolean {
     state.set({ inputValue: "", slashIndex: 0 });
     return true;
   }
+  if (options.panel === "hook-details") {
+    state.set({ panel: "hooks", inputValue: "", statusLine: "Back." });
+    return true;
+  }
   if (options.panel === "skills" || options.panel === "skill-toggle") {
     state.set({ panel: "skill-actions", inputValue: "", skillsIndex: 0, statusLine: "Back." });
     return true;
@@ -359,12 +383,14 @@ function handleHistoryNavigation(key: Key, options: ShellInputOptions): boolean 
 function cyclePanel(key: Key, options: ShellInputOptions): void {
   if (!key.tab || options.slashMenuOpen) return;
 
-  const panels: Panel[] = ["welcome", "sessions", "skill-actions", "mcp", "tokens", "chat"];
+  const panels: Panel[] = ["welcome", "sessions", "skill-actions", "mcp", "hooks", "tokens", "chat"];
   const index = panels.indexOf(options.panel);
   options.getState().set({ panel: panels[(index + 1) % panels.length] });
 }
 
 function handlePickerInput(key: Key, options: ShellInputOptions): boolean {
+  if (handleHooksSelection(key, options)) return true;
+  if (handleHooksNavigation(key, options)) return true;
   if (handleSkillActionsSelection(key, options)) return true;
   if (handleSkillActionsNavigation(key, options)) return true;
   if (handleSkillToggle(key, options)) return true;

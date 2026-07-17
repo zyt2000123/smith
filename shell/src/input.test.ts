@@ -7,6 +7,8 @@ import {
   handleApprovalInput,
   handleCtrlC,
   handleEscape,
+  handleHooksNavigation,
+  handleHooksSelection,
   handleModelPickerInput,
   handleQueuedEdit,
   handleSkillActionsSelection,
@@ -47,6 +49,7 @@ function inputOptions(bridge: NodeBridge, store: ReturnType<typeof createAppStor
     skills: [],
     skillsIndex: 0,
     skillActionIndex: 0,
+    hooksIndex: 0,
     skillMentionMenuOpen: false,
     skillMentions: [],
     skillMentionIndex: 0,
@@ -148,6 +151,34 @@ test("Enter toggles the selected skill with its next enabled state", () => {
 
   assert.equal(handleSkillToggle(returnKey(), options), true);
   assert.deepEqual(toggles, [{ name: "research", enabled: false }]);
+});
+
+test("hooks navigation opens the selected hook details", () => {
+  const store = createAppStore();
+  const options = inputOptions({} as NodeBridge, store);
+  options.panel = "hooks";
+  store.getState().set({ panel: "hooks", hooksIndex: 0 });
+
+  assert.equal(handleHooksNavigation({ downArrow: true } as Key, options), true);
+  assert.equal(store.getState().hooksIndex, 1);
+  options.hooksIndex = 1;
+
+  assert.equal(handleHooksSelection(returnKey(), options), true);
+  assert.equal(store.getState().panel, "hook-details");
+});
+
+test("escape returns from hook details and then closes hooks", () => {
+  const store = createAppStore();
+  const options = inputOptions({} as NodeBridge, store);
+  options.panel = "hook-details";
+  store.getState().set({ panel: "hook-details" });
+
+  assert.equal(handleEscape(escapeKey(), options), true);
+  assert.equal(store.getState().panel, "hooks");
+
+  options.panel = "hooks";
+  assert.equal(handleEscape(escapeKey(), options), true);
+  assert.equal(store.getState().panel, "chat");
 });
 
 test("@ skill picker navigates and inserts the selected skill into the input", () => {
