@@ -15,7 +15,7 @@ from engine.execution.skill_chain import (
     load_gate_content,
 )
 from engine.identity_catalog import IdentitySpec, RouteDecision
-from engine.llm.client import ChatResponse
+from engine.llm.client import ChatResponse, ToolCallData
 from engine.llm.events import ProviderEvent, ProviderEventType
 from engine.skill.loader import SkillBody, SkillMeta
 
@@ -88,6 +88,33 @@ class BrokenStreamingFakeLLM(FakeLLM):
         yield ProviderEvent(ProviderEventType.RESPONSE_CREATED)
         yield ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": "unfinished draft"})
         raise RuntimeError("provider disconnected")
+
+
+class ContentFilteredLLM(FakeLLM):
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        prefix_cache_key: str | None = None,
+    ) -> ChatResponse:
+        return ChatResponse(
+            text="UNGATED CONTENT-FILTERED DRAFT",
+            finish_reason="content_filter",
+        )
+
+
+class FailedToolCallLLM(FakeLLM):
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        prefix_cache_key: str | None = None,
+    ) -> ChatResponse:
+        return ChatResponse(
+            text="UNGATED FAILED TOOL-CALL DRAFT",
+            tool_calls=[ToolCallData(id="call-1", name="unused", arguments={})],
+            finish_reason="error",
+        )
 
 
 class RetryingStreamingFakeLLM(FakeLLM):
@@ -303,6 +330,33 @@ def test_pipeline_retracts_provisional_draft_before_propagating_provider_error()
     }
 
 
+def test_pipeline_never_emits_ungated_text_after_an_incomplete_or_failed_node() -> None:
+    """A terminal node failure must not turn its provisional draft into a reply."""
+
+    async def collect(llm) -> list[ExecutionEvent]:
+        events: list[ExecutionEvent] = []
+        async for event in run_agent_stream(
+            llm,
+            "system prompt",
+            "build a feature",
+            FakeToolRegistry(),
+            FakeSkillRegistry(),
+            FEATURE_ROUTE,
+            SkillChain([SkillNode("planning", PassingGate())]),
+            FailureLoopGuard(),
+        ):
+            events.append(event)
+        return events
+
+    incomplete_events = asyncio.run(collect(ContentFilteredLLM()))
+    failed_events = asyncio.run(collect(FailedToolCallLLM()))
+
+    assert EventType.INCOMPLETE in [event.type for event in incomplete_events]
+    assert EventType.FAILED in [event.type for event in failed_events]
+    assert not [event for event in incomplete_events if event.type is EventType.TEXT_DELTA]
+    assert not [event for event in failed_events if event.type is EventType.TEXT_DELTA]
+
+
 def test_pipeline_retracts_each_rejected_rubric_attempt_before_committing() -> None:
     async def run():
         events = []
@@ -483,24 +537,33 @@ class RecordingStreamingLLM(FakeLLM):
         )
 
 
-def _seed_checkpoint(tmp_path: Path, session_id: str, user_message: str) -> None:
+def _seed_checkpoint(
+    tmp_path: Path,
+    session_id: str,
+    user_message: str,
+    *,
+    working_dir: Path | None = None,
+    agent_id: str = "smith-id",
+    identity_id: str = "smith",
+) -> None:
     from engine.execution.session_state import SessionCheckpoint, SessionStateManager
 
     SessionStateManager(tmp_path).save(SessionCheckpoint(
-        agent_id="smith-id",
+        agent_id=agent_id,
         session_id=session_id,
-        identity_id="smith",
+        identity_id=identity_id,
         route_id="feature",
         skill_chain_index=0,  # planning already passed before the crash
         context={
             "user_message": user_message,
-            "identity_id": "smith",
+            "identity_id": identity_id,
             "route_id": "feature",
-            "agent_id": "smith-id",
+            "agent_id": agent_id,
             "session_id": session_id,
             "planning_output": "PLAN-FROM-CHECKPOINT",
         },
         timestamp="2026-07-15T00:00:00+00:00",
+        working_dir=str((working_dir or tmp_path).resolve()),
     ))
 
 
@@ -527,6 +590,7 @@ def test_run_agent_stream_resumes_from_crash_checkpoint(tmp_path: Path) -> None:
                 "agent_id": "smith-id",
                 "session_id": "sess-resume",
                 "_state_dir": str(tmp_path),
+                "_working_dir": str(tmp_path.resolve()),
             },
         ):
             events.append(event)
@@ -562,6 +626,7 @@ def test_run_agent_stream_discards_stale_checkpoint_for_new_task(tmp_path: Path)
                 "agent_id": "smith-id",
                 "session_id": "sess-stale",
                 "_state_dir": str(tmp_path),
+                "_working_dir": str(tmp_path.resolve()),
             },
         ):
             events.append(event)
@@ -572,6 +637,130 @@ def test_run_agent_stream_discards_stale_checkpoint_for_new_task(tmp_path: Path)
     assert started == ["planning", "testing"]
     assert len(llm.calls) == 2
     assert not (tmp_path / "sessions" / ".state" / "sess-stale.json").exists()
+
+
+def test_run_agent_stream_discards_checkpoint_from_another_working_directory(tmp_path: Path) -> None:
+    """A reused session must not carry plans from project A into project B."""
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    _seed_checkpoint(tmp_path, "sess-workspace", "build a feature", working_dir=workspace_a)
+
+    async def run():
+        llm = RecordingStreamingLLM()
+        events = []
+        async for event in run_agent_stream(
+            llm,
+            "system prompt",
+            "build a feature",
+            FakeToolRegistry(),
+            FakeSkillRegistry(),
+            FEATURE_ROUTE,
+            SkillChain([
+                SkillNode("planning", PassingGate()),
+                SkillNode("testing", PassingGate()),
+            ]),
+            FailureLoopGuard(),
+            execution_context={
+                "agent_id": "smith-id",
+                "session_id": "sess-workspace",
+                "_state_dir": str(tmp_path),
+                "_working_dir": str(workspace_b.resolve()),
+            },
+        ):
+            events.append(event)
+        return llm, events
+
+    llm, events = asyncio.run(run())
+    started = [event.data["skill"] for event in events if event.type is EventType.SKILL_START]
+
+    assert started == ["planning", "testing"]
+    assert len(llm.calls) == 2
+    assert not (tmp_path / "sessions" / ".state" / "sess-workspace.json").exists()
+
+
+def test_run_agent_stream_discards_checkpoint_from_another_agent(tmp_path: Path) -> None:
+    _seed_checkpoint(tmp_path, "sess-agent", "build a feature")
+
+    async def run():
+        llm = RecordingStreamingLLM()
+        events = []
+        async for event in run_agent_stream(
+            llm,
+            "system prompt",
+            "build a feature",
+            FakeToolRegistry(),
+            FakeSkillRegistry(),
+            FEATURE_ROUTE,
+            SkillChain([
+                SkillNode("planning", PassingGate()),
+                SkillNode("testing", PassingGate()),
+            ]),
+            FailureLoopGuard(),
+            execution_context={
+                "agent_id": "another-agent",
+                "session_id": "sess-agent",
+                "_state_dir": str(tmp_path),
+                "_working_dir": str(tmp_path.resolve()),
+            },
+        ):
+            events.append(event)
+        return llm, events
+
+    llm, events = asyncio.run(run())
+    started = [event.data["skill"] for event in events if event.type is EventType.SKILL_START]
+
+    assert started == ["planning", "testing"]
+    assert len(llm.calls) == 2
+    assert not (tmp_path / "sessions" / ".state" / "sess-agent.json").exists()
+
+
+def test_run_agent_stream_discards_checkpoint_from_another_identity(tmp_path: Path) -> None:
+    _seed_checkpoint(tmp_path, "sess-identity", "build a feature")
+    other_identity = IdentitySpec(
+        id="other",
+        name="Other",
+        description="",
+        prompt="",
+        enabled_tools=None,
+        enabled_skills=None,
+        routes=(),
+        is_default=False,
+    )
+    other_route = RouteDecision(other_identity, "feature", "feature", score=1)
+
+    async def run():
+        llm = RecordingStreamingLLM()
+        events = []
+        async for event in run_agent_stream(
+            llm,
+            "system prompt",
+            "build a feature",
+            FakeToolRegistry(),
+            FakeSkillRegistry(),
+            other_route,
+            SkillChain([
+                SkillNode("planning", PassingGate()),
+                SkillNode("testing", PassingGate()),
+            ]),
+            FailureLoopGuard(),
+            execution_context={
+                "agent_id": "smith-id",
+                "session_id": "sess-identity",
+                "_state_dir": str(tmp_path),
+                "_working_dir": str(tmp_path.resolve()),
+            },
+        ):
+            events.append(event)
+        return llm, events
+
+    llm, events = asyncio.run(run())
+    started = [event.data["skill"] for event in events if event.type is EventType.SKILL_START]
+
+    assert started == ["planning", "testing"]
+    assert len(llm.calls) == 2
+    assert not (tmp_path / "sessions" / ".state" / "sess-identity.json").exists()
 
 
 def test_domain_gate_retry_hint_reaches_retry_attempt() -> None:

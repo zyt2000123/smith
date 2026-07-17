@@ -264,10 +264,13 @@ class ToolRegistry:
         return self._working_dir
 
     def normalize_call(self, call: ToolCall) -> ToolCall:
-        """Resolve declared relative paths against the bound project directory.
+        """Resolve declared paths against the bound project directory.
 
         This is deliberately performed before policy checks so the safety guard
-        and the provider operate on the same canonical paths.
+        and the provider operate on the same canonical paths.  Optional path
+        arguments whose schema default is a non-empty path (for example ``.``)
+        are materialized before resolving: otherwise an omitted argument lets a
+        provider silently fall back to the process working directory.
         """
         if self._working_dir is None:
             return call
@@ -289,7 +292,11 @@ class ToolRegistry:
         for argument_name in definition.path_args:
             value = arguments.get(argument_name)
             if not isinstance(value, str) or not value:
-                continue
+                parameter = properties.get(argument_name) if isinstance(properties, dict) else None
+                default = parameter.get("default") if isinstance(parameter, dict) else None
+                if not isinstance(default, str) or not default:
+                    continue
+                value = default
             candidate = Path(value).expanduser()
             if not candidate.is_absolute():
                 candidate = self._working_dir / candidate
@@ -330,6 +337,10 @@ class ToolRegistry:
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        # ``execute`` is also used by a few internal integrations and tests
+        # directly.  Normalize here as a backstop so those callers cannot skip
+        # the path binding enforced by the ReAct loop.
+        call = self.normalize_call(call)
         tool_name = _canonical_tool_name(call.name)
 
         entry = self._tools.get(tool_name)

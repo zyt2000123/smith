@@ -27,6 +27,9 @@ class SessionCheckpoint:
     skill_chain_index: int  # -1 for DIRECT
     context: dict  # accumulated skill outputs
     timestamp: str
+    # Checkpoints are project-scoped.  An empty value represents a legacy
+    # checkpoint and is intentionally not eligible for resume.
+    working_dir: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)

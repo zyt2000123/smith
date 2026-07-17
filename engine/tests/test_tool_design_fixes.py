@@ -316,6 +316,106 @@ def test_builtin_file_tools_resolve_relative_paths_from_the_bound_project_dir(tm
     assert shell.arguments["cwd"] == str(project_dir.resolve())
 
 
+def test_optional_directory_tool_paths_stay_within_the_bound_project_dir(tmp_path: Path):
+    async def run():
+        project_dir = tmp_path / "OpenAI_project"
+        project_dir.mkdir()
+        marker = f"scoped-search-{tmp_path.name}"
+        (project_dir / "needle.txt").write_text(marker, encoding="utf-8")
+        (project_dir / "inside.sentinel").write_text("inside", encoding="utf-8")
+        registry = ToolRegistry()
+        registry.load_providers(ROOT / "agents" / "tools")
+        registry.bind_working_directory(project_dir)
+
+        listing = await registry.execute(ToolCall(id="list", name="list_dir", arguments={}))
+        search = await registry.execute(
+            ToolCall(id="grep", name="grep", arguments={"pattern": marker, "path": ""})
+        )
+        matches = await registry.execute(
+            ToolCall(id="glob", name="glob_files", arguments={"pattern": "*.sentinel"})
+        )
+        return project_dir.resolve(), marker, listing, search, matches
+
+    project_dir, marker, listing, search, matches = asyncio.run(run())
+
+    assert listing.content.splitlines()[0] == f"# {project_dir}"
+    assert marker in search.content
+    assert "inside.sentinel" in matches.content
+
+
+def test_glob_tool_rejects_patterns_that_escape_its_base_directory(tmp_path: Path):
+    async def run():
+        glob_files = _load_tool_module("glob_files")
+        project_dir = tmp_path / "project"
+        outside_dir = tmp_path / "outside"
+        project_dir.mkdir()
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("secret", encoding="utf-8")
+
+        traversal = await glob_files.execute(pattern="../outside/*.txt", path=str(project_dir))
+        absolute = await glob_files.execute(
+            pattern=str(outside_dir / "*.txt"), path=str(project_dir)
+        )
+        (project_dir / "linked-outside").symlink_to(outside_dir, target_is_directory=True)
+        through_symlink = await glob_files.execute(
+            pattern="linked-outside/*.txt", path=str(project_dir)
+        )
+        return traversal, absolute, through_symlink
+
+    traversal, absolute, through_symlink = asyncio.run(run())
+
+    assert traversal.startswith("Error: glob pattern must be relative")
+    assert absolute.startswith("Error: glob pattern must be relative")
+    assert "secret.txt" not in through_symlink
+
+
+def test_glob_tool_does_not_descend_into_symlinked_directories(tmp_path: Path, monkeypatch):
+    """Recursive matching must not inspect a symlink target outside its base."""
+    async def run():
+        glob_files = _load_tool_module("glob_files")
+        project_dir = tmp_path / "project"
+        outside_dir = tmp_path / "outside"
+        project_dir.mkdir()
+        outside_dir.mkdir()
+        (project_dir / "inside.txt").write_text("inside", encoding="utf-8")
+        (outside_dir / "secret.txt").write_text("secret", encoding="utf-8")
+        (project_dir / "linked-outside").symlink_to(outside_dir, target_is_directory=True)
+
+        original_scandir = os.scandir
+        outside_scans: list[str] = []
+
+        def tracking_scandir(path):
+            if Path(path).resolve() == outside_dir.resolve():
+                outside_scans.append(str(path))
+            return original_scandir(path)
+
+        monkeypatch.setattr(glob_files.os, "scandir", tracking_scandir)
+        result = await glob_files.execute(pattern="**/*.txt", path=str(project_dir))
+        return result, outside_scans
+
+    result, outside_scans = asyncio.run(run())
+
+    assert "inside.txt" in result
+    assert "secret.txt" not in result
+    assert outside_scans == []
+
+
+def test_list_dir_does_not_follow_symlinks_outside_its_base_directory(tmp_path: Path):
+    async def run():
+        list_dir = _load_tool_module("list_dir")
+        project_dir = tmp_path / "project"
+        outside_dir = tmp_path / "outside"
+        project_dir.mkdir()
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("secret", encoding="utf-8")
+        (project_dir / "linked-outside").symlink_to(outside_dir, target_is_directory=True)
+        return await list_dir.execute(path=str(project_dir), max_depth=2)
+
+    result = asyncio.run(run())
+
+    assert "secret.txt" not in result
+
+
 def test_builtin_write_file_writes_relative_paths_under_the_bound_project_dir(tmp_path: Path):
     async def run():
         project_dir = tmp_path / "OpenAI_project"

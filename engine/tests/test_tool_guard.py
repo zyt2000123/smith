@@ -1,9 +1,10 @@
 """platform-protect-001：pip/uv 安装只在涉及平台路径时拦截，用户项目内放行。"""
+import json
 import sys
 from pathlib import Path
 
 from engine.safety.fact_gate import FactGate, FactGateContext
-from engine.safety.tool_guard import GuardResult, PermissionLevel, ToolGuard
+from engine.safety.tool_guard import AuditLog, GuardResult, PermissionLevel, ToolGuard
 from engine.safety.tool_policy import ToolPolicy
 from engine.tool.interface import ToolCall, ToolDefinition
 
@@ -312,6 +313,59 @@ def test_working_directory_restricts_relative_and_absolute_tool_paths(tmp_path: 
     assert relative.approval_required
     assert not absolute.allowed
     assert absolute.boundary_block
+
+
+def test_scoped_guard_rejects_unnormalized_optional_directory_paths(tmp_path: Path):
+    definition = ToolDefinition(
+        name="list_dir",
+        description="",
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string", "default": "."}},
+        },
+        path_args=("path",),
+    )
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    guard = ToolGuard(
+        tmp_path / "missing-rules.json", tool_registry={"list_dir": definition}
+    )
+    guard.set_working_directory(project_dir)
+
+    missing = guard.check(ToolCall(id="missing", name="list_dir", arguments={}))
+    empty = guard.check(ToolCall(id="empty", name="list_dir", arguments={"path": ""}))
+
+    assert not missing.allowed
+    assert not empty.allowed
+    assert "canonical" in missing.reason
+    assert "canonical" in empty.reason
+
+
+def test_audit_log_recursively_redacts_sensitive_argument_values(tmp_path: Path):
+    log_path = tmp_path / "audit.jsonl"
+    audit = AuditLog(log_path)
+    audit.record(
+        "web_fetch",
+        {
+            "authorization": "Bearer top-level-secret",
+            "request": {
+                "client_secret": "nested-secret",
+                "headers": [{"X-Api-Key": "list-secret"}],
+                "label": "safe value",
+            },
+            "ordinary": "still visible",
+        },
+        GuardResult(allowed=True),
+        metadata={"refreshToken": "extra-secret"},
+    )
+
+    entry = json.loads(log_path.read_text(encoding="utf-8"))
+
+    assert entry["args_summary"]["authorization"] == "***"
+    assert entry["args_summary"]["request"]["client_secret"] == "***"
+    assert entry["args_summary"]["request"]["headers"][0]["X-Api-Key"] == "***"
+    assert entry["args_summary"]["request"]["label"] == "safe value"
+    assert entry["metadata"]["refreshToken"] == "***"
 
 
 def test_working_directory_disables_unconfined_shell_execution(tmp_path: Path):

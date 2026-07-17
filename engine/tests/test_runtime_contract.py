@@ -59,7 +59,7 @@ class ToolCallingLLM(FakeLLM):
     def __init__(self) -> None:
         super().__init__()
         self.responses = [
-            ChatResponse(tool_calls=[ToolCallData(id="call-1", name="unknown_tool", arguments={})]),
+            ChatResponse(tool_calls=[ToolCallData(id="call-1", name="test_tool", arguments={})]),
             ChatResponse(text="tool-assisted reply"),
         ]
 
@@ -206,6 +206,23 @@ routes: []
         skill_registry=SkillRegistry(),
     )
     return runtime, services, llm
+
+
+def _register_successful_test_tool(runtime: RuntimeContext, services: RuntimeServices) -> None:
+    (runtime.profile_dir / "config.yaml").write_text(
+        "tools:\n  enabled: [test_tool]\n",
+        encoding="utf-8",
+    )
+
+    async def execute() -> str:
+        return "verified tool result"
+
+    services.tool_registry.register(
+        "test_tool",
+        "Test-only successful tool.",
+        {"type": "object", "properties": {}},
+        execute,
+    )
 
 
 def test_prepare_runtime_scopes_tool_paths_to_the_request_working_dir(tmp_path: Path) -> None:
@@ -585,6 +602,7 @@ def test_incomplete_run_persists_learning_with_partial_status(
         route=SimpleNamespace(identity_id="smith", route_id="direct", pipeline_id=None),
         chain=None,
         state_dir=runtime.profile_dir,
+        working_dir=tmp_path,
     )
     captured: dict[str, object] = {}
 
@@ -615,6 +633,58 @@ def test_incomplete_run_persists_learning_with_partial_status(
         "terminal_reason": "model_output_limit",
     }
     assert events[-1].data["status"] == "incomplete"
+
+
+def test_runtime_memory_requires_a_successful_tool_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proposed, blocked, preflight, or failed tool call is not evidence."""
+
+    async def run_case(case_name: str, result_data: dict[str, object]) -> bool:
+        runtime, services, _ = _runtime(tmp_path / case_name)
+        identity = runtime.identity_catalog.get("smith")  # type: ignore[union-attr]
+        setup = SimpleNamespace(
+            system_prompt="system",
+            identity=identity,
+            route=SimpleNamespace(identity_id="smith", route_id="direct", pipeline_id=None),
+            chain=None,
+            state_dir=runtime.profile_dir,
+            working_dir=tmp_path / case_name,
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_prepare_runtime(*_args, **_kwargs):
+            return setup
+
+        async def fake_run_agent_stream(*_args, **_kwargs):
+            yield ExecutionEvent(EventType.SKILL_START, {"skill": "planning"})
+            yield ExecutionEvent(EventType.TOOL_CALL_START, {"name": "search"})
+            yield ExecutionEvent(EventType.TOOL_CALL_RESULT, result_data)
+            yield ExecutionEvent(EventType.TEXT_DELTA, {"text": "final reply"})
+            yield ExecutionEvent(EventType.DONE, {})
+
+        async def fake_persist(*args, **_kwargs):
+            captured["had_tools"] = args[3]
+            return True
+
+        monkeypatch.setattr(agent_loop_module, "prepare_runtime", fake_prepare_runtime)
+        monkeypatch.setattr(agent_loop_module, "run_agent_stream", fake_run_agent_stream)
+        monkeypatch.setattr(agent_loop_module, "_persist_runtime_learning", fake_persist)
+
+        stream = run_stream_with_runtime(EngineRequest(message="continue"), runtime, services)
+        _ = [event async for event in stream.stream_events()]
+        return bool(captured["had_tools"])
+
+    blocked = asyncio.run(run_case("blocked", {"blocked": True, "preflight": False, "error": False}))
+    preflight = asyncio.run(run_case("preflight", {"blocked": False, "preflight": True, "error": False}))
+    failed = asyncio.run(run_case("failed", {"blocked": False, "preflight": False, "error": True}))
+    successful = asyncio.run(run_case("successful", {"blocked": False, "preflight": False, "error": False}))
+
+    assert blocked is False
+    assert preflight is False
+    assert failed is False
+    assert successful is True
 
 
 def test_raw_text_delta_uses_normalized_provider_event_contract() -> None:
@@ -670,6 +740,7 @@ def test_run_stream_bounds_post_run_learning_finalization(
 def test_reply_with_runtime_marks_actual_tool_activity(tmp_path: Path) -> None:
     async def run() -> ToolCallingLLM:
         runtime, services, _ = _runtime(tmp_path)
+        _register_successful_test_tool(runtime, services)
         llm = ToolCallingLLM()
         services.llm = llm  # type: ignore[assignment]
 
@@ -687,6 +758,7 @@ def test_reply_with_runtime_marks_actual_tool_activity(tmp_path: Path) -> None:
 def test_runtime_reuses_llm_for_recent_memory_compilation(tmp_path: Path) -> None:
     async def run() -> ToolCallingMemoryLLM:
         runtime, services, _ = _runtime(tmp_path)
+        _register_successful_test_tool(runtime, services)
         llm = ToolCallingMemoryLLM()
         services.llm = llm  # type: ignore[assignment]
         services.gate_llm = PassReviewer()  # type: ignore[assignment]

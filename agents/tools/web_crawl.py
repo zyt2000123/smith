@@ -7,6 +7,7 @@ from html.parser import HTMLParser
 import importlib.util
 import json
 from pathlib import Path
+import threading
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -55,6 +56,15 @@ MAX_PAGES = 50
 MAX_DEPTH = 4
 MAX_DOCUMENT_BYTES = 512 * 1024
 TRACKING_PARAMS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
+
+
+class _CrawlCancelled(Exception):
+    """Internal signal that stops a cancelled synchronous crawl safely."""
+
+
+def _raise_if_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise _CrawlCancelled()
 
 
 @dataclass(frozen=True)
@@ -270,12 +280,18 @@ def _build_record(url: str, title: str, content: str, previous: dict[str, Any]) 
     }
 
 
-def _download(url: str, timeout: float) -> tuple[int, str, str, str]:
+def _download(
+    url: str,
+    timeout: float,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> tuple[int, str, str, str]:
     """Fetch a text document through web_fetch's validated, pinned connection."""
     fetch = _web_fetch_module()
     current = url
     deadline = time.monotonic() + timeout
     for _ in range(6):
+        _raise_if_cancelled(cancel_event)
         validation = fetch._validate_url(current)
         if validation:
             raise ValueError(validation)
@@ -300,6 +316,7 @@ def _download(url: str, timeout: float) -> tuple[int, str, str, str]:
                 continue
             content_type = (response.getheader("Content-Type") or "").lower()
             data = response.read(MAX_DOCUMENT_BYTES + 1)
+            _raise_if_cancelled(cancel_event)
             if len(data) > MAX_DOCUMENT_BYTES:
                 raise ValueError("response exceeds 512 KiB limit")
             charset = response.headers.get_content_charset() or "utf-8"
@@ -315,15 +332,29 @@ def _download_with_retries(
     timeout: float,
     *,
     retries: int,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[int, str, str, str]:
     """Retry only transient transport failures with a small bounded backoff."""
     for attempt in range(retries + 1):
+        _raise_if_cancelled(cancel_event)
         try:
-            return _download(url, timeout)
+            if cancel_event is None:
+                result = _download(url, timeout)
+            else:
+                result = _download(url, timeout, cancel_event=cancel_event)
+            _raise_if_cancelled(cancel_event)
+            return result
+        except _CrawlCancelled:
+            raise
         except (OSError, TimeoutError):
             if attempt >= retries:
                 raise
-            time.sleep(0.25 * (attempt + 1))
+            delay = 0.25 * (attempt + 1)
+            if cancel_event is not None:
+                if cancel_event.wait(delay):
+                    raise _CrawlCancelled()
+            else:
+                time.sleep(delay)
     raise RuntimeError("unreachable")
 
 
@@ -392,15 +423,22 @@ def _read_state(path: str) -> dict[str, Any]:
     return value.get("records", {}) if isinstance(value, dict) else {}
 
 
-def _write_state(path: str, records: dict[str, dict[str, Any]]) -> None:
+def _write_state(
+    path: str,
+    records: dict[str, dict[str, Any]],
+    *,
+    cancel_event: threading.Event | None = None,
+) -> None:
     if not path:
         return
+    _raise_if_cancelled(cancel_event)
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     persisted = {
         url: {key: value for key, value in record.items() if key != "text"}
         for url, record in records.items()
     }
+    _raise_if_cancelled(cancel_event)
     destination.write_text(json.dumps({"version": 1, "records": persisted}, indent=2), encoding="utf-8")
 
 
@@ -413,7 +451,10 @@ def _crawl(
     max_retries: int,
     state_path: str,
     render: str,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
+    _raise_if_cancelled(cancel_event)
     seed = _normalize_url(url)
     if not seed:
         raise ValueError("url must be a public http(s) URL")
@@ -424,12 +465,16 @@ def _crawl(
     origin = _origin(seed)
     root = f"{origin[0]}://{origin[1]}" + (f":{origin[2]}" if origin[2] not in {80, 443} else "")
     previous = _read_state(state_path)
+    _raise_if_cancelled(cancel_event)
     warnings: list[str] = []
     try:
         robots_status, _, _, robots_text = _download_with_retries(
-            f"{root}/robots.txt", 15, retries=max_retries
+            f"{root}/robots.txt", 15, retries=max_retries, cancel_event=cancel_event
         )
+        _raise_if_cancelled(cancel_event)
         policy = _parse_robots(robots_text) if robots_status == 200 else _RobotsPolicy((), None, ())
+    except _CrawlCancelled:
+        raise
     except Exception as exc:
         raise ValueError(f"could not retrieve robots.txt: {exc}") from exc
     effective_delay = max(crawl_delay, policy.crawl_delay or 0.0)
@@ -438,33 +483,47 @@ def _crawl(
     if include_sitemaps:
         sitemaps = list(policy.sitemaps) or [f"{root}/sitemap.xml"]
         for sitemap in sitemaps:
+            _raise_if_cancelled(cancel_event)
             if _origin(sitemap) != origin:
                 continue
             try:
-                status, _, kind, body = _download_with_retries(sitemap, 15, retries=max_retries)
+                status, _, kind, body = _download_with_retries(
+                    sitemap, 15, retries=max_retries, cancel_event=cancel_event
+                )
+                _raise_if_cancelled(cancel_event)
                 if status == 200 and ("xml" in kind or body.lstrip().startswith("<")):
                     for item in _parse_sitemap(body):
                         if _origin(item) == origin and item not in queued:
                             queue.append((item, 0))
                             queued.add(item)
+            except _CrawlCancelled:
+                raise
             except Exception as exc:
                 warnings.append(f"sitemap skipped: {sitemap} ({exc})")
     records: dict[str, dict[str, Any]] = {}
     skipped_robots = 0
     last_request = 0.0
     while queue and len(records) < max_pages:
+        _raise_if_cancelled(cancel_event)
         current, depth = queue.pop(0)
         if not _robots_allows(policy, current):
             skipped_robots += 1
             continue
         pause = effective_delay - (time.monotonic() - last_request)
         if pause > 0:
-            time.sleep(pause)
+            if cancel_event is not None:
+                if cancel_event.wait(pause):
+                    raise _CrawlCancelled()
+            else:
+                time.sleep(pause)
         try:
             status, final_url, content_type, body = _download_with_retries(
-                current, 30, retries=max_retries
+                current, 30, retries=max_retries, cancel_event=cancel_event
             )
+            _raise_if_cancelled(cancel_event)
             last_request = time.monotonic()
+        except _CrawlCancelled:
+            raise
         except Exception as exc:
             warnings.append(f"fetch failed: {current} ({exc})")
             continue
@@ -477,9 +536,13 @@ def _crawl(
         )
         if should_render:
             try:
+                _raise_if_cancelled(cancel_event)
                 body = asyncio.run(_render_with_playwright(final_url, timeout=30))
+                _raise_if_cancelled(cancel_event)
                 content_type = "text/html"
                 is_xml = False
+            except _CrawlCancelled:
+                raise
             except Exception as exc:
                 if render == "always":
                     raise ValueError(f"browser render failed for {final_url}: {exc}") from exc
@@ -505,7 +568,7 @@ def _crawl(
                 if link not in queued and _origin(link) == origin:
                     queue.append((link, depth + 1))
                     queued.add(link)
-    _write_state(state_path, records)
+    _write_state(state_path, records, cancel_event=cancel_event)
     return {
         "seed": seed,
         "records": list(records.values()),
@@ -529,6 +592,18 @@ def _render_markdown(result: dict[str, Any]) -> str:
         lines.extend(["\n## Warnings", *[f"- {warning}" for warning in result["warnings"]]])
     lines.append("[/UNTRUSTED_EXTERNAL_CONTENT]")
     return "\n".join(lines)
+
+
+def _consume_background_crawl_result(task: asyncio.Task[dict[str, Any]]) -> None:
+    """Observe a cancelled worker's terminal exception without surfacing it later."""
+    try:
+        task.result()
+    except (asyncio.CancelledError, _CrawlCancelled):
+        pass
+    except Exception:
+        # The caller has already received cancellation; a late worker error is
+        # not useful there and must not become an unhandled-task warning.
+        pass
 
 
 async def execute(
@@ -559,8 +634,9 @@ async def execute(
         return "Error: render must be 'auto', 'never', or 'always'"
     max_pages = min(max(1, max_pages), MAX_PAGES)
     max_depth = min(max(0, max_depth), MAX_DEPTH)
-    try:
-        result = await asyncio.to_thread(
+    cancel_event = threading.Event()
+    worker = asyncio.create_task(
+        asyncio.to_thread(
             _crawl,
             url,
             max_pages,
@@ -570,7 +646,33 @@ async def execute(
             min(max(0, max_retries), 3),
             state_path,
             render,
+            cancel_event=cancel_event,
         )
+    )
+    try:
+        result = await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # ``asyncio.to_thread`` cannot stop a running thread by itself.  Signal
+        # cooperative cancellation, then wait for the worker to settle before
+        # reporting this run as cancelled.  This keeps the engine from
+        # returning a timeout while the crawler can still issue requests or
+        # write state; any in-flight I/O remains bounded by its own timeout.
+        cancel_event.set()
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # A second cancellation (for example process shutdown) cannot
+            # safely wait for a thread.  Preserve the cleanup observer in that
+            # exceptional path so no late exception is lost.
+            worker.add_done_callback(_consume_background_crawl_result)
+            raise
+        except _CrawlCancelled:
+            pass
+        except Exception:
+            # Cancellation is the result visible to the caller; a worker
+            # failure after its cancellation signal is only diagnostic.
+            pass
+        raise
     except Exception as exc:
         return f"Error: crawl failed: {exc}"
     if output_format == "json":

@@ -42,6 +42,7 @@ from .pipeline_context import (
     CTX_STATE_DIR,
     CTX_TASK_TYPE,
     CTX_USER_MESSAGE,
+    CTX_WORKING_DIR,
 )
 from .react_loop import (
     IncompleteAgentRunError,
@@ -169,13 +170,17 @@ def _apply_crash_checkpoint(
 
     Every terminal path clears its checkpoint, so a surviving file means the
     process died mid-chain. Resume only when the identical request comes back
-    (same route, same user message); anything else is a new task and the stale
-    file is removed so it never masquerades as resumable state.
+    in the same agent, identity, and working directory; anything else is a
+    new task and the stale file is removed so it never masquerades as
+    resumable state.
     """
     session_id = str(context.get(CTX_SESSION_ID) or "")
     state_dir = str(context.get(CTX_STATE_DIR) or "")
     if not session_id or not state_dir:
         return context, 0
+    expected_agent_id = str(context.get(CTX_AGENT_ID) or "")
+    expected_identity_id = str(context.get(CTX_IDENTITY_ID) or "")
+    expected_working_dir = str(context.get(CTX_WORKING_DIR) or "")
     try:
         from .session_state import SessionStateManager
 
@@ -184,7 +189,13 @@ def _apply_crash_checkpoint(
         if checkpoint is None:
             return context, 0
         if (
-            checkpoint.route_id == route_id
+            expected_agent_id
+            and expected_identity_id
+            and expected_working_dir
+            and checkpoint.agent_id == expected_agent_id
+            and checkpoint.identity_id == expected_identity_id
+            and checkpoint.working_dir == expected_working_dir
+            and checkpoint.route_id == route_id
             and checkpoint.context.get(CTX_USER_MESSAGE) == user_message
             and 0 <= checkpoint.skill_chain_index < node_count
         ):
@@ -282,6 +293,7 @@ class _AgentSetup(NamedTuple):
     route: RouteDecision
     chain: SkillChain | None
     state_dir: Path
+    working_dir: Path
 
 
 def _merge_context(user_message: str, context: str | None) -> str:
@@ -344,14 +356,17 @@ def _runtime_execution_context(
     runtime: RuntimeContext,
     identity: IdentitySpec,
     state_dir: Path,
+    working_dir: Path,
 ) -> dict[str, str | None]:
     context: dict[str, str | None] = {
         CTX_AGENT_ID: runtime.agent_id,
         CTX_SESSION_ID: runtime.session_id,
         CTX_IDENTITY_ID: identity.id,
         CTX_STATE_DIR: str(state_dir),
+        CTX_WORKING_DIR: str(working_dir.resolve()),
     }
-    context.update({key: value for key, value in runtime.metadata.items()})
+    for key, value in runtime.metadata.items():
+        context.setdefault(key, value)
     return context
 
 
@@ -469,6 +484,7 @@ async def prepare_runtime(
         route,
         chain,
         state_dir,
+        wd,
     )
 
 
@@ -812,8 +828,19 @@ async def _persist_runtime_learning(
     return ok
 
 
-def _has_memory_worthy_activity(event: ExecutionEvent) -> bool:
-    return event.type in (EventType.TOOL_CALL_START, EventType.SKILL_START)
+def _has_successful_tool_evidence(event: ExecutionEvent) -> bool:
+    """Return whether an event carries real, successful tool evidence.
+
+    Tool starts only describe a model proposal.  Preflight challenges, policy
+    blocks, and provider/tool failures never produced project evidence and
+    must not make the memory pipeline label the turn as ``tool_result``.
+    """
+    return (
+        event.type is EventType.TOOL_CALL_RESULT
+        and not bool(event.data.get("blocked"))
+        and not bool(event.data.get("preflight"))
+        and not bool(event.data.get("error"))
+    )
 
 
 def _fact_gate_for_request(
@@ -1060,7 +1087,9 @@ async def _run_events_with_runtime(
                 tool_guard=services.tool_guard,
                 history=request.history,
                 forced_skill=request.forced_skill,
-                execution_context=_runtime_execution_context(runtime, s.identity, s.state_dir),
+                execution_context=_runtime_execution_context(
+                    runtime, s.identity, s.state_dir, s.working_dir,
+                ),
                 gate_llm=services.gate_llm,
             ):
                 if event.type == EventType.TEXT_DELTA:
@@ -1074,7 +1103,7 @@ async def _run_events_with_runtime(
                 elif event.type == EventType.BLOCKED and terminal_status == "completed":
                     terminal_status = "incomplete"
                     terminal_reason = "blocked"
-                elif _has_memory_worthy_activity(event):
+                elif _has_successful_tool_evidence(event):
                     had_tools = True
                 _record_run_event(state_store, run_id, event, trace_store)
                 yield event
@@ -1169,7 +1198,7 @@ async def reply_with_runtime(
     async for event in stream.stream_events():
         if event.type == EventType.TEXT_DELTA:
             full_text.append(str(event.data.get("text", "")))
-        elif _has_memory_worthy_activity(event):
+        elif _has_successful_tool_evidence(event):
             had_tools = True
 
     if not stream.is_complete:

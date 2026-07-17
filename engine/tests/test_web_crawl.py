@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import asyncio
+import threading
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -117,3 +120,68 @@ def test_download_retries_transient_failures_with_a_bounded_attempt_count(monkey
 
     assert result[0] == 200
     assert attempts == 2
+
+
+def test_execute_waits_for_a_cancelled_crawl_to_stop(monkeypatch):
+    crawler = _load_crawler()
+    started = threading.Event()
+    stopped = threading.Event()
+    release_worker = threading.Event()
+
+    def blocking_crawl(*_args, cancel_event=None, **_kwargs):
+        started.set()
+        assert cancel_event is not None
+        assert cancel_event.wait(1)
+        assert release_worker.wait(1)
+        stopped.set()
+        raise crawler._CrawlCancelled()
+
+    monkeypatch.setattr(crawler, "_crawl", blocking_crawl)
+
+    async def run() -> None:
+        task = asyncio.create_task(crawler.execute(url="https://example.com"))
+        assert await asyncio.to_thread(started.wait, 1)
+        try:
+            task.cancel()
+            asyncio.get_running_loop().call_later(0.05, release_worker.set)
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert stopped.is_set()
+        finally:
+            release_worker.set()
+            assert await asyncio.to_thread(stopped.wait, 1)
+
+    asyncio.run(run())
+
+
+def test_cancelled_crawl_does_not_write_incremental_state(tmp_path: Path, monkeypatch):
+    crawler = _load_crawler()
+    cancellation = threading.Event()
+    state_path = tmp_path / "crawl-state.json"
+
+    class Fetch:
+        @staticmethod
+        def _validate_url(_url: str):
+            return None
+
+    def cancel_after_robots(*_args, **_kwargs):
+        cancellation.set()
+        return 404, "https://example.com/robots.txt", "text/plain", ""
+
+    monkeypatch.setattr(crawler, "_web_fetch_module", lambda: Fetch)
+    monkeypatch.setattr(crawler, "_download_with_retries", cancel_after_robots)
+
+    with pytest.raises(crawler._CrawlCancelled):
+        crawler._crawl(
+            "https://example.com",
+            max_pages=1,
+            max_depth=0,
+            include_sitemaps=False,
+            crawl_delay=0,
+            max_retries=0,
+            state_path=str(state_path),
+            render="never",
+            cancel_event=cancellation,
+        )
+
+    assert not state_path.exists()

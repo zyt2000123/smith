@@ -952,6 +952,45 @@ def test_react_event_loop_stream_fallback_on_early_error():
     assert text == "fallback result"
 
 
+def test_react_event_loop_does_not_replay_after_reasoning_only_stream_error():
+    """A partially consumed reasoning stream is not safe to replay."""
+    async def run() -> tuple[bool, int]:
+        class ReasoningThenDisconnectLLM(FakeLLM):
+            stream = True
+
+            def __init__(self) -> None:
+                super().__init__([ChatResponse(text="must not be replayed")])
+                self.fallback_calls = 0
+
+            async def chat_events(self, messages, tools=None):
+                yield ProviderEvent(
+                    ProviderEventType.REASONING_DELTA,
+                    {"delta": "checking the available tools"},
+                )
+                raise ConnectionError("stream died after reasoning")
+
+            async def chat(self, messages, tools=None, prefix_cache_key=None):
+                self.fallback_calls += 1
+                return await super().chat(messages, tools, prefix_cache_key)
+
+        llm = ReasoningThenDisconnectLLM()
+        try:
+            async for _event in _react_event_loop(
+                llm,
+                [{"role": "user", "content": "hello"}],
+                _registry(),
+            ):
+                pass
+        except ConnectionError:
+            return True, llm.fallback_calls
+        return False, llm.fallback_calls
+
+    interrupted, fallback_calls = asyncio.run(run())
+
+    assert interrupted is True
+    assert fallback_calls == 0
+
+
 def _assert_tool_pairing_intact(messages: list[dict]) -> None:
     """Provider-400 invariant: every tool result answers an open call from the
     immediately preceding assistant turn, and no call goes unanswered."""
