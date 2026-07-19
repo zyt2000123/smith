@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, AsyncGenerator
 from uuid import uuid4
 
 from .backtrack import FailureLoopGuard, FailureSignature
-from .events import EventType, ExecutionEvent, raw_text_delta
+from engine.observability import EventType, ExecutionEvent, raw_text_delta
 from .gate import Gate, GateResult, LLMGate, coerce_gate_result
 from .pipeline_context import (
     CTX_AGENT_ID,

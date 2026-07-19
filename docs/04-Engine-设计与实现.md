@@ -270,7 +270,7 @@ Smith 的基础人格 = 一个目录下的 6 个文本/配置文件。Agent-Smit
 
 `assemble_detailed()` 同时返回 provider prompt 和 `PromptManifest`。每层清单记录逻辑 id、来源/引用、范围、权威度、信任级别、加载原因、内容 SHA-256、字符数、估算 token 与动作（`loaded` / `trimmed` / `empty`）；**不记录 prompt 原文、绝对路径或用户内容**。
 
-`run_stream_with_runtime()` 将该清单以 `prompt_manifest` 写入 owner-only 的 `traces/{run_id}.jsonl`。这使一次请求可逐层解释“为什么被加载、是否被裁剪”，又不会把模型上下文复制成另一份敏感日志。没有 Team memory 层；未来若接入新来源，必须映射为同一 `PromptLayer` 契约，而不是旁路拼接字符串。
+`RunEventRecorder` 将该清单以 `prompt_manifest` 写入 owner-only 的 `traces/{run_id}.jsonl`。这使一次请求可逐层解释“为什么被加载、是否被裁剪”，又不会把模型上下文复制成另一份敏感日志。没有 Team memory 层；未来若接入新来源，必须映射为同一 `PromptLayer` 契约，而不是旁路拼接字符串。
 
 ### 5.4 记忆注入策略
 
@@ -445,16 +445,16 @@ record(sig) 裁决规则（max_same=2, max_strategies=2）：
 - 链完成后清除；崩溃则文件残留，`restore()` / `list_active()` 可枚举待恢复会话
 - session_id 有正则白名单 + resolve 校验，防路径穿越（`session_state.py:39`）
 
-### 6.8 事件协议（events.py）
+### 6.8 事件协议与本地 Trace（observability/）
 
-引擎与前端之间的流式契约——10 种 `EventType`，每种带自由 dict 负载，`to_sse()` 直接格式化为 SSE：
+引擎与前端之间的流式契约由 `engine/observability/events.py` 定义。每种 `EventType` 带自由 dict 负载；传输层负责将它格式化为 SSE：
 
 ```
 route_decided → skill_start → tool_call_start/tool_call_result …
 → gate_result → skill_end | backtrack | blocked → text_delta → done
 ```
 
-设计点：**引擎产出结构化事件，翻译成什么样是上层的事**。`reply_stream` 把事件翻成文本标记（`[⚙ planning]`、`[门禁: pass]`、`[↩ 回退: …]`）供纯文本客户端；SSE 端点可以原样透传给富客户端渲染进度树。
+设计点：**引擎产出结构化事件，翻译和留存由观测层处理**。`RunEventRecorder` 是唯一的运行记录入口：它以 best-effort 方式写入 owner-only 的 JSONL trace，更新不保留原始 payload 的 `RunSummary`，并将事件投影给执行控制面的 `RunStateStore`。`reply_stream` 把事件翻成文本标记（`[⚙ planning]`、`[门禁: pass]`、`[↩ 回退: …]`）供纯文本客户端；SSE 端点可以原样透传给富客户端渲染进度树。
 
 ---
 
@@ -739,7 +739,10 @@ async def reply_stream(agent_id, name, user_message) -> AsyncGenerator[str]
 | 执行 | `engine/execution/task_router.py` | 71 | 覆写/关键词/LLM 三级路由 |
 | 执行 | `engine/execution/backtrack.py` | 37 | FailureLoopGuard 状态机 |
 | 执行 | `engine/execution/session_state.py` | 76 | SessionCheckpoint 断点存取 |
-| 执行 | `engine/execution/events.py` | 51 | 10 种 ExecutionEvent + SSE 序列化 |
+| 可观测性 | `engine/observability/events.py` | — | ExecutionEvent 流式契约 |
+| 可观测性 | `engine/observability/trace_store.py` | — | 脱敏、限长、本地 JSONL trace |
+| 可观测性 | `engine/observability/recorder.py` | — | 记录边界与执行控制投影扇出 |
+| 可观测性 | `engine/observability/projections.py` | — | RunSummary 派生指标 |
 | Prompt | `engine/prompt/assembler.py` | 181 | 9 段组装、token 裁剪、稳定层 hash |
 | Prompt | `engine/prompt/placeholder.py` | 15 | `{{key}}` 渲染 |
 | 记忆 | `engine/memory/store.py` | — | recent.jsonl 证据写入、durable/episode 召回、编译/Dream 调度 |

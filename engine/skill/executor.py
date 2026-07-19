@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Coroutine
 
 if TYPE_CHECKING:
-    from engine.execution.events import ExecutionEvent
+    from engine.observability import ExecutionEvent
     from engine.llm.port import LLMPort
     from engine.tool.registry import ToolRegistry
     from engine.safety.tool_guard import ToolGuard

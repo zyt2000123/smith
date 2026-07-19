@@ -14,7 +14,7 @@ from engine.execution.agent_loop import (
     resume_stream_with_runtime as engine_resume_stream_with_runtime,
     reply_with_runtime as engine_reply_with_runtime,
 )
-from engine.execution.events import raw_text_delta
+from engine.observability import raw_text_delta
 from engine.execution.smith_ui import smith_ui_fallback, validate_smith_ui_call
 from engine.execution.compression import CONTEXT_DISPLAY_WINDOW, compact_history
 from engine.execution.run_state import RunStateError, RunStateStore, RunStatus

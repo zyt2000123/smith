@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from engine.identity_catalog import IdentityCatalog, IdentitySpec, RouteDecision
 from engine.llm.port import LLMPort
+from engine.observability import EventType, ExecutionEvent, RunEventRecorder, TraceStore, raw_text_delta
 from engine.prompt.assembler import PromptAssembler
 from engine.react_budget import DEFAULT_MAX_REACT_ITERS
 from engine.safety.fact_gate import FactGate, FactGateContext, use_fact_gate
@@ -31,7 +32,6 @@ from engine.skill.registry import SkillRegistry
 from engine.tool.registry import ToolRegistry
 from .backtrack import FailureLoopGuard
 from .compression import prompt_budget_for_llm
-from .events import EventType, ExecutionEvent, raw_text_delta
 from .pipeline import run_pipeline
 from .pipeline_context import (
     CTX_AGENT_ID,
@@ -48,13 +48,12 @@ from .react_loop import (
     IncompleteAgentRunError,
     react_event_loop,
 )
-from .run_state import RunStateError, RunStateStore, RunStatus
+from .run_state import RunStateError, RunStateStore, RunStatus, project_execution_event
 from .run_stream import AgentRunStream
 from .runtime import EngineRequest, EngineResult, RuntimeContext, RuntimeServices
 from .runtime_control import initial_runtime_control_prompt
 from .skill_chain import SkillChain, load_gate_content
 from .tool_ledger import ToolExecutionLedger
-from .trace import TraceStore
 from engine.safety.eval_guard import EVAL_SENSITIVE_GUIDANCE, detect_eval_sensitive
 from engine.safety.approval import APPROVAL_BROKER, use_approval_context
 from .task_router import route_task
@@ -870,77 +869,13 @@ def _fact_gate_for_request(
     ), tool_registry=definitions)
 
 
-def _record_run_event(
-    store: RunStateStore | None,
-    run_id: str,
+def _record_observability_event(
+    recorder: RunEventRecorder | None,
     event: ExecutionEvent,
-    trace_store: TraceStore | None = None,
 ) -> None:
-    """Best-effort projection of engine events into durable run metadata."""
-    if trace_store is not None:
-        try:
-            trace_store.append(run_id, event)
-        except (OSError, ValueError):
-            logger.warning(
-                "failed to append run trace (run=%s, event=%s)",
-                run_id,
-                event.type.value,
-                exc_info=True,
-            )
-    if store is None:
-        return
-    try:
-        event_type = event.type.value
-        if event.type is EventType.RUN_STARTED:
-            store.transition(run_id, RunStatus.RUNNING, event_type=event_type)
-            return
-        if event.type is EventType.RUN_FINISHED:
-            status = RunStatus(str(event.data.get("status", RunStatus.FAILED.value)))
-            reason = event.data.get("reason")
-            store.transition(
-                run_id,
-                status,
-                event_type=event_type,
-                reason=str(reason) if reason is not None else None,
-                error=str(reason) if status is RunStatus.FAILED and reason is not None else None,
-            )
-            return
-
-        kwargs: dict[str, object] = {}
-        if event.type is EventType.SKILL_START:
-            kwargs["current_skill"] = event.data.get("skill")
-        elif event.type is EventType.SKILL_END:
-            kwargs["clear_skill"] = True
-        elif event.type is EventType.TOOL_CALL_START:
-            kwargs["current_tool"] = event.data.get("name")
-        elif event.type is EventType.TOOL_CALL_RESULT:
-            if event.data.get("approval_required"):
-                store.request_approval(
-                    run_id,
-                    approval_id=str(event.data.get("approval_id") or ""),
-                    tool_name=str(event.data.get("tool") or "tool"),
-                    level=str(event.data.get("level") or "execute"),
-                    reason=str(event.data.get("reason") or "Approval required"),
-                )
-                return
-            approval_outcome = str(event.data.get("approval_outcome") or "")
-            if approval_outcome in {"denied", "timed_out"}:
-                state = store.get(run_id)
-                if state is not None and state.status is RunStatus.WAITING_APPROVAL:
-                    approval_id = str(event.data.get("approval_id") or "")
-                    store.resolve_approval(
-                        run_id,
-                        approval_id,
-                        approved=False,
-                        event_type=event_type,
-                        reason=f"approval_{approval_outcome}",
-                    )
-                    return
-            kwargs["clear_tool"] = True
-        store.record_event(run_id, event_type, **kwargs)
-    except (RunStateError, ValueError, TypeError):
-        # Run observability must not take down an otherwise valid execution.
-        logger.warning("failed to record run state event (run=%s, event=%s)", run_id, event.type.value)
+    """Send an execution event through the single observability boundary."""
+    if recorder is not None:
+        recorder.record(event)
 
 
 def run_stream_with_runtime(
@@ -990,6 +925,11 @@ def run_stream_with_runtime(
                     exc_info=True,
                 )
         return _failed_setup_stream(run_id, services, "tool_ledger_unavailable")
+    recorder = RunEventRecorder(
+        run_id,
+        trace_store=trace_store,
+        projections=(lambda event: project_execution_event(state_store, run_id, event),),
+    )
     return AgentRunStream(
         run_id,
         _run_events_with_runtime(
@@ -998,7 +938,7 @@ def run_stream_with_runtime(
             services,
             run_id,
             state_store,
-            trace_store,
+            recorder,
             ledger,
         ),
         on_unstarted_close=lambda: _cancel_unstarted_run(run_id, state_store, services),
@@ -1084,6 +1024,11 @@ def resume_stream_with_runtime(
     except OSError:
         logger.warning("failed to initialize resumed run trace (run=%s)", run_id, exc_info=True)
         trace_store = None
+    recorder = RunEventRecorder(
+        run_id,
+        trace_store=trace_store,
+        projections=(lambda event: project_execution_event(state_store, run_id, event),),
+    )
     return AgentRunStream(
         run_id,
         _run_events_with_runtime(
@@ -1092,7 +1037,7 @@ def resume_stream_with_runtime(
             services,
             run_id,
             state_store,
-            trace_store,
+            recorder,
             ledger,
         ),
     )
@@ -1104,7 +1049,7 @@ async def _run_events_with_runtime(
     services: RuntimeServices,
     run_id: str,
     state_store: RunStateStore | None = None,
-    trace_store: TraceStore | None = None,
+    recorder: RunEventRecorder | None = None,
     ledger: ToolExecutionLedger | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Produce one complete run, including persistence and cleanup."""
@@ -1127,15 +1072,12 @@ async def _run_events_with_runtime(
                 "project_path": request.working_dir or "",
             },
         )
-        _record_run_event(state_store, run_id, run_started, trace_store)
+        _record_observability_event(recorder, run_started)
         yield run_started
         s = await prepare_runtime(request, runtime, services)
         state_dir = s.state_dir
-        if trace_store is not None and hasattr(s, "prompt_manifest"):
-            try:
-                trace_store.append_prompt_manifest(run_id, s.prompt_manifest)
-            except (OSError, ValueError):
-                logger.warning("failed to persist prompt manifest (run=%s)", run_id, exc_info=True)
+        if recorder is not None and hasattr(s, "prompt_manifest"):
+            recorder.append_prompt_manifest(s.prompt_manifest)
         guard = FailureLoopGuard()
         with use_fact_gate(_fact_gate_for_request(request, runtime, services)), use_approval_context(
             APPROVAL_BROKER, run_id
@@ -1167,7 +1109,7 @@ async def _run_events_with_runtime(
                     terminal_reason = "blocked"
                 elif _has_successful_tool_evidence(event):
                     had_tools = True
-                _record_run_event(state_store, run_id, event, trace_store)
+                _record_observability_event(recorder, event)
                 yield event
         drained = True
     except Exception as exc:
@@ -1177,13 +1119,13 @@ async def _run_events_with_runtime(
         failure_text = ExecutionEvent(EventType.TEXT_DELTA, {
             "text": f"⚠️ 执行失败：{type(exc).__name__}（详情见服务端日志）",
         })
-        _record_run_event(state_store, run_id, failure_text, trace_store)
+        _record_observability_event(recorder, failure_text)
         yield failure_text
         failure_event = ExecutionEvent(EventType.FAILED, {"reason": terminal_reason})
-        _record_run_event(state_store, run_id, failure_event, trace_store)
+        _record_observability_event(recorder, failure_event)
         yield failure_event
         done_event = ExecutionEvent(EventType.DONE, {})
-        _record_run_event(state_store, run_id, done_event, trace_store)
+        _record_observability_event(recorder, done_event)
         yield done_event
         drained = True
     finally:
@@ -1238,7 +1180,7 @@ async def _run_events_with_runtime(
             # 让前端有机会提示"本轮未写入长期记忆"。
             terminal_data["memory_persist_failed"] = True
         finished_event = ExecutionEvent(EventType.RUN_FINISHED, terminal_data)
-        _record_run_event(state_store, run_id, finished_event, trace_store)
+        _record_observability_event(recorder, finished_event)
         yield finished_event
 
 

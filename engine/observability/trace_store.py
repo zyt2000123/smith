@@ -1,0 +1,116 @@
+"""Bounded, local JSONL trace storage for one Agent run."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from common.paths import PRIVATE_DIR_MODE, PRIVATE_FILE_MODE
+
+from .events import ExecutionEvent
+
+
+_SENSITIVE_KEY = re.compile(r"(?:token|secret|password|passwd|api[_-]?key|authorization)", re.I)
+_SAFE_METRIC_KEYS = {
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "context_tokens",
+}
+_MAX_VALUE_CHARS = 4096
+_MAX_DEPTH = 4
+
+
+def _bounded_trace_value(value: Any, depth: int = 0) -> Any:
+    if depth > _MAX_DEPTH:
+        return "[TRUNCATED]"
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            result[key_text] = (
+                "[REDACTED]"
+                if _SENSITIVE_KEY.search(key_text) and key_text.lower() not in _SAFE_METRIC_KEYS
+                else _bounded_trace_value(item, depth + 1)
+            )
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_bounded_trace_value(item, depth + 1) for item in value[:100]]
+    if isinstance(value, str):
+        return value[:_MAX_VALUE_CHARS]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return str(value)[:_MAX_VALUE_CHARS]
+
+
+class TraceStore:
+    """Append and read bounded execution events without blocking a run."""
+
+    def __init__(self, profile_dir: Path) -> None:
+        self.root = Path(profile_dir) / "traces"
+        self.root.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
+        self.root.chmod(PRIVATE_DIR_MODE)
+        self._next_seq: dict[str, int] = {}
+
+    def _path(self, run_id: str) -> Path:
+        if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
+            raise ValueError("invalid trace run id")
+        return self.root / f"{run_id}.jsonl"
+
+    def _sequence(self, run_id: str, path: Path) -> int:
+        if run_id not in self._next_seq:
+            current = 0
+            if path.is_file():
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    try:
+                        current = max(current, int(json.loads(line).get("seq", 0)))
+                    except (ValueError, TypeError, json.JSONDecodeError):
+                        continue
+            self._next_seq[run_id] = current
+        self._next_seq[run_id] += 1
+        return self._next_seq[run_id]
+
+    def append(self, run_id: str, event: ExecutionEvent) -> None:
+        self._append_record(run_id, event.type.value, event.data)
+
+    def append_prompt_manifest(self, run_id: str, manifest: dict[str, Any]) -> None:
+        """Persist a redacted prompt-provenance receipt without prompt text."""
+        self._append_record(run_id, "prompt_manifest", manifest)
+
+    def _append_record(self, run_id: str, record_type: str, data: dict[str, Any]) -> None:
+        path = self._path(run_id)
+        record = {
+            "seq": self._sequence(run_id, path),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id,
+            "type": record_type,
+            "data": _bounded_trace_value(data),
+        }
+        payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, PRIVATE_FILE_MODE)
+        try:
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        path.chmod(PRIVATE_FILE_MODE)
+
+    def read(self, run_id: str) -> list[dict[str, Any]]:
+        path = self._path(run_id)
+        if not path.is_file():
+            return []
+        records: list[dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                records.append(value)
+        return records

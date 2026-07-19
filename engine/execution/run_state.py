@@ -19,6 +19,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from common.paths import PRIVATE_DIR_MODE, PRIVATE_FILE_MODE
+from engine.observability.events import EventType, ExecutionEvent
 
 
 class RunStatus(str, Enum):
@@ -438,3 +439,78 @@ class RunStateStore:
         if state is None:
             raise RunStateError(f"Run state not found for {run_id!r}")
         return state
+
+
+def project_execution_event(
+    store: RunStateStore | None,
+    run_id: str,
+    event: ExecutionEvent,
+) -> None:
+    """Project an execution event into durable runtime-control state.
+
+    This belongs to the execution control plane rather than observability:
+    the state determines whether a run can be resumed or needs approval.  It
+    is deliberately best-effort so a corrupt state file never interrupts an
+    otherwise valid run.
+    """
+    if store is None:
+        return
+    try:
+        event_type = event.type.value
+        if event.type is EventType.RUN_STARTED:
+            store.transition(run_id, RunStatus.RUNNING, event_type=event_type)
+            return
+        if event.type is EventType.RUN_FINISHED:
+            status = RunStatus(str(event.data.get("status", RunStatus.FAILED.value)))
+            reason = event.data.get("reason")
+            store.transition(
+                run_id,
+                status,
+                event_type=event_type,
+                reason=str(reason) if reason is not None else None,
+                error=str(reason) if status is RunStatus.FAILED and reason is not None else None,
+            )
+            return
+
+        kwargs: dict[str, object] = {}
+        if event.type is EventType.SKILL_START:
+            kwargs["current_skill"] = event.data.get("skill")
+        elif event.type is EventType.SKILL_END:
+            kwargs["clear_skill"] = True
+        elif event.type is EventType.TOOL_CALL_START:
+            kwargs["current_tool"] = event.data.get("name")
+        elif event.type is EventType.TOOL_CALL_RESULT:
+            if event.data.get("approval_required"):
+                store.request_approval(
+                    run_id,
+                    approval_id=str(event.data.get("approval_id") or ""),
+                    tool_name=str(event.data.get("tool") or "tool"),
+                    level=str(event.data.get("level") or "execute"),
+                    reason=str(event.data.get("reason") or "Approval required"),
+                )
+                return
+            approval_outcome = str(event.data.get("approval_outcome") or "")
+            if approval_outcome in {"denied", "timed_out"}:
+                state = store.get(run_id)
+                if state is not None and state.status is RunStatus.WAITING_APPROVAL:
+                    approval_id = str(event.data.get("approval_id") or "")
+                    store.resolve_approval(
+                        run_id,
+                        approval_id,
+                        approved=False,
+                        event_type=event_type,
+                        reason=f"approval_{approval_outcome}",
+                    )
+                    return
+            kwargs["clear_tool"] = True
+        store.record_event(run_id, event_type, **kwargs)
+    except (RunStateError, ValueError, TypeError):
+        # Run control state must not take down an otherwise valid execution.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "failed to project run state event (run=%s, event=%s)",
+            run_id,
+            event.type.value,
+            exc_info=True,
+        )

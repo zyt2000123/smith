@@ -8,7 +8,6 @@ import pytest
 
 from engine.execution import agent_loop as agent_loop_module
 from engine.execution.agent_loop import (
-    _record_run_event,
     _bind_working_directory_tools,
     prepare_runtime,
     reply_events_with_runtime,
@@ -18,12 +17,11 @@ from engine.execution.agent_loop import (
     run_agent_stream,
 )
 from engine.execution.backtrack import FailureLoopGuard
-from engine.execution.events import EventType, ExecutionEvent, raw_text_delta
-from engine.execution.run_state import RunStateStore, RunStatus
+from engine.execution.run_state import RunStateStore, RunStatus, project_execution_event
 from engine.execution.runtime import EngineRequest, RuntimeContext, RuntimeServices
-from engine.execution.trace import TraceStore
 from engine.identity_catalog import IdentityCatalog
 from engine.llm.client import ChatResponse, ToolCallData
+from engine.observability import EventType, ExecutionEvent, TraceStore, raw_text_delta
 from engine.safety.tool_guard import ToolGuard
 from engine.skill.registry import SkillRegistry
 from engine.tool.interface import ToolCall
@@ -438,12 +436,12 @@ def test_run_stream_persists_queued_and_terminal_run_state(tmp_path: Path) -> No
 def test_timeout_settles_waiting_approval_before_terminal_run_state(tmp_path: Path) -> None:
     store = RunStateStore(tmp_path)
     store.create("run-1", agent_id="smith")
-    _record_run_event(
+    project_execution_event(
         store,
         "run-1",
         ExecutionEvent(EventType.RUN_STARTED, {"run_id": "run-1"}),
     )
-    _record_run_event(
+    project_execution_event(
         store,
         "run-1",
         ExecutionEvent(
@@ -457,7 +455,7 @@ def test_timeout_settles_waiting_approval_before_terminal_run_state(tmp_path: Pa
             },
         ),
     )
-    _record_run_event(
+    project_execution_event(
         store,
         "run-1",
         ExecutionEvent(
@@ -477,7 +475,7 @@ def test_timeout_settles_waiting_approval_before_terminal_run_state(tmp_path: Pa
     assert settled.reason == "approval_timed_out"
     assert settled.approval_id is None
 
-    _record_run_event(
+    project_execution_event(
         store,
         "run-1",
         ExecutionEvent(

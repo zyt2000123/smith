@@ -49,7 +49,7 @@ from .compression import (
     prune_tool_outputs,
     trim_conversation_for_context_limit,
 )
-from .events import EventType, ExecutionEvent
+from engine.observability import EventType, ExecutionEvent
 from .smith_ui import smith_ui_fallback, validate_smith_ui_call
 
 if TYPE_CHECKING:

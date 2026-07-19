@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import os
 
-from engine.execution.events import EventType, ExecutionEvent
-from engine.execution.trace import TraceStore
+from engine.observability import EventType, ExecutionEvent, TraceStore
 
 
 def test_trace_store_persists_bounded_event_records(tmp_path):
