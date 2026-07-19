@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 
-import type { ObservabilityRun } from "./api.js";
+import type { AgentHealth, ObservabilityRun, RunIncident } from "./api.js";
 import { ACCENT, ERROR, INFO, MUTED, WARNING } from "./theme.js";
 import { formatTokenCount } from "./token-stats.js";
 
@@ -11,15 +11,51 @@ function outcomeColor(outcome: string | null | undefined): string {
   return MUTED;
 }
 
-export function RunExplorerPanel({ runs }: { runs: ObservabilityRun[] | null }) {
-  if (runs === null) return <Text color={MUTED}>Loading run history…</Text>;
+export function RunExplorerPanel({
+  runs,
+  health,
+  incidents,
+}: {
+  runs: ObservabilityRun[] | null;
+  health: AgentHealth | null;
+  incidents: RunIncident[] | null;
+}) {
+  if (runs === null || health === null || incidents === null) return <Text color={MUTED}>Loading observability…</Text>;
   if (runs.length === 0) return <Text color={MUTED}>No completed or interrupted runs recorded yet.</Text>;
   return (
     <Box flexDirection="column">
       <Text bold color={ACCENT}>
-        Run Explorer
+        Observability
       </Text>
-      <Text color={MUTED}>Recent local runs · Esc back</Text>
+      <Text color={MUTED}>Local run health · `/trace &lt;run-id&gt;` for RCA · Esc back</Text>
+      <Box marginTop={1} gap={2}>
+        <Text color={health.success_rate >= 0.8 ? INFO : WARNING}>
+          success {(health.success_rate * 100).toFixed(0)}% ({health.completed_count}/{health.run_count})
+        </Text>
+        <Text color={MUTED}>{formatTokenCount(health.tokens_per_run)} tokens/run</Text>
+        <Text color={MUTED}>{health.average_backtracks.toFixed(1)} backtracks/run</Text>
+      </Box>
+      {incidents.length ? (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color={WARNING}>Incidents</Text>
+          {incidents.slice(0, 3).map((incident) => (
+            <Text
+              key={`${incident.run_id}:${incident.category}`}
+              color={incident.severity === "error" ? ERROR : WARNING}
+            >
+              {incident.severity.toUpperCase()} · {incident.category} · {incident.run_id.slice(0, 10)} ·{" "}
+              {incident.message}
+            </Text>
+          ))}
+        </Box>
+      ) : (
+        <Box marginTop={1}>
+          <Text color={INFO}>No active incident in the displayed window.</Text>
+        </Box>
+      )}
+      <Box marginTop={1}>
+        <Text color={MUTED}>Recent runs</Text>
+      </Box>
       {runs.map((run) => (
         <Box key={run.run_id} flexDirection="column" marginTop={1}>
           <Box gap={1}>

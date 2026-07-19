@@ -6,12 +6,14 @@
 import { createStore } from "zustand/vanilla";
 import { applyToolActivity, createToolActivity, type ToolActivity } from "./activity.js";
 import type {
+  AgentHealth,
   AgentProfile,
   ContextUsage,
   LlmConfig,
   McpServer,
   ObservabilityRun,
   PendingApproval,
+  RunIncident,
   Session,
   SkillSummary,
   StreamEvent,
@@ -88,6 +90,8 @@ export type AppState = {
   tokenStats: TokenStats | null;
   tokenTab: TokenTab;
   observabilityRuns: ObservabilityRun[] | null;
+  observabilityHealth: AgentHealth | null;
+  observabilityIncidents: RunIncident[] | null;
   viewMode: TranscriptViewMode;
   pendingSkill: SkillSummary | null;
   queuedMessages: QueuedMessage[];
@@ -266,6 +270,8 @@ export function createAppStore(initialHistory: string[] = []) {
     tokenStats: null,
     tokenTab: "stats",
     observabilityRuns: null,
+    observabilityHealth: null,
+    observabilityIncidents: null,
     viewMode: "compact",
     pendingSkill: null,
     queuedMessages: [],

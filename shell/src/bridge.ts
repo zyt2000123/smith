@@ -12,8 +12,10 @@ import {
   deleteSession,
   ensureAgentProfile,
   getLlmConfig,
+  getObservabilityHealth,
   getRun,
   getRunDiagnosis,
+  getRunImprovementProposal,
   getTokenStats,
   initializeProjectInstructions,
   type LlmConfigInput,
@@ -21,9 +23,11 @@ import {
   listMessages,
   listObservabilityRuns,
   listRelayModels,
+  listRunIncidents,
   listSessions,
   listSkills,
   type RunDiagnosis,
+  type RunImprovementProposal,
   type RunState,
   resolveRunApproval,
   type Session,
@@ -47,7 +51,7 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function formatTraceStatus(diagnosis: RunDiagnosis): string {
+function formatTraceStatus(diagnosis: RunDiagnosis, proposal: RunImprovementProposal): string {
   const heading = `Trace · ${diagnosis.run_id.slice(0, 10)} · ${diagnosis.status === "healthy" ? "healthy" : "attention"}`;
   const details = [
     `Summary: ${diagnosis.summary}`,
@@ -55,6 +59,8 @@ function formatTraceStatus(diagnosis: RunDiagnosis): string {
     diagnosis.primary_category ? `Category: ${diagnosis.primary_category}` : null,
     diagnosis.evidence.length ? `Evidence: ${diagnosis.evidence.join(", ")}` : null,
     diagnosis.recommendation ? `Next: ${diagnosis.recommendation}` : null,
+    proposal.status === "proposed" ? `Proposal: ${proposal.title} (approval required)` : null,
+    proposal.suggested_change ? `Change: ${proposal.suggested_change}` : null,
   ].filter((line): line is string => Boolean(line));
   return [heading, ...details].join("\n");
 }
@@ -407,11 +413,27 @@ export class NodeBridge {
     const { baseUrl } = this.s;
     if (!baseUrl) return;
     const requestId = ++this.observabilityRequestId;
-    this.s.set({ panel: "runs", observabilityRuns: null, statusLine: "Loading run history…" });
+    this.s.set({
+      panel: "runs",
+      observabilityRuns: null,
+      observabilityHealth: null,
+      observabilityIncidents: null,
+      statusLine: "Loading observability…",
+    });
     try {
-      const observabilityRuns = await listObservabilityRuns(baseUrl);
+      const [observabilityRuns, observabilityHealth, observabilityIncidents] = await Promise.all([
+        listObservabilityRuns(baseUrl),
+        getObservabilityHealth(baseUrl),
+        listRunIncidents(baseUrl),
+      ]);
       if (requestId !== this.observabilityRequestId || this.s.panel !== "runs") return;
-      this.s.set({ panel: "runs", observabilityRuns, statusLine: `${observabilityRuns.length} recorded run(s).` });
+      this.s.set({
+        panel: "runs",
+        observabilityRuns,
+        observabilityHealth,
+        observabilityIncidents,
+        statusLine: `${observabilityRuns.length} recorded run(s) · ${observabilityIncidents.length} incident(s).`,
+      });
     } catch (error) {
       if (requestId !== this.observabilityRequestId || this.s.panel !== "runs") return;
       this.s.pushSystemLine(`Run history unavailable: ${errorMessage(error)}`, "error");
@@ -434,8 +456,11 @@ export class NodeBridge {
         this.s.set({ statusLine: "No recorded runs yet." });
         return;
       }
-      const diagnosis = await getRunDiagnosis(baseUrl, runId);
-      this.s.pushSystemLine(formatTraceStatus(diagnosis));
+      const [diagnosis, proposal] = await Promise.all([
+        getRunDiagnosis(baseUrl, runId),
+        getRunImprovementProposal(baseUrl, runId),
+      ]);
+      this.s.pushSystemLine(formatTraceStatus(diagnosis, proposal));
       this.s.set({ panel: "chat", statusLine: `Trace for ${runId.slice(0, 10)}.` });
     } catch (error) {
       this.s.pushSystemLine(`Trace unavailable: ${errorMessage(error)}`, "error");

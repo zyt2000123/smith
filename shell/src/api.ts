@@ -365,6 +365,50 @@ export async function getRunDiagnosis(baseUrl: string, runId: string): Promise<R
   return request<RunDiagnosis>(baseUrl, `/api/agent/observability/runs/${encodeURIComponent(runId)}/diagnosis`);
 }
 
+export type AgentHealth = {
+  agent_id: string;
+  run_count: number;
+  completed_count: number;
+  unsuccessful_count: number;
+  success_rate: number;
+  tool_call_count: number;
+  tool_success_rate?: number | null;
+  average_backtracks: number;
+  total_tokens: number;
+  tokens_per_run: number;
+};
+
+export type RunIncident = {
+  run_id: string;
+  severity: "warning" | "error";
+  category: string;
+  message: string;
+  occurred_at: string;
+  evidence: Record<string, string | number>;
+};
+
+export type RunImprovementProposal = {
+  status: "no_action" | "proposed";
+  title: string;
+  suggested_change?: string | null;
+  approval_required: boolean;
+};
+
+export async function getObservabilityHealth(baseUrl: string): Promise<AgentHealth> {
+  return request<AgentHealth>(baseUrl, "/api/agent/observability/health");
+}
+
+export async function listRunIncidents(baseUrl: string, limit = 20): Promise<RunIncident[]> {
+  return request<RunIncident[]>(baseUrl, `/api/agent/observability/incidents?limit=${limit}`);
+}
+
+export async function getRunImprovementProposal(baseUrl: string, runId: string): Promise<RunImprovementProposal> {
+  return request<RunImprovementProposal>(
+    baseUrl,
+    `/api/agent/observability/runs/${encodeURIComponent(runId)}/improvement-proposal`,
+  );
+}
+
 export async function createSession(
   baseUrl: string,
   title: string,

@@ -447,8 +447,21 @@ function ShellContent({
   highlighter,
   tokenStats,
   observabilityRuns,
+  observabilityHealth,
+  observabilityIncidents,
   tokenTab,
-}: Pick<AppStore, "mode" | "panel" | "viewMode" | "welcomeNotice" | "tokenStats" | "tokenTab" | "observabilityRuns"> & {
+}: Pick<
+  AppStore,
+  | "mode"
+  | "panel"
+  | "viewMode"
+  | "welcomeNotice"
+  | "tokenStats"
+  | "tokenTab"
+  | "observabilityRuns"
+  | "observabilityHealth"
+  | "observabilityIncidents"
+> & {
   active: TranscriptEntry[];
   highlighter?: CodeHighlighter;
 }) {
@@ -466,7 +479,9 @@ function ShellContent({
   }
 
   if (panel === "runs") {
-    return <RunExplorerPanel runs={observabilityRuns} />;
+    return (
+      <RunExplorerPanel runs={observabilityRuns} health={observabilityHealth} incidents={observabilityIncidents} />
+    );
   }
 
   return (
@@ -943,6 +958,8 @@ function SmithApp() {
   const tokenStats = useS((state) => state.tokenStats);
   const tokenTab = useS((state) => state.tokenTab);
   const observabilityRuns = useS((state) => state.observabilityRuns);
+  const observabilityHealth = useS((state) => state.observabilityHealth);
+  const observabilityIncidents = useS((state) => state.observabilityIncidents);
   const runStartedAt = useS((state) => state.runStartedAt);
   const pendingApproval = useS((state) => state.pendingApproval);
   const approvalIndex = useS((state) => state.approvalIndex);
@@ -1102,6 +1119,8 @@ function SmithApp() {
           tokenStats={tokenStats}
           tokenTab={tokenTab}
           observabilityRuns={observabilityRuns}
+          observabilityHealth={observabilityHealth}
+          observabilityIncidents={observabilityIncidents}
         />
       </Box>
       {panel !== "tokens" && panel !== "runs" ? (
