@@ -33,6 +33,7 @@ import {
   modelPickerTargetLabel,
 } from "./model-picker.js";
 import type { QueuedMessage } from "./queue.js";
+import { RunExplorerPanel } from "./run-panel.js";
 import {
   buildLlmConfigInput,
   fieldValue,
@@ -445,8 +446,9 @@ function ShellContent({
   welcomeNotice,
   highlighter,
   tokenStats,
+  observabilityRuns,
   tokenTab,
-}: Pick<AppStore, "mode" | "panel" | "viewMode" | "welcomeNotice" | "tokenStats" | "tokenTab"> & {
+}: Pick<AppStore, "mode" | "panel" | "viewMode" | "welcomeNotice" | "tokenStats" | "tokenTab" | "observabilityRuns"> & {
   active: TranscriptEntry[];
   highlighter?: CodeHighlighter;
 }) {
@@ -461,6 +463,10 @@ function ShellContent({
 
   if (mode === "setup") {
     return <SetupPanel />;
+  }
+
+  if (panel === "runs") {
+    return <RunExplorerPanel runs={observabilityRuns} />;
   }
 
   return (
@@ -936,6 +942,7 @@ function SmithApp() {
   const contextUsage = useS((state) => state.contextUsage);
   const tokenStats = useS((state) => state.tokenStats);
   const tokenTab = useS((state) => state.tokenTab);
+  const observabilityRuns = useS((state) => state.observabilityRuns);
   const runStartedAt = useS((state) => state.runStartedAt);
   const pendingApproval = useS((state) => state.pendingApproval);
   const approvalIndex = useS((state) => state.approvalIndex);
@@ -1071,7 +1078,7 @@ function SmithApp() {
 
   return (
     <Box flexDirection="column">
-      {panel !== "tokens" ? (
+      {panel !== "tokens" && panel !== "runs" ? (
         <Static key={`transcript-${transcriptEpoch}`} items={staticItems}>
           {(item) => (
             <Box key={item.id} flexDirection="column" paddingX={2}>
@@ -1094,9 +1101,10 @@ function SmithApp() {
           highlighter={highlighter}
           tokenStats={tokenStats}
           tokenTab={tokenTab}
+          observabilityRuns={observabilityRuns}
         />
       </Box>
-      {panel !== "tokens" ? (
+      {panel !== "tokens" && panel !== "runs" ? (
         <Box flexDirection="column" paddingBottom={1} paddingX={2}>
           <ShellFooter
             activeSetupField={activeSetupField}

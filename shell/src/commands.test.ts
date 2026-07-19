@@ -26,7 +26,7 @@ test("slash filtering exposes one resume command", () => {
   const skills = Array.from({ length: 8 }, (_, index) => skill(`skill-${index + 1}`));
   const items = filterSlash(buildSlashItems(skills), "/");
 
-  assert.equal(items.length, 16);
+  assert.equal(items.length, 17);
   assert.equal(
     items.some((item) => item.command === "/init"),
     true,
@@ -45,6 +45,10 @@ test("slash filtering exposes one resume command", () => {
   );
   assert.equal(
     items.some((item) => item.command === "/hooks"),
+    true,
+  );
+  assert.equal(
+    items.some((item) => item.command === "/runs"),
     true,
   );
   assert.equal(

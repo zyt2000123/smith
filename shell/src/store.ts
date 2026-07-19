@@ -10,6 +10,7 @@ import type {
   ContextUsage,
   LlmConfig,
   McpServer,
+  ObservabilityRun,
   PendingApproval,
   Session,
   SkillSummary,
@@ -44,7 +45,8 @@ export type Panel =
   | "mcp"
   | "hooks"
   | "hook-details"
-  | "tokens";
+  | "tokens"
+  | "runs";
 export type Mode = "boot" | "setup" | "chat";
 export type SetupFlow = "initial" | "advanced";
 
@@ -85,6 +87,7 @@ export type AppState = {
   contextUsage: ContextUsage;
   tokenStats: TokenStats | null;
   tokenTab: TokenTab;
+  observabilityRuns: ObservabilityRun[] | null;
   viewMode: TranscriptViewMode;
   pendingSkill: SkillSummary | null;
   queuedMessages: QueuedMessage[];
@@ -262,6 +265,7 @@ export function createAppStore(initialHistory: string[] = []) {
     },
     tokenStats: null,
     tokenTab: "stats",
+    observabilityRuns: null,
     viewMode: "compact",
     pendingSkill: null,
     queuedMessages: [],

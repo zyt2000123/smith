@@ -34,6 +34,7 @@ const HELP_TEXT = [
   "- `/config` — edit LLM config",
   "- `/sessions` — recent sessions",
   "- `/token` — local token usage dashboard",
+  "- `/runs` — recent Agent runs and outcome metrics",
   "- `/skills` — inspect or run a standard SKILL.md skill",
   "- `/hooks` — inspect runtime lifecycle hooks",
   "- `/mcp` — inspect configured MCP servers and tools",
@@ -123,6 +124,14 @@ export function buildSlashItems(_skills: SkillSummary[]): SlashItem[] {
       title: "/token",
       command: "/token",
       description: "Local token usage dashboard.",
+      category: "Commands",
+    },
+    {
+      id: "runs",
+      kind: "command",
+      title: "/runs",
+      command: "/runs",
+      description: "Recent Agent run history.",
       category: "Commands",
     },
     {
@@ -357,6 +366,9 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
   },
   "/token": async (_args, context) => {
     await context.bridge.openTokenStats();
+  },
+  "/runs": async (_args, context) => {
+    await context.bridge.openRunExplorer();
   },
   "/compact": (_args, context) =>
     context.getState().set({ viewMode: "compact", panel: "chat", statusLine: "Compact view." }),

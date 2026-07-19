@@ -329,6 +329,27 @@ export async function getTokenStats(baseUrl: string, year?: number): Promise<Tok
   return request<TokenStats>(baseUrl, `/api/agent/token-stats${query}`);
 }
 
+export type ObservabilityRun = {
+  run_id: string;
+  agent_id: string;
+  session_id?: string | null;
+  working_dir?: string | null;
+  forced_skill?: string | null;
+  created_at: string;
+  finished_at: string;
+  outcome?: string | null;
+  reason?: string | null;
+  event_count: number;
+  tool_call_count: number;
+  backtrack_count: number;
+  approval_required_count: number;
+  total_tokens: number;
+};
+
+export async function listObservabilityRuns(baseUrl: string, limit = 50): Promise<ObservabilityRun[]> {
+  return request<ObservabilityRun[]>(baseUrl, `/api/agent/observability/runs?limit=${limit}`);
+}
+
 export async function createSession(
   baseUrl: string,
   title: string,

@@ -55,6 +55,40 @@ def test_token_stats_route_returns_local_usage_dashboard_data() -> None:
     assert response.json()["year"] == 2026
 
 
+def test_observability_routes_delegate_to_agent_service() -> None:
+    class FakeAgentService:
+        async def list_observability_runs(self, *, limit: int) -> list[dict]:
+            assert limit == 20
+            return [{
+                "run_id": "run-1", "agent_id": "smith", "created_at": "2026-07-19T00:00:00+00:00",
+                "finished_at": "2026-07-19T00:01:00+00:00", "event_count": 2, "event_counts": {},
+                "tool_call_count": 0, "backtrack_count": 0, "approval_required_count": 0,
+                "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+            }]
+
+        async def get_observability_run(self, run_id: str) -> dict:
+            assert run_id == "run-1"
+            return (await self.list_observability_runs(limit=20))[0]
+
+        async def get_run_trace(self, run_id: str, *, limit: int) -> list[dict]:
+            assert run_id == "run-1"
+            assert limit == 10
+            return [{"seq": 1, "timestamp": "2026-07-19T00:00:00+00:00", "run_id": run_id, "type": "done", "data": {}}]
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_agent_service] = lambda: FakeAgentService()
+
+    with TestClient(app) as client:
+        runs = client.get("/api/agent/observability/runs?limit=20")
+        detail = client.get("/api/agent/observability/runs/run-1")
+        trace = client.get("/api/agent/observability/runs/run-1/trace?limit=10")
+
+    assert runs.status_code == 200
+    assert detail.json()["run_id"] == "run-1"
+    assert trace.json()[0]["seq"] == 1
+
+
 def test_project_instruction_route_delegates_to_agent_service() -> None:
     calls: list[str] = []
 

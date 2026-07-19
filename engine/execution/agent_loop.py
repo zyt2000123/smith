@@ -16,13 +16,22 @@ from pathlib import Path
 import asyncio
 import inspect
 import logging
+from datetime import datetime, timezone
 from hashlib import sha256
 from typing import AsyncGenerator, NamedTuple
 from uuid import uuid4
 
 from engine.identity_catalog import IdentityCatalog, IdentitySpec, RouteDecision
 from engine.llm.port import LLMPort
-from engine.observability import EventType, ExecutionEvent, RunEventRecorder, TraceStore, raw_text_delta
+from engine.observability import (
+    EventType,
+    ExecutionEvent,
+    RunEventRecorder,
+    RunMetadata,
+    RunSummaryStore,
+    TraceStore,
+    raw_text_delta,
+)
 from engine.prompt.assembler import PromptAssembler
 from engine.react_budget import DEFAULT_MAX_REACT_ITERS
 from engine.safety.fact_gate import FactGate, FactGateContext, use_fact_gate
@@ -878,6 +887,39 @@ def _record_observability_event(
         recorder.record(event)
 
 
+def _new_run_recorder(
+    runtime: RuntimeContext,
+    request: EngineRequest,
+    run_id: str,
+    state_store: RunStateStore | None,
+    trace_store: TraceStore | None,
+) -> RunEventRecorder:
+    """Create the local observability boundary for one execution attempt."""
+    metadata = RunMetadata(
+        run_id=run_id,
+        agent_id=runtime.agent_id,
+        session_id=runtime.session_id,
+        identity_id=request.identity_id,
+        working_dir=request.working_dir,
+        forced_skill=request.forced_skill,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    try:
+        summary_store: RunSummaryStore | None = RunSummaryStore(runtime.profile_dir)
+    except OSError:
+        logger.warning("failed to initialize run summary store (run=%s)", run_id, exc_info=True)
+        summary_store = None
+    summary_sinks = ()
+    if summary_store is not None:
+        summary_sinks = (lambda summary: summary_store.save(metadata, summary),)
+    return RunEventRecorder(
+        run_id,
+        trace_store=trace_store,
+        projections=(lambda event: project_execution_event(state_store, run_id, event),),
+        summary_sinks=summary_sinks,
+    )
+
+
 def run_stream_with_runtime(
     request: EngineRequest,
     runtime: RuntimeContext,
@@ -925,11 +967,7 @@ def run_stream_with_runtime(
                     exc_info=True,
                 )
         return _failed_setup_stream(run_id, services, "tool_ledger_unavailable")
-    recorder = RunEventRecorder(
-        run_id,
-        trace_store=trace_store,
-        projections=(lambda event: project_execution_event(state_store, run_id, event),),
-    )
+    recorder = _new_run_recorder(runtime, request, run_id, state_store, trace_store)
     return AgentRunStream(
         run_id,
         _run_events_with_runtime(
@@ -1024,11 +1062,7 @@ def resume_stream_with_runtime(
     except OSError:
         logger.warning("failed to initialize resumed run trace (run=%s)", run_id, exc_info=True)
         trace_store = None
-    recorder = RunEventRecorder(
-        run_id,
-        trace_store=trace_store,
-        projections=(lambda event: project_execution_event(state_store, run_id, event),),
-    )
+    recorder = _new_run_recorder(runtime, request, run_id, state_store, trace_store)
     return AgentRunStream(
         run_id,
         _run_events_with_runtime(
@@ -1153,16 +1187,24 @@ async def _run_events_with_runtime(
             except Exception:
                 memory_persist_failed = True
                 logger.warning("failed to finalize conversation memory", exc_info=True)
-        if state_store is not None and not drained:
-            try:
-                state_store.transition(
-                    run_id,
-                    RunStatus.CANCELLED,
-                    event_type="run_cancelled",
-                    reason="consumer_disconnected",
-                )
-            except (RunStateError, OSError, ValueError):
-                logger.warning("failed to mark cancelled run (run=%s)", run_id, exc_info=True)
+        if not drained:
+            cancelled_event = ExecutionEvent(EventType.RUN_FINISHED, {
+                "run_id": run_id,
+                "status": RunStatus.CANCELLED.value,
+                "reason": "consumer_disconnected",
+            })
+            if recorder is not None:
+                _record_observability_event(recorder, cancelled_event)
+            elif state_store is not None:
+                try:
+                    state_store.transition(
+                        run_id,
+                        RunStatus.CANCELLED,
+                        event_type="run_cancelled",
+                        reason="consumer_disconnected",
+                    )
+                except (RunStateError, OSError, ValueError):
+                    logger.warning("failed to mark cancelled run (run=%s)", run_id, exc_info=True)
         try:
             await services.close()
         except Exception:

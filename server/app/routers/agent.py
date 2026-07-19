@@ -21,6 +21,7 @@ from ..schemas.project_instruction import ProjectInstructionInit, ProjectInstruc
 from ..schemas.run import ApprovalDecision, RunStateOut
 from ..schemas.skill import SkillEnabledUpdate, SkillSummaryOut
 from ..schemas.mcp import McpServerOut
+from ..schemas.observability import RunSummaryOut, RunTraceEventOut
 from ..schemas.task import TaskCreate, TaskOut
 from ..schemas.token_stats import TokenStatsOut
 from ..services.agent_service import AgentService
@@ -201,6 +202,31 @@ async def get_token_stats(
     svc: AgentService = Depends(get_agent_service),
 ):
     return await svc.get_token_stats(year)
+
+
+@router.get("/observability/runs", response_model=list[RunSummaryOut])
+async def list_observability_runs(
+    limit: int = Query(default=50, ge=1, le=200),
+    svc: AgentService = Depends(get_agent_service),
+):
+    return await svc.list_observability_runs(limit=limit)
+
+
+@router.get("/observability/runs/{run_id}", response_model=RunSummaryOut)
+async def get_observability_run(
+    run_id: str,
+    svc: AgentService = Depends(get_agent_service),
+):
+    return await svc.get_observability_run(run_id)
+
+
+@router.get("/observability/runs/{run_id}/trace", response_model=list[RunTraceEventOut])
+async def get_run_trace(
+    run_id: str,
+    limit: int = Query(default=300, ge=1, le=1000),
+    svc: AgentService = Depends(get_agent_service),
+):
+    return await svc.get_run_trace(run_id, limit=limit)
 
 
 @router.get("/runs/{run_id}", response_model=RunStateOut)

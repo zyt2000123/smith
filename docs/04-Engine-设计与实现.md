@@ -454,7 +454,7 @@ route_decided → skill_start → tool_call_start/tool_call_result …
 → gate_result → skill_end | backtrack | blocked → text_delta → done
 ```
 
-设计点：**引擎产出结构化事件，翻译和留存由观测层处理**。`RunEventRecorder` 是唯一的运行记录入口：它以 best-effort 方式写入 owner-only 的 JSONL trace，更新不保留原始 payload 的 `RunSummary`，并将事件投影给执行控制面的 `RunStateStore`。`reply_stream` 把事件翻成文本标记（`[⚙ planning]`、`[门禁: pass]`、`[↩ 回退: …]`）供纯文本客户端；SSE 端点可以原样透传给富客户端渲染进度树。
+设计点：**引擎产出结构化事件，翻译和留存由观测层处理**。`RunEventRecorder` 是唯一的运行记录入口：它以 best-effort 方式写入 owner-only 的 JSONL trace，在终态以原子文件保存不含原始 payload 的 `RunSummary`，并将事件投影给执行控制面的 `RunStateStore`。`reply_stream` 把事件翻成文本标记（`[⚙ planning]`、`[门禁: pass]`、`[↩ 回退: …]`）供纯文本客户端；SSE 端点可以原样透传给富客户端渲染进度树。
 
 ---
 
@@ -743,6 +743,7 @@ async def reply_stream(agent_id, name, user_message) -> AsyncGenerator[str]
 | 可观测性 | `engine/observability/trace_store.py` | — | 脱敏、限长、本地 JSONL trace |
 | 可观测性 | `engine/observability/recorder.py` | — | 记录边界与执行控制投影扇出 |
 | 可观测性 | `engine/observability/projections.py` | — | RunSummary 派生指标 |
+| 可观测性 | `engine/observability/summary_store.py` | — | 私有、原子写入的历史 Run 聚合记录 |
 | Prompt | `engine/prompt/assembler.py` | 181 | 9 段组装、token 裁剪、稳定层 hash |
 | Prompt | `engine/prompt/placeholder.py` | 15 | `{{key}}` 渲染 |
 | 记忆 | `engine/memory/store.py` | — | recent.jsonl 证据写入、durable/episode 召回、编译/Dream 调度 |

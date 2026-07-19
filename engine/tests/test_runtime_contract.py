@@ -21,7 +21,7 @@ from engine.execution.run_state import RunStateStore, RunStatus, project_executi
 from engine.execution.runtime import EngineRequest, RuntimeContext, RuntimeServices
 from engine.identity_catalog import IdentityCatalog
 from engine.llm.client import ChatResponse, ToolCallData
-from engine.observability import EventType, ExecutionEvent, TraceStore, raw_text_delta
+from engine.observability import EventType, ExecutionEvent, RunSummaryStore, TraceStore, raw_text_delta
 from engine.safety.tool_guard import ToolGuard
 from engine.skill.registry import SkillRegistry
 from engine.tool.interface import ToolCall
@@ -387,6 +387,22 @@ def test_run_stream_persists_redacted_prompt_manifest_to_private_trace(tmp_path:
     assert manifest["data"]["rendered_prompt_hash"]
     assert any(layer["id"] == "role" for layer in manifest["data"]["layers"])
     assert "ROLE_SECRET_VALUE" not in str(manifest)
+
+
+def test_run_stream_persists_a_terminal_summary(tmp_path: Path) -> None:
+    async def run() -> tuple[Path, str, str]:
+        runtime, services, _ = _runtime(tmp_path)
+        stream = run_stream_with_runtime(EngineRequest(message="hello"), runtime, services)
+        _ = [event async for event in stream.stream_events()]
+        return runtime.profile_dir, stream.run_id, runtime.agent_id
+
+    profile_dir, run_id, agent_id = asyncio.run(run())
+    record = RunSummaryStore(profile_dir).get(run_id)
+
+    assert record is not None
+    assert record.metadata.agent_id == agent_id
+    assert record.summary.outcome == "completed"
+    assert record.summary.event_count > 0
 
 
 def test_reply_with_runtime_uses_explicit_profile_context(tmp_path: Path) -> None:

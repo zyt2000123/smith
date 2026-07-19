@@ -9,14 +9,18 @@ are stored or how summaries are calculated.
 from .events import EventType, ExecutionEvent, raw_text_delta
 from .projections import RunSummary, RunSummaryProjection
 from .recorder import RunEventRecorder
+from .summary_store import RunMetadata, RunSummaryRecord, RunSummaryStore
 from .trace_store import TraceStore
 
 __all__ = (
     "EventType",
     "ExecutionEvent",
     "RunEventRecorder",
+    "RunMetadata",
     "RunSummary",
+    "RunSummaryRecord",
     "RunSummaryProjection",
+    "RunSummaryStore",
     "TraceStore",
     "raw_text_delta",
 )

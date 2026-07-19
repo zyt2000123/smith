@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from .events import ExecutionEvent
+from .events import EventType, ExecutionEvent
 from .projections import RunSummary, RunSummaryProjection
 from .trace_store import TraceStore
 
 
 logger = logging.getLogger(__name__)
 EventProjection = Callable[[ExecutionEvent], None]
+SummarySink = Callable[[RunSummary], None]
 
 
 class RunEventRecorder:
@@ -29,10 +30,12 @@ class RunEventRecorder:
         *,
         trace_store: TraceStore | None = None,
         projections: tuple[EventProjection, ...] = (),
+        summary_sinks: tuple[SummarySink, ...] = (),
     ) -> None:
         self.run_id = run_id
         self._trace_store = trace_store
         self._projections = projections
+        self._summary_sinks = summary_sinks
         self._summary = RunSummaryProjection(run_id)
 
     def record(self, event: ExecutionEvent) -> None:
@@ -58,6 +61,17 @@ class RunEventRecorder:
                     event.type.value,
                     exc_info=True,
                 )
+        if event.type is EventType.RUN_FINISHED:
+            summary = self._summary.snapshot()
+            for sink in self._summary_sinks:
+                try:
+                    sink(summary)
+                except Exception:
+                    logger.warning(
+                        "failed to persist run summary (run=%s)",
+                        self.run_id,
+                        exc_info=True,
+                    )
 
     def append_prompt_manifest(self, manifest: dict[str, object]) -> None:
         """Persist prompt provenance through the same observability boundary."""

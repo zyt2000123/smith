@@ -383,7 +383,7 @@ function handleHistoryNavigation(key: Key, options: ShellInputOptions): boolean 
 function cyclePanel(key: Key, options: ShellInputOptions): void {
   if (!key.tab || options.slashMenuOpen) return;
 
-  const panels: Panel[] = ["welcome", "sessions", "skill-actions", "mcp", "hooks", "tokens", "chat"];
+  const panels: Panel[] = ["welcome", "sessions", "skill-actions", "mcp", "hooks", "tokens", "runs", "chat"];
   const index = panels.indexOf(options.panel);
   options.getState().set({ panel: panels[(index + 1) % panels.length] });
 }

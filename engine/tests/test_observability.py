@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from engine.observability import EventType, ExecutionEvent, RunEventRecorder, TraceStore
+from engine.observability import (
+    EventType,
+    ExecutionEvent,
+    RunEventRecorder,
+    RunMetadata,
+    RunSummaryStore,
+    TraceStore,
+)
 
 
 def test_legacy_execution_imports_remain_compatible() -> None:
@@ -78,3 +85,33 @@ def test_recorder_continues_projecting_when_trace_write_fails() -> None:
 
     assert projected == ["failed"]
     assert recorder.summary().event_counts == {"failed": 1}
+
+
+def test_summary_store_persists_aggregate_only_and_merges_resumed_run(tmp_path) -> None:
+    store = RunSummaryStore(tmp_path)
+    metadata = RunMetadata(
+        run_id="run-1",
+        agent_id="smith",
+        session_id="session-1",
+        working_dir="/project",
+        created_at="2026-07-19T00:00:00+00:00",
+    )
+    first = RunEventRecorder("run-1", summary_sinks=(lambda summary: store.save(metadata, summary),))
+    first.record(ExecutionEvent(EventType.TOOL_CALL_START, {"name": "shell"}))
+    first.record(ExecutionEvent(EventType.RUN_FINISHED, {
+        "status": "cancelled",
+        "reason": "consumer_disconnected",
+    }))
+
+    resumed = RunEventRecorder("run-1", summary_sinks=(lambda summary: store.save(metadata, summary),))
+    resumed.record(ExecutionEvent(EventType.TOOL_CALL_START, {"name": "search"}))
+    resumed.record(ExecutionEvent(EventType.RUN_FINISHED, {"status": "completed"}))
+
+    record = store.get("run-1")
+    assert record is not None
+    assert record.metadata.agent_id == "smith"
+    assert record.metadata.session_id == "session-1"
+    assert record.summary.tool_call_count == 2
+    assert record.summary.outcome == "completed"
+    assert record.summary.reason is None
+    assert "raw prompt" not in (tmp_path / "runs" / "run-1.summary.json").read_text(encoding="utf-8")

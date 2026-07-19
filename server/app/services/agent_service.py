@@ -4,6 +4,7 @@ from typing import Any, AsyncGenerator
 
 from common.config import AGENT_DIR
 from engine.execution.run_state import RunStateStore
+from engine.observability import RunSummaryStore, TraceStore
 from engine.llm.model_config import SMITH_TEMPLATE_ID
 
 from ..infrastructure.repositories.auto_task_repo import AutoTaskRepo
@@ -24,6 +25,7 @@ from .run_state_service import RunStateService
 from .session_service import SessionService
 from .skill_service import SkillService
 from .mcp_service import McpService
+from .observability_service import ObservabilityService
 from .stats_service import StatsService
 from .task_service import TaskService
 from .token_stats_service import TokenStatsService
@@ -52,6 +54,7 @@ class AgentService:
         mcp_service: McpService | Any | None = None,
         token_stats_service: TokenStatsService | Any | None = None,
         project_instruction_service: ProjectInstructionService | Any | None = None,
+        observability_service: ObservabilityService | Any | None = None,
     ) -> None:
         agent_profile_repo = AgentProfileRepo()
         session_repo = SessionRepo()
@@ -79,6 +82,9 @@ class AgentService:
         self.skill_service = skill_service or SkillService(agent_profile_repo)
         self.stats_service = stats_service or StatsService()
         self.run_state_service = run_state_service or RunStateService(run_state_store or RunStateStore(AGENT_DIR))
+        self.observability_service = observability_service or ObservabilityService(
+            RunSummaryStore(AGENT_DIR), TraceStore(AGENT_DIR)
+        )
         self.mcp_service = mcp_service or McpService()
         self.project_instruction_service = project_instruction_service or ProjectInstructionService()
 
@@ -270,6 +276,15 @@ class AgentService:
 
     async def get_run(self, run_id: str):
         return self.run_state_service.get_run(await self._profile_id(), run_id)
+
+    async def list_observability_runs(self, *, limit: int):
+        return self.observability_service.list_runs(await self._profile_id(), limit=limit)
+
+    async def get_observability_run(self, run_id: str):
+        return self.observability_service.get_run(await self._profile_id(), run_id)
+
+    async def get_run_trace(self, run_id: str, *, limit: int):
+        return self.observability_service.get_trace(await self._profile_id(), run_id, limit=limit)
 
     async def resolve_run_approval(self, run_id: str, decision: ApprovalDecision):
         return self.run_state_service.resolve_approval(

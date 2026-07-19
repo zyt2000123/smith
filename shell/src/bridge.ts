@@ -18,6 +18,7 @@ import {
   type LlmConfigInput,
   listMcpServers,
   listMessages,
+  listObservabilityRuns,
   listRelayModels,
   listSessions,
   listSkills,
@@ -147,6 +148,7 @@ function applyBatchedStreamEvent(
 export class NodeBridge {
   private activeRequest: AbortController | null = null;
   private tokenStatsRequestId = 0;
+  private observabilityRequestId = 0;
 
   constructor(private store: StoreApi<AppStore>) {}
 
@@ -384,6 +386,22 @@ export class NodeBridge {
       if (requestId !== this.tokenStatsRequestId || this.s.panel !== "tokens") return;
       this.s.pushSystemLine(`Token statistics unavailable: ${errorMessage(error)}`, "error");
       this.s.set({ panel: "chat", statusLine: "Token statistics unavailable." });
+    }
+  }
+
+  async openRunExplorer(): Promise<void> {
+    const { baseUrl } = this.s;
+    if (!baseUrl) return;
+    const requestId = ++this.observabilityRequestId;
+    this.s.set({ panel: "runs", observabilityRuns: null, statusLine: "Loading run history…" });
+    try {
+      const observabilityRuns = await listObservabilityRuns(baseUrl);
+      if (requestId !== this.observabilityRequestId || this.s.panel !== "runs") return;
+      this.s.set({ panel: "runs", observabilityRuns, statusLine: `${observabilityRuns.length} recorded run(s).` });
+    } catch (error) {
+      if (requestId !== this.observabilityRequestId || this.s.panel !== "runs") return;
+      this.s.pushSystemLine(`Run history unavailable: ${errorMessage(error)}`, "error");
+      this.s.set({ panel: "chat", statusLine: "Run history unavailable." });
     }
   }
 
