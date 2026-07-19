@@ -4,7 +4,7 @@ from fastapi import HTTPException
 
 from engine.observability import ObservabilityReader, RunSummaryRecord
 
-from ..schemas.observability import RunDiagnosisOut, RunIncidentOut, RunSummaryOut, RunTraceEventOut
+from ..schemas.observability import AgentHealthOut, RunDiagnosisOut, RunIncidentOut, RunSummaryOut, RunTraceEventOut
 
 
 class ObservabilityService:
@@ -36,6 +36,9 @@ class ObservabilityService:
         if diagnosis is None:
             raise HTTPException(404, "Run not found")
         return RunDiagnosisOut(**diagnosis.__dict__)
+
+    def get_health(self, agent_id: str, *, limit: int) -> AgentHealthOut:
+        return AgentHealthOut(**self.reader.get_health(agent_id, limit=limit).__dict__)
 
     def _owned_record(self, agent_id: str, run_id: str) -> RunSummaryRecord:
         try:

@@ -83,6 +83,15 @@ def test_observability_routes_delegate_to_agent_service() -> None:
                 "occurred_at": "2026-07-19T00:01:00+00:00", "evidence": {"timeout_count": 1},
             }]
 
+        async def get_observability_health(self, *, limit: int) -> dict:
+            assert limit == 20
+            return {
+                "agent_id": "smith", "run_count": 1, "completed_count": 1,
+                "unsuccessful_count": 0, "success_rate": 1.0, "tool_call_count": 1,
+                "tool_success_rate": 1.0, "average_backtracks": 0.0,
+                "total_tokens": 15, "tokens_per_run": 15.0,
+            }
+
         async def get_run_diagnosis(self, run_id: str) -> dict:
             assert run_id == "run-1"
             return {
@@ -101,12 +110,14 @@ def test_observability_routes_delegate_to_agent_service() -> None:
         detail = client.get("/api/agent/observability/runs/run-1")
         trace = client.get("/api/agent/observability/runs/run-1/trace?limit=10")
         incidents = client.get("/api/agent/observability/incidents?limit=20")
+        health = client.get("/api/agent/observability/health?limit=20")
         diagnosis = client.get("/api/agent/observability/runs/run-1/diagnosis")
 
     assert runs.status_code == 200
     assert detail.json()["run_id"] == "run-1"
     assert trace.json()[0]["seq"] == 1
     assert incidents.json()[0]["category"] == "tool_timeout"
+    assert health.json()["success_rate"] == 1.0
     assert diagnosis.json()["failure_node"] == "tool:shell"
 
 

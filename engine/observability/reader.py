@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .diagnosis import RunDiagnosis, RunDiagnoser
+from .health import AgentHealth, HealthCalculator
 from .incidents import IncidentDetector, RunIncident
 from .summary_store import RunSummaryRecord, RunSummaryStore
 from .trace_store import TraceStore
@@ -19,6 +20,7 @@ class ObservabilityReader:
         self._traces = TraceStore(profile_dir)
         self._incidents = IncidentDetector()
         self._diagnoser = RunDiagnoser(self._incidents)
+        self._health = HealthCalculator()
 
     def list_runs(self, agent_id: str, *, limit: int = 50) -> list[RunSummaryRecord]:
         return self._summaries.list(agent_id, limit=limit)
@@ -48,3 +50,12 @@ class ObservabilityReader:
         if record is None:
             return None
         return self._diagnoser.diagnose(record, self._traces.read(run_id))
+
+    def get_health(self, agent_id: str, *, limit: int = 50) -> AgentHealth:
+        """Aggregate health across the agent's latest completed runs."""
+        records = self.list_runs(agent_id, limit=limit)
+        return self._health.calculate(
+            agent_id,
+            records,
+            (self._traces.read(record.metadata.run_id) for record in records),
+        )

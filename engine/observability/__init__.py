@@ -8,6 +8,7 @@ to know the trace or summary storage layout.
 
 from .diagnosis import RunDiagnosis, RunDiagnoser
 from .events import EventType, ExecutionEvent, raw_text_delta
+from .health import AgentHealth, HealthCalculator
 from .incidents import IncidentDetector, RunIncident
 from .projections import RunSummary, RunSummaryProjection
 from .recorder import RunEventRecorder
@@ -19,6 +20,8 @@ from .trace_store import TraceStore
 __all__ = (
     "EventType",
     "ExecutionEvent",
+    "AgentHealth",
+    "HealthCalculator",
     "IncidentDetector",
     "RunEventRecorder",
     "RunDiagnosis",

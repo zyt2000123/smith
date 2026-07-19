@@ -46,6 +46,13 @@ def test_observability_service_lists_owned_summaries_and_trace(tmp_path: Path) -
     assert summary.total_tokens == 15
     assert [event.type for event in trace] == ["tool_call_start", "token_usage", "run_finished"]
 
+    health = service.get_health("smith-id", limit=10)
+
+    assert health.success_rate == 1.0
+    assert health.tool_call_count == 1
+    assert health.tool_success_rate is None
+    assert health.tokens_per_run == 15.0
+
 
 def test_observability_service_derives_tool_timeout_incidents(tmp_path: Path) -> None:
     observation = RunObservation.start(RunObservationContext(

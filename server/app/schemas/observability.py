@@ -54,3 +54,16 @@ class RunDiagnosisOut(BaseModel):
     summary: str
     evidence: list[str]
     recommendation: str | None = None
+
+
+class AgentHealthOut(BaseModel):
+    agent_id: str
+    run_count: int = Field(ge=0)
+    completed_count: int = Field(ge=0)
+    unsuccessful_count: int = Field(ge=0)
+    success_rate: float = Field(ge=0, le=1)
+    tool_call_count: int = Field(ge=0)
+    tool_success_rate: float | None = Field(default=None, ge=0, le=1)
+    average_backtracks: float = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+    tokens_per_run: float = Field(ge=0)
