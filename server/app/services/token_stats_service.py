@@ -9,6 +9,7 @@ from typing import Any
 import aiosqlite
 
 from common.config import AGENT_DIR
+from engine.observability import ObservabilityReader
 
 from ..infrastructure.database import get_app_db
 
@@ -29,6 +30,7 @@ class TokenStatsService:
     ) -> None:
         self._db_provider = db_provider
         self._trace_root = Path(trace_root or AGENT_DIR)
+        self._observability = ObservabilityReader(self._trace_root)
 
     @staticmethod
     def _non_negative_int(value: object) -> int:
@@ -90,8 +92,7 @@ class TokenStatsService:
         while continuing to redact secrets.
         """
         runs_dir = self._trace_root / "runs"
-        traces_dir = self._trace_root / "traces"
-        if not runs_dir.is_dir() or not traces_dir.is_dir():
+        if not runs_dir.is_dir():
             return await self._sync_message_estimates(await self._db_provider())
 
         run_sessions: dict[str, str] = {}
@@ -112,24 +113,13 @@ class TokenStatsService:
 
         db = await self._db_provider()
         imported = 0
-        for path in traces_dir.glob("*.jsonl"):
-            run_id = path.stem
+        for run_id, records in self._observability.iter_traces():
             session_id = run_sessions.get(run_id)
             if not session_id:
                 continue
             project_path = ""
             model = "unknown"
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                continue
-            for line_number, line in enumerate(lines, start=1):
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
+            for line_number, record in enumerate(records, start=1):
                 event_type = record.get("type")
                 data = record.get("data")
                 if not isinstance(data, dict):

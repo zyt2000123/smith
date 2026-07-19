@@ -16,7 +16,6 @@ from pathlib import Path
 import asyncio
 import inspect
 import logging
-from datetime import datetime, timezone
 from hashlib import sha256
 from typing import AsyncGenerator, NamedTuple
 from uuid import uuid4
@@ -26,10 +25,8 @@ from engine.llm.port import LLMPort
 from engine.observability import (
     EventType,
     ExecutionEvent,
-    RunEventRecorder,
-    RunMetadata,
-    RunSummaryStore,
-    TraceStore,
+    RunObservation,
+    RunObservationContext,
     raw_text_delta,
 )
 from engine.prompt.assembler import PromptAssembler
@@ -879,44 +876,33 @@ def _fact_gate_for_request(
 
 
 def _record_observability_event(
-    recorder: RunEventRecorder | None,
+    observation: RunObservation | None,
     event: ExecutionEvent,
 ) -> None:
     """Send an execution event through the single observability boundary."""
-    if recorder is not None:
-        recorder.record(event)
+    if observation is not None:
+        observation.record(event)
 
 
-def _new_run_recorder(
+def _start_run_observation(
     runtime: RuntimeContext,
     request: EngineRequest,
     run_id: str,
     state_store: RunStateStore | None,
-    trace_store: TraceStore | None,
-) -> RunEventRecorder:
+) -> RunObservation:
     """Create the local observability boundary for one execution attempt."""
-    metadata = RunMetadata(
+    context = RunObservationContext(
         run_id=run_id,
         agent_id=runtime.agent_id,
         session_id=runtime.session_id,
         identity_id=request.identity_id,
         working_dir=request.working_dir,
         forced_skill=request.forced_skill,
-        created_at=datetime.now(timezone.utc).isoformat(),
+        profile_dir=runtime.profile_dir,
     )
-    try:
-        summary_store: RunSummaryStore | None = RunSummaryStore(runtime.profile_dir)
-    except OSError:
-        logger.warning("failed to initialize run summary store (run=%s)", run_id, exc_info=True)
-        summary_store = None
-    summary_sinks = ()
-    if summary_store is not None:
-        summary_sinks = (lambda summary: summary_store.save(metadata, summary),)
-    return RunEventRecorder(
-        run_id,
-        trace_store=trace_store,
+    return RunObservation.start(
+        context,
         projections=(lambda event: project_execution_event(state_store, run_id, event),),
-        summary_sinks=summary_sinks,
     )
 
 
@@ -942,11 +928,7 @@ def run_stream_with_runtime(
     except (RunStateError, OSError, ValueError):
         logger.warning("failed to initialize run state (run=%s)", run_id, exc_info=True)
         state_store = None
-    try:
-        trace_store: TraceStore | None = TraceStore(runtime.profile_dir)
-    except OSError:
-        logger.warning("failed to initialize run trace (run=%s)", run_id, exc_info=True)
-        trace_store = None
+    observation = _start_run_observation(runtime, request, run_id, state_store)
     try:
         ledger: ToolExecutionLedger | None = ToolExecutionLedger(runtime.profile_dir, run_id)
     except Exception:
@@ -966,8 +948,7 @@ def run_stream_with_runtime(
                     run_id,
                     exc_info=True,
                 )
-        return _failed_setup_stream(run_id, services, "tool_ledger_unavailable")
-    recorder = _new_run_recorder(runtime, request, run_id, state_store, trace_store)
+        return _failed_setup_stream(run_id, services, "tool_ledger_unavailable", observation)
     return AgentRunStream(
         run_id,
         _run_events_with_runtime(
@@ -976,20 +957,28 @@ def run_stream_with_runtime(
             services,
             run_id,
             state_store,
-            recorder,
+            observation,
             ledger,
         ),
-        on_unstarted_close=lambda: _cancel_unstarted_run(run_id, state_store, services),
+        on_unstarted_close=lambda: _cancel_unstarted_run(run_id, state_store, observation, services),
     )
 
 
 async def _cancel_unstarted_run(
     run_id: str,
     state_store: RunStateStore | None,
+    observation: RunObservation | None,
     services: RuntimeServices,
 ) -> None:
     """Clean up a run whose consumer closes the stream before its first event."""
-    if state_store is not None:
+    cancelled_event = ExecutionEvent(EventType.RUN_FINISHED, {
+        "run_id": run_id,
+        "status": RunStatus.CANCELLED.value,
+        "reason": "consumer_disconnected",
+    })
+    if observation is not None:
+        _record_observability_event(observation, cancelled_event)
+    elif state_store is not None:
         try:
             state_store.transition(
                 run_id,
@@ -1010,6 +999,7 @@ def _failed_setup_stream(
     run_id: str,
     services: RuntimeServices,
     reason: str,
+    observation: RunObservation | None = None,
 ) -> AgentRunStream:
     """Expose setup failures through the same terminal stream contract."""
 
@@ -1021,13 +1011,17 @@ def _failed_setup_stream(
 
     async def events() -> AsyncGenerator[ExecutionEvent, None]:
         try:
-            yield ExecutionEvent(EventType.RUN_STARTED, {"run_id": run_id})
-            yield ExecutionEvent(EventType.FAILED, {"reason": reason})
-            yield ExecutionEvent(EventType.DONE, {})
-            yield ExecutionEvent(
-                EventType.RUN_FINISHED,
-                {"run_id": run_id, "status": "failed", "reason": reason},
-            )
+            for event in (
+                ExecutionEvent(EventType.RUN_STARTED, {"run_id": run_id}),
+                ExecutionEvent(EventType.FAILED, {"reason": reason}),
+                ExecutionEvent(EventType.DONE, {}),
+                ExecutionEvent(
+                    EventType.RUN_FINISHED,
+                    {"run_id": run_id, "status": "failed", "reason": reason},
+                ),
+            ):
+                _record_observability_event(observation, event)
+                yield event
         finally:
             try:
                 await services.close()
@@ -1056,13 +1050,13 @@ def resume_stream_with_runtime(
         state_store.resume(run_id)
     except Exception:
         logger.warning("failed to resume run (run=%s)", run_id, exc_info=True)
-        return _failed_setup_stream(run_id, services, "resume_setup_failed")
-    try:
-        trace_store: TraceStore | None = TraceStore(runtime.profile_dir)
-    except OSError:
-        logger.warning("failed to initialize resumed run trace (run=%s)", run_id, exc_info=True)
-        trace_store = None
-    recorder = _new_run_recorder(runtime, request, run_id, state_store, trace_store)
+        return _failed_setup_stream(
+            run_id,
+            services,
+            "resume_setup_failed",
+            _start_run_observation(runtime, request, run_id, None),
+        )
+    observation = _start_run_observation(runtime, request, run_id, state_store)
     return AgentRunStream(
         run_id,
         _run_events_with_runtime(
@@ -1071,7 +1065,7 @@ def resume_stream_with_runtime(
             services,
             run_id,
             state_store,
-            recorder,
+            observation,
             ledger,
         ),
     )
@@ -1083,7 +1077,7 @@ async def _run_events_with_runtime(
     services: RuntimeServices,
     run_id: str,
     state_store: RunStateStore | None = None,
-    recorder: RunEventRecorder | None = None,
+    observation: RunObservation | None = None,
     ledger: ToolExecutionLedger | None = None,
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Produce one complete run, including persistence and cleanup."""
@@ -1106,12 +1100,12 @@ async def _run_events_with_runtime(
                 "project_path": request.working_dir or "",
             },
         )
-        _record_observability_event(recorder, run_started)
+        _record_observability_event(observation, run_started)
         yield run_started
         s = await prepare_runtime(request, runtime, services)
         state_dir = s.state_dir
-        if recorder is not None and hasattr(s, "prompt_manifest"):
-            recorder.append_prompt_manifest(s.prompt_manifest)
+        if observation is not None and hasattr(s, "prompt_manifest"):
+            observation.append_prompt_manifest(s.prompt_manifest)
         guard = FailureLoopGuard()
         with use_fact_gate(_fact_gate_for_request(request, runtime, services)), use_approval_context(
             APPROVAL_BROKER, run_id
@@ -1143,7 +1137,7 @@ async def _run_events_with_runtime(
                     terminal_reason = "blocked"
                 elif _has_successful_tool_evidence(event):
                     had_tools = True
-                _record_observability_event(recorder, event)
+                _record_observability_event(observation, event)
                 yield event
         drained = True
     except Exception as exc:
@@ -1153,13 +1147,13 @@ async def _run_events_with_runtime(
         failure_text = ExecutionEvent(EventType.TEXT_DELTA, {
             "text": f"⚠️ 执行失败：{type(exc).__name__}（详情见服务端日志）",
         })
-        _record_observability_event(recorder, failure_text)
+        _record_observability_event(observation, failure_text)
         yield failure_text
         failure_event = ExecutionEvent(EventType.FAILED, {"reason": terminal_reason})
-        _record_observability_event(recorder, failure_event)
+        _record_observability_event(observation, failure_event)
         yield failure_event
         done_event = ExecutionEvent(EventType.DONE, {})
-        _record_observability_event(recorder, done_event)
+        _record_observability_event(observation, done_event)
         yield done_event
         drained = True
     finally:
@@ -1193,8 +1187,8 @@ async def _run_events_with_runtime(
                 "status": RunStatus.CANCELLED.value,
                 "reason": "consumer_disconnected",
             })
-            if recorder is not None:
-                _record_observability_event(recorder, cancelled_event)
+            if observation is not None:
+                _record_observability_event(observation, cancelled_event)
             elif state_store is not None:
                 try:
                     state_store.transition(
@@ -1222,7 +1216,7 @@ async def _run_events_with_runtime(
             # 让前端有机会提示"本轮未写入长期记忆"。
             terminal_data["memory_persist_failed"] = True
         finished_event = ExecutionEvent(EventType.RUN_FINISHED, terminal_data)
-        _record_observability_event(recorder, finished_event)
+        _record_observability_event(observation, finished_event)
         yield finished_event
 
 

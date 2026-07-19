@@ -114,3 +114,13 @@ class TraceStore:
             if isinstance(value, dict):
                 records.append(value)
         return records
+
+    def iter_runs(self) -> list[tuple[str, list[dict[str, Any]]]]:
+        """Return all valid traces without exposing the on-disk layout."""
+        traces: list[tuple[str, list[dict[str, Any]]]] = []
+        for path in sorted(self.root.glob("*.jsonl")):
+            try:
+                traces.append((path.stem, self.read(path.stem)))
+            except ValueError:
+                continue
+        return traces

@@ -9,35 +9,28 @@ from app.services.observability_service import ObservabilityService
 from engine.observability import (
     EventType,
     ExecutionEvent,
-    RunEventRecorder,
-    RunMetadata,
-    RunSummaryStore,
-    TraceStore,
+    ObservabilityReader,
+    RunObservation,
+    RunObservationContext,
 )
 
 
 def _service_with_run(tmp_path: Path) -> ObservabilityService:
-    summaries = RunSummaryStore(tmp_path)
-    traces = TraceStore(tmp_path)
-    metadata = RunMetadata(
+    observation = RunObservation.start(RunObservationContext(
         run_id="run-1",
         agent_id="smith-id",
         session_id="session-1",
+        profile_dir=tmp_path,
         created_at="2026-07-19T00:00:00+00:00",
-    )
-    recorder = RunEventRecorder(
-        "run-1",
-        trace_store=traces,
-        summary_sinks=(lambda summary: summaries.save(metadata, summary),),
-    )
-    recorder.record(ExecutionEvent(EventType.TOOL_CALL_START, {"name": "shell"}))
-    recorder.record(ExecutionEvent(EventType.TOKEN_USAGE, {
+    ))
+    observation.record(ExecutionEvent(EventType.TOOL_CALL_START, {"name": "shell"}))
+    observation.record(ExecutionEvent(EventType.TOKEN_USAGE, {
         "input_tokens": 10,
         "output_tokens": 5,
         "total_tokens": 15,
     }))
-    recorder.record(ExecutionEvent(EventType.RUN_FINISHED, {"status": "completed"}))
-    return ObservabilityService(summaries, traces)
+    observation.record(ExecutionEvent(EventType.RUN_FINISHED, {"status": "completed"}))
+    return ObservabilityService(ObservabilityReader(tmp_path))
 
 
 def test_observability_service_lists_owned_summaries_and_trace(tmp_path: Path) -> None:

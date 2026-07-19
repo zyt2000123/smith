@@ -1009,14 +1009,18 @@ def test_run_stream_cleans_up_when_closed_immediately_after_start(tmp_path: Path
         first_event = await anext(events)
         await events.aclose()
         state = RunStateStore(runtime.profile_dir).get(stream.run_id)
-        return stream, first_event, state, llm
+        summary = RunSummaryStore(runtime.profile_dir).get(stream.run_id)
+        return stream, first_event, state, summary, llm
 
-    stream, first_event, state, llm = asyncio.run(run())
+    stream, first_event, state, summary, llm = asyncio.run(run())
 
     assert first_event.type is EventType.RUN_STARTED
     assert state is not None
     assert state.status is RunStatus.CANCELLED
     assert state.reason == "consumer_disconnected"
+    assert summary is not None
+    assert summary.summary.outcome == "cancelled"
+    assert summary.summary.reason == "consumer_disconnected"
     assert llm.closed is True
     assert stream.is_complete is False
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from engine.observability import RunSummaryRecord, RunSummaryStore, TraceStore
+from engine.observability import ObservabilityReader, RunSummaryRecord
 
 from ..schemas.observability import RunSummaryOut, RunTraceEventOut
 
@@ -10,12 +10,11 @@ from ..schemas.observability import RunSummaryOut, RunTraceEventOut
 class ObservabilityService:
     """Read-only, agent-scoped access to local run observability records."""
 
-    def __init__(self, summary_store: RunSummaryStore, trace_store: TraceStore) -> None:
-        self.summary_store = summary_store
-        self.trace_store = trace_store
+    def __init__(self, reader: ObservabilityReader) -> None:
+        self.reader = reader
 
     def list_runs(self, agent_id: str, *, limit: int) -> list[RunSummaryOut]:
-        return [self._summary_out(record) for record in self.summary_store.list(agent_id, limit=limit)]
+        return [self._summary_out(record) for record in self.reader.list_runs(agent_id, limit=limit)]
 
     def get_run(self, agent_id: str, run_id: str) -> RunSummaryOut:
         return self._summary_out(self._owned_record(agent_id, run_id))
@@ -23,15 +22,14 @@ class ObservabilityService:
     def get_trace(self, agent_id: str, run_id: str, *, limit: int) -> list[RunTraceEventOut]:
         self._owned_record(agent_id, run_id)
         try:
-            records = self.trace_store.read(run_id)
+            records = self.reader.read_trace(run_id, limit=limit)
         except ValueError as exc:
             raise HTTPException(404, "Run not found") from exc
-        selected = records[-limit:] if limit else []
-        return [RunTraceEventOut(**record) for record in selected]
+        return [RunTraceEventOut(**record) for record in records]
 
     def _owned_record(self, agent_id: str, run_id: str) -> RunSummaryRecord:
         try:
-            record = self.summary_store.get(run_id)
+            record = self.reader.get_run(run_id)
         except ValueError as exc:
             raise HTTPException(404, "Run not found") from exc
         if record is None or record.metadata.agent_id != agent_id:

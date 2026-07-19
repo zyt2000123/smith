@@ -4,7 +4,7 @@ from typing import Any, AsyncGenerator
 
 from common.config import AGENT_DIR
 from engine.execution.run_state import RunStateStore
-from engine.observability import RunSummaryStore, TraceStore
+from engine.observability import ObservabilityReader
 from engine.llm.model_config import SMITH_TEMPLATE_ID
 
 from ..infrastructure.repositories.auto_task_repo import AutoTaskRepo
@@ -83,7 +83,7 @@ class AgentService:
         self.stats_service = stats_service or StatsService()
         self.run_state_service = run_state_service or RunStateService(run_state_store or RunStateStore(AGENT_DIR))
         self.observability_service = observability_service or ObservabilityService(
-            RunSummaryStore(AGENT_DIR), TraceStore(AGENT_DIR)
+            ObservabilityReader(AGENT_DIR)
         )
         self.mcp_service = mcp_service or McpService()
         self.project_instruction_service = project_instruction_service or ProjectInstructionService()
