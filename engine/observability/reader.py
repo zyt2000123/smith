@@ -7,6 +7,7 @@ from typing import Any
 
 from .diagnosis import RunDiagnosis, RunDiagnoser
 from .health import AgentHealth, HealthCalculator
+from .proposals import ImprovementProposer, RunImprovementProposal
 from .incidents import IncidentDetector, RunIncident
 from .summary_store import RunSummaryRecord, RunSummaryStore
 from .trace_store import TraceStore
@@ -21,6 +22,7 @@ class ObservabilityReader:
         self._incidents = IncidentDetector()
         self._diagnoser = RunDiagnoser(self._incidents)
         self._health = HealthCalculator()
+        self._proposer = ImprovementProposer()
 
     def list_runs(self, agent_id: str, *, limit: int = 50) -> list[RunSummaryRecord]:
         return self._summaries.list(agent_id, limit=limit)
@@ -59,3 +61,8 @@ class ObservabilityReader:
             records,
             (self._traces.read(record.metadata.run_id) for record in records),
         )
+
+    def get_improvement_proposal(self, run_id: str) -> RunImprovementProposal | None:
+        """Return a non-executing, approval-required improvement proposal."""
+        diagnosis = self.get_diagnosis(run_id)
+        return self._proposer.propose(diagnosis) if diagnosis is not None else None

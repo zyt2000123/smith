@@ -21,7 +21,7 @@ from ..schemas.project_instruction import ProjectInstructionInit, ProjectInstruc
 from ..schemas.run import ApprovalDecision, RunStateOut
 from ..schemas.skill import SkillEnabledUpdate, SkillSummaryOut
 from ..schemas.mcp import McpServerOut
-from ..schemas.observability import AgentHealthOut, RunDiagnosisOut, RunIncidentOut, RunSummaryOut, RunTraceEventOut
+from ..schemas.observability import AgentHealthOut, RunDiagnosisOut, RunImprovementProposalOut, RunIncidentOut, RunSummaryOut, RunTraceEventOut
 from ..schemas.task import TaskCreate, TaskOut
 from ..schemas.token_stats import TokenStatsOut
 from ..services.agent_service import AgentService
@@ -251,6 +251,14 @@ async def get_run_diagnosis(
     svc: AgentService = Depends(get_agent_service),
 ):
     return await svc.get_run_diagnosis(run_id)
+
+
+@router.get("/observability/runs/{run_id}/improvement-proposal", response_model=RunImprovementProposalOut)
+async def get_run_improvement_proposal(
+    run_id: str,
+    svc: AgentService = Depends(get_agent_service),
+):
+    return await svc.get_run_improvement_proposal(run_id)
 
 
 @router.get("/runs/{run_id}", response_model=RunStateOut)

@@ -67,3 +67,14 @@ class AgentHealthOut(BaseModel):
     average_backtracks: float = Field(ge=0)
     total_tokens: int = Field(ge=0)
     tokens_per_run: float = Field(ge=0)
+
+
+class RunImprovementProposalOut(BaseModel):
+    run_id: str
+    agent_id: str
+    status: str
+    category: str | None = None
+    title: str
+    rationale: str
+    suggested_change: str | None = None
+    approval_required: bool

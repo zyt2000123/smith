@@ -79,6 +79,12 @@ def test_observability_service_derives_tool_timeout_incidents(tmp_path: Path) ->
     assert diagnosis.evidence == ["timeout_count=1", "tool=shell"]
     assert diagnosis.recommendation is not None
 
+    proposal = service.get_improvement_proposal("smith-id", "run-timeout")
+
+    assert proposal.status == "proposed"
+    assert proposal.category == "tool_timeout"
+    assert proposal.approval_required is True
+
 
 def test_observability_service_does_not_expose_another_agents_run(tmp_path: Path) -> None:
     service = _service_with_run(tmp_path)

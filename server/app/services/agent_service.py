@@ -295,6 +295,9 @@ class AgentService:
     async def get_observability_health(self, *, limit: int):
         return self.observability_service.get_health(await self._profile_id(), limit=limit)
 
+    async def get_run_improvement_proposal(self, run_id: str):
+        return self.observability_service.get_improvement_proposal(await self._profile_id(), run_id)
+
     async def resolve_run_approval(self, run_id: str, decision: ApprovalDecision):
         return self.run_state_service.resolve_approval(
             await self._profile_id(),

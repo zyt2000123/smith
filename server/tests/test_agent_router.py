@@ -101,6 +101,16 @@ def test_observability_routes_delegate_to_agent_service() -> None:
                 "recommendation": "Review the affected tool's timeout and retry policy; validate the target before retrying.",
             }
 
+        async def get_run_improvement_proposal(self, run_id: str) -> dict:
+            assert run_id == "run-1"
+            return {
+                "run_id": run_id, "agent_id": "smith", "status": "proposed",
+                "category": "tool_timeout", "title": "Review tool timeout policy",
+                "rationale": "One or more tool calls timed out.",
+                "suggested_change": "Propose a scoped timeout or retry-policy adjustment for the affected tool after validating its target.",
+                "approval_required": True,
+            }
+
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_agent_service] = lambda: FakeAgentService()
@@ -112,6 +122,7 @@ def test_observability_routes_delegate_to_agent_service() -> None:
         incidents = client.get("/api/agent/observability/incidents?limit=20")
         health = client.get("/api/agent/observability/health?limit=20")
         diagnosis = client.get("/api/agent/observability/runs/run-1/diagnosis")
+        proposal = client.get("/api/agent/observability/runs/run-1/improvement-proposal")
 
     assert runs.status_code == 200
     assert detail.json()["run_id"] == "run-1"
@@ -119,6 +130,7 @@ def test_observability_routes_delegate_to_agent_service() -> None:
     assert incidents.json()[0]["category"] == "tool_timeout"
     assert health.json()["success_rate"] == 1.0
     assert diagnosis.json()["failure_node"] == "tool:shell"
+    assert proposal.json()["approval_required"] is True
 
 
 def test_project_instruction_route_delegates_to_agent_service() -> None:

@@ -11,6 +11,7 @@ from .events import EventType, ExecutionEvent, raw_text_delta
 from .health import AgentHealth, HealthCalculator
 from .incidents import IncidentDetector, RunIncident
 from .projections import RunSummary, RunSummaryProjection
+from .proposals import ImprovementProposer, RunImprovementProposal
 from .recorder import RunEventRecorder
 from .reader import ObservabilityReader
 from .runtime import RunObservation, RunObservationContext
@@ -23,10 +24,12 @@ __all__ = (
     "AgentHealth",
     "HealthCalculator",
     "IncidentDetector",
+    "ImprovementProposer",
     "RunEventRecorder",
     "RunDiagnosis",
     "RunDiagnoser",
     "RunIncident",
+    "RunImprovementProposal",
     "RunObservation",
     "RunObservationContext",
     "RunMetadata",
