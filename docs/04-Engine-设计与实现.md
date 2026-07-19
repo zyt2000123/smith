@@ -230,7 +230,7 @@ Smith 的基础人格 = 一个目录下的 6 个文本/配置文件。Agent-Smit
 
 ## 五、System Prompt 组装设计
 
-实现：`engine/prompt/assembler.py`（`PromptAssembler.assemble_detailed`）
+实现：`engine/context/assembler.py`（`PromptAssembler.assemble_detailed`）
 
 ### 5.1 统一来源契约与分层结构
 
@@ -439,11 +439,11 @@ record(sig) 裁决规则（max_same=2, max_strategies=2）：
 
 **Blocked 的设计含义**：不是异常，是**正常出口**——框架承认"我搞不定"并带着最后的门禁原因停下，好过无限重试烧 token 或硬着头皮产出劣质结果。
 
-### 6.7 断点恢复（session_state.py）
+### 6.7 断点恢复（checkpoint.py）
 
 - 流式执行中，每个技能节点通过门禁后写一次 `SessionCheckpoint`（agent_id / session_id / task_type / 当前节点索引 / 累积 context）到 `sessions/.state/<sid>.json`
 - 链完成后清除；崩溃则文件残留，`restore()` / `list_active()` 可枚举待恢复会话
-- session_id 有正则白名单 + resolve 校验，防路径穿越（`session_state.py:39`）
+- session_id 有正则白名单 + resolve 校验，防路径穿越（`checkpoint.py:39`）
 
 ### 6.8 事件协议与本地 Trace（observability/）
 
@@ -738,7 +738,7 @@ async def reply_stream(agent_id, name, user_message) -> AsyncGenerator[str]
 | 执行 | `engine/execution/gate.py` | 580 | 13 门禁（含 SkillRubricGate / LLMGate / UnderstandingGate / ContractAlignmentGate） |
 | 执行 | `engine/execution/task_router.py` | 71 | 覆写/关键词/LLM 三级路由 |
 | 执行 | `engine/execution/backtrack.py` | 37 | FailureLoopGuard 状态机 |
-| 执行 | `engine/execution/session_state.py` | 76 | SessionCheckpoint 断点存取 |
+| 执行 | `engine/execution/checkpoint.py` | 76 | SessionCheckpoint 断点存取 |
 | 可观测性 | `engine/observability/events.py` | — | ExecutionEvent 流式契约 |
 | 可观测性 | `engine/observability/trace_store.py` | — | 脱敏、限长、本地 JSONL trace |
 | 可观测性 | `engine/observability/recorder.py` | — | 记录边界与执行控制投影扇出 |
@@ -750,8 +750,8 @@ async def reply_stream(agent_id, name, user_message) -> AsyncGenerator[str]
 | 可观测性 | `engine/observability/proposals.py` | — | 只生成、必须审批的改进提案 |
 | 可观测性 | `engine/observability/projections.py` | — | RunSummary 派生指标 |
 | 可观测性 | `engine/observability/summary_store.py` | — | 私有、原子写入的历史 Run 聚合记录 |
-| Prompt | `engine/prompt/assembler.py` | 181 | 9 段组装、token 裁剪、稳定层 hash |
-| Prompt | `engine/prompt/placeholder.py` | 15 | `{{key}}` 渲染 |
+| Context | `engine/context/assembler.py` | — | Prompt 分层组装、稳定层 hash |
+| Context | `engine/context/compression.py` | — | token 预算、裁剪、会话压缩 |
 | 记忆 | `engine/memory/store.py` | — | recent.jsonl 证据写入、durable/episode 召回、编译/Dream 调度 |
 | 记忆 | `engine/memory/policy.py` | — | 加载唯一 MemoryPolicy、解析三视图路径与结构校验 |
 | 记忆 | `engine/memory/compile.py` | — | context + recent + durable 编译审核、offset、指纹与原子提交 |

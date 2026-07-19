@@ -16,7 +16,7 @@ from engine.execution.agent_loop import (
 )
 from engine.observability import raw_text_delta
 from engine.execution.smith_ui import smith_ui_fallback, validate_smith_ui_call
-from engine.execution.compression import CONTEXT_DISPLAY_WINDOW, compact_history
+from engine.context import CONTEXT_DISPLAY_WINDOW, compact_history
 from engine.execution.run_state import RunStateError, RunStateStore, RunStatus
 from engine.execution.runtime import EngineRequest
 from engine.identity_catalog import IdentityCatalog, IdentityCatalogError

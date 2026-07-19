@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from engine.execution.session_state import SessionCheckpoint, SessionStateManager
+from engine.execution.checkpoint import SessionCheckpoint, SessionStateManager
+
+
+def test_legacy_session_state_import_reexports_checkpoint() -> None:
+    from engine.execution.session_state import SessionStateManager as legacy_session_state_manager
+
+    assert legacy_session_state_manager is SessionStateManager
 
 
 def test_session_checkpoints_are_private(tmp_path: Path):

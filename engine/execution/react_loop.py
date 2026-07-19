@@ -40,7 +40,7 @@ from engine.safety.tool_policy import ToolPolicy
 from engine.safety.fact_gate import FactGate, current_fact_gate
 from engine.tool.interface import ToolCall
 
-from .compression import (
+from engine.context.compression import (
     CONTEXT_DISPLAY_WINDOW,
     compress,
     compaction_policy_for_llm,

@@ -369,7 +369,7 @@ def _save_checkpoint(context: dict, node_idx: int) -> None:
     if not session_id or not state_dir:
         return
     try:
-        from .session_state import SessionStateManager, SessionCheckpoint
+        from .checkpoint import SessionStateManager, SessionCheckpoint
         SessionStateManager(Path(state_dir)).save(SessionCheckpoint(
             agent_id=str(context.get(CTX_AGENT_ID) or ""),
             session_id=session_id,
@@ -390,7 +390,7 @@ def _clear_checkpoint(context: dict) -> None:
     if not session_id or not state_dir:
         return
     try:
-        from .session_state import SessionStateManager
+        from .checkpoint import SessionStateManager
         SessionStateManager(Path(state_dir)).clear(session_id)
     except Exception:
         logger.exception("failed to clear session checkpoint")

@@ -546,7 +546,7 @@ def _seed_checkpoint(
     agent_id: str = "smith-id",
     identity_id: str = "smith",
 ) -> None:
-    from engine.execution.session_state import SessionCheckpoint, SessionStateManager
+    from engine.execution.checkpoint import SessionCheckpoint, SessionStateManager
 
     SessionStateManager(tmp_path).save(SessionCheckpoint(
         agent_id=agent_id,

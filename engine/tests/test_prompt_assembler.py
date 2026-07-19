@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from engine.prompt.assembler import (
+from engine.context.assembler import (
     PromptAuthority,
     PromptAssembler,
     PromptLoadReason,
@@ -13,6 +13,12 @@ from engine.prompt.assembler import (
     PromptSource,
     PromptTrust,
 )
+
+
+def test_legacy_prompt_import_reexports_context_assembler() -> None:
+    from engine.prompt.assembler import PromptAssembler as legacy_prompt_assembler
+
+    assert legacy_prompt_assembler is PromptAssembler
 
 
 class FakeToolRegistry:

@@ -4,13 +4,19 @@ import asyncio
 import math
 from types import SimpleNamespace
 
-from engine.execution.compression import (
+from engine.context.compression import (
     DEFAULT_CONTEXT_LIMIT,
     compact_history,
     compaction_policy_for_llm,
     compress,
     needs_compaction,
 )
+
+
+def test_legacy_execution_compression_import_reexports_context_implementation() -> None:
+    from engine.execution.compression import compact_history as legacy_compact_history
+
+    assert legacy_compact_history is compact_history
 
 
 def test_needs_compaction_uses_actual_conversation_size() -> None:

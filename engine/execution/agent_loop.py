@@ -29,7 +29,7 @@ from engine.observability import (
     RunObservationContext,
     raw_text_delta,
 )
-from engine.prompt.assembler import PromptAssembler
+from engine.context import PromptAssembler, prompt_budget_for_llm
 from engine.react_budget import DEFAULT_MAX_REACT_ITERS
 from engine.safety.fact_gate import FactGate, FactGateContext, use_fact_gate
 from engine.safety.tool_guard import ToolGuard
@@ -37,7 +37,6 @@ from engine.skill.executor import execute_skill_events
 from engine.skill.registry import SkillRegistry
 from engine.tool.registry import ToolRegistry
 from .backtrack import FailureLoopGuard
-from .compression import prompt_budget_for_llm
 from .pipeline import run_pipeline
 from .pipeline_context import (
     CTX_AGENT_ID,
@@ -189,7 +188,7 @@ def _apply_crash_checkpoint(
     expected_identity_id = str(context.get(CTX_IDENTITY_ID) or "")
     expected_working_dir = str(context.get(CTX_WORKING_DIR) or "")
     try:
-        from .session_state import SessionStateManager
+        from .checkpoint import SessionStateManager
 
         manager = SessionStateManager(Path(state_dir))
         checkpoint = manager.restore(session_id)
