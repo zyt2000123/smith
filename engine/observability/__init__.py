@@ -7,6 +7,7 @@ to know the trace or summary storage layout.
 """
 
 from .events import EventType, ExecutionEvent, raw_text_delta
+from .incidents import IncidentDetector, RunIncident
 from .projections import RunSummary, RunSummaryProjection
 from .recorder import RunEventRecorder
 from .reader import ObservabilityReader
@@ -17,7 +18,9 @@ from .trace_store import TraceStore
 __all__ = (
     "EventType",
     "ExecutionEvent",
+    "IncidentDetector",
     "RunEventRecorder",
+    "RunIncident",
     "RunObservation",
     "RunObservationContext",
     "RunMetadata",

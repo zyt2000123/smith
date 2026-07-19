@@ -75,6 +75,14 @@ def test_observability_routes_delegate_to_agent_service() -> None:
             assert limit == 10
             return [{"seq": 1, "timestamp": "2026-07-19T00:00:00+00:00", "run_id": run_id, "type": "done", "data": {}}]
 
+        async def list_observability_incidents(self, *, limit: int) -> list[dict]:
+            assert limit == 20
+            return [{
+                "run_id": "run-1", "agent_id": "smith", "severity": "error",
+                "category": "tool_timeout", "message": "One or more tool calls timed out.",
+                "occurred_at": "2026-07-19T00:01:00+00:00", "evidence": {"timeout_count": 1},
+            }]
+
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_agent_service] = lambda: FakeAgentService()
@@ -83,10 +91,12 @@ def test_observability_routes_delegate_to_agent_service() -> None:
         runs = client.get("/api/agent/observability/runs?limit=20")
         detail = client.get("/api/agent/observability/runs/run-1")
         trace = client.get("/api/agent/observability/runs/run-1/trace?limit=10")
+        incidents = client.get("/api/agent/observability/incidents?limit=20")
 
     assert runs.status_code == 200
     assert detail.json()["run_id"] == "run-1"
     assert trace.json()[0]["seq"] == 1
+    assert incidents.json()[0]["category"] == "tool_timeout"
 
 
 def test_project_instruction_route_delegates_to_agent_service() -> None:

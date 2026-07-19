@@ -32,3 +32,14 @@ class RunTraceEventOut(BaseModel):
     run_id: str
     type: str
     data: dict[str, Any]
+
+
+class RunIncidentOut(BaseModel):
+    run_id: str
+    agent_id: str
+    severity: str
+    category: str
+    message: str
+    reason: str | None = None
+    occurred_at: str
+    evidence: dict[str, int | str]

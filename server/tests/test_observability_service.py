@@ -47,6 +47,25 @@ def test_observability_service_lists_owned_summaries_and_trace(tmp_path: Path) -
     assert [event.type for event in trace] == ["tool_call_start", "token_usage", "run_finished"]
 
 
+def test_observability_service_derives_tool_timeout_incidents(tmp_path: Path) -> None:
+    observation = RunObservation.start(RunObservationContext(
+        run_id="run-timeout", agent_id="smith-id", profile_dir=tmp_path,
+        created_at="2026-07-19T00:00:00+00:00",
+    ))
+    observation.record(ExecutionEvent(EventType.TOOL_CALL_RESULT, {
+        "name": "shell", "status": "timeout", "reason": "command timed out",
+    }))
+    observation.record(ExecutionEvent(EventType.RUN_FINISHED, {"status": "failed", "reason": "tool_failure_budget"}))
+    service = ObservabilityService(ObservabilityReader(tmp_path))
+
+    incidents = service.list_incidents("smith-id", limit=10)
+
+    assert [(incident.category, incident.severity) for incident in incidents] == [
+        ("budget_exhausted", "error"),
+        ("tool_timeout", "error"),
+    ]
+
+
 def test_observability_service_does_not_expose_another_agents_run(tmp_path: Path) -> None:
     service = _service_with_run(tmp_path)
 

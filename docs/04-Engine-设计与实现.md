@@ -454,7 +454,7 @@ route_decided → skill_start → tool_call_start/tool_call_result …
 → gate_result → skill_end | backtrack | blocked → text_delta → done
 ```
 
-设计点：**引擎产出结构化事件，翻译和留存由观测层处理**。执行层仅通过 `RunObservation` 写入事件与 prompt manifest；它内部以 best-effort 方式写入 owner-only 的 JSONL trace，在终态以原子文件保存不含原始 payload 的 `RunSummary`，并将事件投影给执行控制面的 `RunStateStore`。服务层仅通过 `ObservabilityReader` 查询摘要和 trace。`reply_stream` 把事件翻成文本标记（`[⚙ planning]`、`[门禁: pass]`、`[↩ 回退: …]`）供纯文本客户端；SSE 端点可以原样透传给富客户端渲染进度树。
+设计点：**引擎产出结构化事件，翻译和留存由观测层处理**。执行层仅通过 `RunObservation` 写入事件与 prompt manifest；它内部以 best-effort 方式写入 owner-only 的 JSONL trace，在终态以原子文件保存不含原始 payload 的 `RunSummary`，并将事件投影给执行控制面的 `RunStateStore`。服务层仅通过 `ObservabilityReader` 查询摘要、trace 与 `Run Incident`；IncidentDetector 根据摘要和脱敏 trace 归类预算耗尽、运行失败、重复回退及工具超时等可行动信号。`reply_stream` 把事件翻成文本标记（`[⚙ planning]`、`[门禁: pass]`、`[↩ 回退: …]`）供纯文本客户端；SSE 端点可以原样透传给富客户端渲染进度树。
 
 ---
 
@@ -744,6 +744,7 @@ async def reply_stream(agent_id, name, user_message) -> AsyncGenerator[str]
 | 可观测性 | `engine/observability/recorder.py` | — | 记录边界与执行控制投影扇出 |
 | 可观测性 | `engine/observability/runtime.py` | — | 执行层唯一写入门面 RunObservation |
 | 可观测性 | `engine/observability/reader.py` | — | 服务层唯一查询门面 ObservabilityReader |
+| 可观测性 | `engine/observability/incidents.py` | — | 从摘要与脱敏 trace 派生 Run Incident |
 | 可观测性 | `engine/observability/projections.py` | — | RunSummary 派生指标 |
 | 可观测性 | `engine/observability/summary_store.py` | — | 私有、原子写入的历史 Run 聚合记录 |
 | Prompt | `engine/prompt/assembler.py` | 181 | 9 段组装、token 裁剪、稳定层 hash |

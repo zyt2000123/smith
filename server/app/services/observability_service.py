@@ -4,7 +4,7 @@ from fastapi import HTTPException
 
 from engine.observability import ObservabilityReader, RunSummaryRecord
 
-from ..schemas.observability import RunSummaryOut, RunTraceEventOut
+from ..schemas.observability import RunIncidentOut, RunSummaryOut, RunTraceEventOut
 
 
 class ObservabilityService:
@@ -26,6 +26,9 @@ class ObservabilityService:
         except ValueError as exc:
             raise HTTPException(404, "Run not found") from exc
         return [RunTraceEventOut(**record) for record in records]
+
+    def list_incidents(self, agent_id: str, *, limit: int) -> list[RunIncidentOut]:
+        return [RunIncidentOut(**incident.__dict__) for incident in self.reader.list_incidents(agent_id, limit=limit)]
 
     def _owned_record(self, agent_id: str, run_id: str) -> RunSummaryRecord:
         try:

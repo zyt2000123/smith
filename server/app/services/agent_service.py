@@ -286,6 +286,9 @@ class AgentService:
     async def get_run_trace(self, run_id: str, *, limit: int):
         return self.observability_service.get_trace(await self._profile_id(), run_id, limit=limit)
 
+    async def list_observability_incidents(self, *, limit: int):
+        return self.observability_service.list_incidents(await self._profile_id(), limit=limit)
+
     async def resolve_run_approval(self, run_id: str, decision: ApprovalDecision):
         return self.run_state_service.resolve_approval(
             await self._profile_id(),
