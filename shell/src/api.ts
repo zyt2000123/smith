@@ -350,6 +350,21 @@ export async function listObservabilityRuns(baseUrl: string, limit = 50): Promis
   return request<ObservabilityRun[]>(baseUrl, `/api/agent/observability/runs?limit=${limit}`);
 }
 
+export type RunDiagnosis = {
+  run_id: string;
+  agent_id: string;
+  status: "healthy" | "needs_attention";
+  failure_node?: string | null;
+  primary_category?: string | null;
+  summary: string;
+  evidence: string[];
+  recommendation?: string | null;
+};
+
+export async function getRunDiagnosis(baseUrl: string, runId: string): Promise<RunDiagnosis> {
+  return request<RunDiagnosis>(baseUrl, `/api/agent/observability/runs/${encodeURIComponent(runId)}/diagnosis`);
+}
+
 export async function createSession(
   baseUrl: string,
   title: string,

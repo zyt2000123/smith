@@ -13,6 +13,7 @@ import {
   ensureAgentProfile,
   getLlmConfig,
   getRun,
+  getRunDiagnosis,
   getTokenStats,
   initializeProjectInstructions,
   type LlmConfigInput,
@@ -22,6 +23,7 @@ import {
   listRelayModels,
   listSessions,
   listSkills,
+  type RunDiagnosis,
   type RunState,
   resolveRunApproval,
   type Session,
@@ -43,6 +45,18 @@ import { limitTranscript, removeApprovalNotice, restartLatestTurn, restoreTransc
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatTraceStatus(diagnosis: RunDiagnosis): string {
+  const heading = `Trace · ${diagnosis.run_id.slice(0, 10)} · ${diagnosis.status === "healthy" ? "healthy" : "attention"}`;
+  const details = [
+    `Summary: ${diagnosis.summary}`,
+    diagnosis.failure_node ? `Node: ${diagnosis.failure_node}` : null,
+    diagnosis.primary_category ? `Category: ${diagnosis.primary_category}` : null,
+    diagnosis.evidence.length ? `Evidence: ${diagnosis.evidence.join(", ")}` : null,
+    diagnosis.recommendation ? `Next: ${diagnosis.recommendation}` : null,
+  ].filter((line): line is string => Boolean(line));
+  return [heading, ...details].join("\n");
 }
 
 // 逐 token 流式下每个 text_delta 触发一次 Ink 全量重绘；按 40ms 合帧。
@@ -402,6 +416,30 @@ export class NodeBridge {
       if (requestId !== this.observabilityRequestId || this.s.panel !== "runs") return;
       this.s.pushSystemLine(`Run history unavailable: ${errorMessage(error)}`, "error");
       this.s.set({ panel: "chat", statusLine: "Run history unavailable." });
+    }
+  }
+
+  async showTrace(requestedRunId?: string): Promise<void> {
+    const { baseUrl, currentSession } = this.s;
+    if (!baseUrl) {
+      this.s.set({ statusLine: "Shell is not ready yet." });
+      return;
+    }
+    this.s.set({ statusLine: "Loading run trace…" });
+    try {
+      const runs = requestedRunId ? [] : await listObservabilityRuns(baseUrl, 20);
+      const runId =
+        requestedRunId ?? runs.find((run) => run.session_id === currentSession?.id)?.run_id ?? runs[0]?.run_id;
+      if (!runId) {
+        this.s.set({ statusLine: "No recorded runs yet." });
+        return;
+      }
+      const diagnosis = await getRunDiagnosis(baseUrl, runId);
+      this.s.pushSystemLine(formatTraceStatus(diagnosis));
+      this.s.set({ panel: "chat", statusLine: `Trace for ${runId.slice(0, 10)}.` });
+    } catch (error) {
+      this.s.pushSystemLine(`Trace unavailable: ${errorMessage(error)}`, "error");
+      this.s.set({ statusLine: "Trace unavailable." });
     }
   }
 

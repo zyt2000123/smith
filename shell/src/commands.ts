@@ -35,6 +35,7 @@ const HELP_TEXT = [
   "- `/sessions` — recent sessions",
   "- `/token` — local token usage dashboard",
   "- `/runs` — recent Agent runs and outcome metrics",
+  "- `/trace [run-id]` — diagnose the latest run or a specific Run",
   "- `/skills` — inspect or run a standard SKILL.md skill",
   "- `/hooks` — inspect runtime lifecycle hooks",
   "- `/mcp` — inspect configured MCP servers and tools",
@@ -132,6 +133,14 @@ export function buildSlashItems(_skills: SkillSummary[]): SlashItem[] {
       title: "/runs",
       command: "/runs",
       description: "Recent Agent run history.",
+      category: "Commands",
+    },
+    {
+      id: "trace",
+      kind: "command",
+      title: "/trace",
+      command: "/trace",
+      description: "Diagnose the latest Agent run.",
       category: "Commands",
     },
     {
@@ -369,6 +378,13 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
   },
   "/runs": async (_args, context) => {
     await context.bridge.openRunExplorer();
+  },
+  "/trace": async (args, context) => {
+    if (args.length > 1) {
+      context.getState().set({ statusLine: "Usage: /trace [run-id]" });
+      return;
+    }
+    await context.bridge.showTrace(args[0]);
   },
   "/compact": (_args, context) =>
     context.getState().set({ viewMode: "compact", panel: "chat", statusLine: "Compact view." }),

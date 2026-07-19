@@ -26,7 +26,7 @@ test("slash filtering exposes one resume command", () => {
   const skills = Array.from({ length: 8 }, (_, index) => skill(`skill-${index + 1}`));
   const items = filterSlash(buildSlashItems(skills), "/");
 
-  assert.equal(items.length, 17);
+  assert.equal(items.length, 18);
   assert.equal(
     items.some((item) => item.command === "/init"),
     true,
@@ -49,6 +49,10 @@ test("slash filtering exposes one resume command", () => {
   );
   assert.equal(
     items.some((item) => item.command === "/runs"),
+    true,
+  );
+  assert.equal(
+    items.some((item) => item.command === "/trace"),
     true,
   );
   assert.equal(
@@ -81,6 +85,35 @@ test("hooks opens the lifecycle hooks panel", async () => {
   assert.equal(store.getState().panel, "hooks");
   assert.equal(store.getState().hooksIndex, 0);
   assert.match(store.getState().statusLine, /lifecycle hook/);
+});
+
+test("trace asks the bridge to diagnose an explicit run", async () => {
+  const store = createAppStore();
+  let requestedRunId: string | undefined;
+  await runShellCommand("/trace run-123", {
+    bridge: {
+      showTrace: async (runId?: string) => {
+        requestedRunId = runId;
+      },
+    } as unknown as NodeBridge,
+    exit: () => {},
+    getState: store.getState,
+  });
+  assert.equal(requestedRunId, "run-123");
+});
+
+test("trace rejects more than one argument", async () => {
+  const store = createAppStore();
+  await runShellCommand("/trace run-1 extra", {
+    bridge: {
+      showTrace: async () => {
+        throw new Error("must not run");
+      },
+    } as unknown as NodeBridge,
+    exit: () => {},
+    getState: store.getState,
+  });
+  assert.equal(store.getState().statusLine, "Usage: /trace [run-id]");
 });
 
 test("welcome accepts the first command submitted from the composer", () => {

@@ -27,6 +27,7 @@ export const REQUIRED_API_OPERATIONS = [
   { method: "GET", path: "/api/agent/mcp" },
   { method: "GET", path: "/api/agent/token-stats" },
   { method: "GET", path: "/api/agent/observability/runs" },
+  { method: "GET", path: "/api/agent/observability/runs/{run_id}/diagnosis" },
   { method: "GET", path: "/api/agent/runs/{run_id}" },
   { method: "POST", path: "/api/agent/runs/{run_id}/resume" },
   { method: "POST", path: "/api/agent/runs/{run_id}/approval" },
