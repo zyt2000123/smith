@@ -42,6 +42,7 @@ from .pipeline_context import (
     CTX_STATE_DIR,
     CTX_TASK_TYPE,
     CTX_USER_MESSAGE,
+    CTX_WORKING_DIR,
 )
 from .react_loop import (
     IncompleteAgentRunError,
@@ -113,6 +114,7 @@ async def run_agent_stream(
     forced_skill: str | None = None,
     execution_context: dict | None = None,
     gate_llm: LLMPort | None = None,
+    disabled_skill_names: frozenset[str] = frozenset(),
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Route to the right execution path and yield events."""
     if forced_skill:
@@ -155,6 +157,7 @@ async def run_agent_stream(
         tool_registry, skill_registry, tool_guard, guard,
         max_react_iters, context, gate_llm=gate_llm,
         start_node_idx=start_node_idx,
+        disabled_skill_names=disabled_skill_names,
     ):
         yield event
 
@@ -169,13 +172,17 @@ def _apply_crash_checkpoint(
 
     Every terminal path clears its checkpoint, so a surviving file means the
     process died mid-chain. Resume only when the identical request comes back
-    (same route, same user message); anything else is a new task and the stale
-    file is removed so it never masquerades as resumable state.
+    in the same agent, identity, and working directory; anything else is a
+    new task and the stale file is removed so it never masquerades as
+    resumable state.
     """
     session_id = str(context.get(CTX_SESSION_ID) or "")
     state_dir = str(context.get(CTX_STATE_DIR) or "")
     if not session_id or not state_dir:
         return context, 0
+    expected_agent_id = str(context.get(CTX_AGENT_ID) or "")
+    expected_identity_id = str(context.get(CTX_IDENTITY_ID) or "")
+    expected_working_dir = str(context.get(CTX_WORKING_DIR) or "")
     try:
         from .session_state import SessionStateManager
 
@@ -184,7 +191,13 @@ def _apply_crash_checkpoint(
         if checkpoint is None:
             return context, 0
         if (
-            checkpoint.route_id == route_id
+            expected_agent_id
+            and expected_identity_id
+            and expected_working_dir
+            and checkpoint.agent_id == expected_agent_id
+            and checkpoint.identity_id == expected_identity_id
+            and checkpoint.working_dir == expected_working_dir
+            and checkpoint.route_id == route_id
             and checkpoint.context.get(CTX_USER_MESSAGE) == user_message
             and 0 <= checkpoint.skill_chain_index < node_count
         ):
@@ -282,6 +295,8 @@ class _AgentSetup(NamedTuple):
     route: RouteDecision
     chain: SkillChain | None
     state_dir: Path
+    working_dir: Path
+    disabled_skill_names: frozenset[str]
 
 
 def _merge_context(user_message: str, context: str | None) -> str:
@@ -344,14 +359,17 @@ def _runtime_execution_context(
     runtime: RuntimeContext,
     identity: IdentitySpec,
     state_dir: Path,
+    working_dir: Path,
 ) -> dict[str, str | None]:
     context: dict[str, str | None] = {
         CTX_AGENT_ID: runtime.agent_id,
         CTX_SESSION_ID: runtime.session_id,
         CTX_IDENTITY_ID: identity.id,
         CTX_STATE_DIR: str(state_dir),
+        CTX_WORKING_DIR: str(working_dir.resolve()),
     }
-    context.update({key: value for key, value in runtime.metadata.items()})
+    for key, value in runtime.metadata.items():
+        context.setdefault(key, value)
     return context
 
 
@@ -429,6 +447,17 @@ async def prepare_runtime(
     profile_skills = runtime.profile_dir / "skills"
     if profile_skills.is_dir():
         services.skill_registry.load_agent_skills(profile_skills)
+    from engine.skill.settings import disabled_skill_names
+
+    disabled_skills = disabled_skill_names(runtime.profile_dir)
+    if disabled_skills:
+        services.skill_registry.restrict_to(
+            [
+                summary["name"]
+                for summary in services.skill_registry.list_summaries()
+                if summary["name"] not in disabled_skills
+            ]
+        )
     if identity.enabled_skills is not None:
         services.skill_registry.restrict_to(identity.enabled_skills)
     _bind_skill_load_tool(services)
@@ -469,6 +498,8 @@ async def prepare_runtime(
         route,
         chain,
         state_dir,
+        wd,
+        frozenset(disabled_skills),
     )
 
 
@@ -812,8 +843,19 @@ async def _persist_runtime_learning(
     return ok
 
 
-def _has_memory_worthy_activity(event: ExecutionEvent) -> bool:
-    return event.type in (EventType.TOOL_CALL_START, EventType.SKILL_START)
+def _has_successful_tool_evidence(event: ExecutionEvent) -> bool:
+    """Return whether an event carries real, successful tool evidence.
+
+    Tool starts only describe a model proposal.  Preflight challenges, policy
+    blocks, and provider/tool failures never produced project evidence and
+    must not make the memory pipeline label the turn as ``tool_result``.
+    """
+    return (
+        event.type is EventType.TOOL_CALL_RESULT
+        and not bool(event.data.get("blocked"))
+        and not bool(event.data.get("preflight"))
+        and not bool(event.data.get("error"))
+    )
 
 
 def _fact_gate_for_request(
@@ -932,7 +974,22 @@ def run_stream_with_runtime(
         ledger: ToolExecutionLedger | None = ToolExecutionLedger(runtime.profile_dir, run_id)
     except Exception:
         logger.warning("failed to initialize tool execution ledger (run=%s)", run_id, exc_info=True)
-        ledger = None
+        if state_store is not None:
+            try:
+                state_store.transition(
+                    run_id,
+                    RunStatus.FAILED,
+                    event_type="run_setup_failed",
+                    reason="tool_ledger_unavailable",
+                    error="tool_ledger_unavailable",
+                )
+            except (RunStateError, OSError, ValueError):
+                logger.warning(
+                    "failed to mark tool ledger setup failure (run=%s)",
+                    run_id,
+                    exc_info=True,
+                )
+        return _failed_setup_stream(run_id, services, "tool_ledger_unavailable")
     return AgentRunStream(
         run_id,
         _run_events_with_runtime(
@@ -944,7 +1001,31 @@ def run_stream_with_runtime(
             trace_store,
             ledger,
         ),
+        on_unstarted_close=lambda: _cancel_unstarted_run(run_id, state_store, services),
     )
+
+
+async def _cancel_unstarted_run(
+    run_id: str,
+    state_store: RunStateStore | None,
+    services: RuntimeServices,
+) -> None:
+    """Clean up a run whose consumer closes the stream before its first event."""
+    if state_store is not None:
+        try:
+            state_store.transition(
+                run_id,
+                RunStatus.CANCELLED,
+                event_type="run_cancelled",
+                reason="consumer_disconnected",
+            )
+        except (RunStateError, OSError, ValueError):
+            logger.warning("failed to mark cancelled run (run=%s)", run_id, exc_info=True)
+    try:
+        await services.close()
+    except Exception:
+        logger.warning("failed to close engine runtime services", exc_info=True)
+    APPROVAL_BROKER.cancel_run(run_id)
 
 
 def _failed_setup_stream(
@@ -953,6 +1034,13 @@ def _failed_setup_stream(
     reason: str,
 ) -> AgentRunStream:
     """Expose setup failures through the same terminal stream contract."""
+
+    async def close_unstarted() -> None:
+        try:
+            await services.close()
+        except Exception:
+            logger.warning("failed to close services after setup failure", exc_info=True)
+
     async def events() -> AsyncGenerator[ExecutionEvent, None]:
         try:
             yield ExecutionEvent(EventType.RUN_STARTED, {"run_id": run_id})
@@ -968,7 +1056,7 @@ def _failed_setup_stream(
             except Exception:
                 logger.warning("failed to close services after setup failure", exc_info=True)
 
-    return AgentRunStream(run_id, events())
+    return AgentRunStream(run_id, events(), on_unstarted_close=close_unstarted)
 
 
 def resume_stream_with_runtime(
@@ -1031,16 +1119,16 @@ async def _run_events_with_runtime(
     if ledger is not None:
         services.tool_registry.bind_execution_ledger(ledger)
 
-    run_started = ExecutionEvent(
-        EventType.RUN_STARTED,
-        {
-            "run_id": run_id,
-            "project_path": request.working_dir or "",
-        },
-    )
-    _record_run_event(state_store, run_id, run_started, trace_store)
-    yield run_started
     try:
+        run_started = ExecutionEvent(
+            EventType.RUN_STARTED,
+            {
+                "run_id": run_id,
+                "project_path": request.working_dir or "",
+            },
+        )
+        _record_run_event(state_store, run_id, run_started, trace_store)
+        yield run_started
         s = await prepare_runtime(request, runtime, services)
         state_dir = s.state_dir
         if trace_store is not None and hasattr(s, "prompt_manifest"):
@@ -1060,8 +1148,11 @@ async def _run_events_with_runtime(
                 tool_guard=services.tool_guard,
                 history=request.history,
                 forced_skill=request.forced_skill,
-                execution_context=_runtime_execution_context(runtime, s.identity, s.state_dir),
+                execution_context=_runtime_execution_context(
+                    runtime, s.identity, s.state_dir, s.working_dir,
+                ),
                 gate_llm=services.gate_llm,
+                disabled_skill_names=getattr(s, "disabled_skill_names", frozenset()),
             ):
                 if event.type == EventType.TEXT_DELTA:
                     full_text.append(str(event.data.get("text", "")))
@@ -1074,7 +1165,7 @@ async def _run_events_with_runtime(
                 elif event.type == EventType.BLOCKED and terminal_status == "completed":
                     terminal_status = "incomplete"
                     terminal_reason = "blocked"
-                elif _has_memory_worthy_activity(event):
+                elif _has_successful_tool_evidence(event):
                     had_tools = True
                 _record_run_event(state_store, run_id, event, trace_store)
                 yield event
@@ -1166,11 +1257,15 @@ async def reply_with_runtime(
     had_tools = False
 
     stream = run_stream_with_runtime(request, runtime, services)
-    async for event in stream.stream_events():
-        if event.type == EventType.TEXT_DELTA:
-            full_text.append(str(event.data.get("text", "")))
-        elif _has_memory_worthy_activity(event):
-            had_tools = True
+    events = stream.stream_events()
+    try:
+        async for event in events:
+            if event.type == EventType.TEXT_DELTA:
+                full_text.append(str(event.data.get("text", "")))
+            elif _has_successful_tool_evidence(event):
+                had_tools = True
+    finally:
+        await events.aclose()
 
     if not stream.is_complete:
         raise RuntimeError("Agent run ended before a terminal state was emitted.")
@@ -1189,8 +1284,12 @@ async def reply_events_with_runtime(
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Compatibility adapter over run_stream_with_runtime."""
     stream = run_stream_with_runtime(request, runtime, services)
-    async for event in stream.stream_events():
-        yield event
+    events = stream.stream_events()
+    try:
+        async for event in events:
+            yield event
+    finally:
+        await events.aclose()
 
 
 async def reply_stream_with_runtime(

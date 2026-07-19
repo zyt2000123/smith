@@ -9,20 +9,40 @@ import { createTimeoutSignal } from "./api.js";
 const DEFAULT_SERVER_URL = "http://127.0.0.1:8140";
 const SERVER_PROBE_TIMEOUT_MS = 3_000;
 const SERVER_STARTUP_TIMEOUT_MS = 30_000;
-const REQUIRED_PATHS = [
-  "/api/config/llm",
-  "/api/agent",
-  "/api/agent/ensure",
-  "/api/agent/skills",
-  "/api/agent/sessions/{session_id}/messages/stream",
-  "/api/agent/sessions/{session_id}/model",
-  "/api/agent/sessions/{session_id}/compress",
-  "/api/agent/sessions/{session_id}",
-  "/api/agent/token-stats",
-  "/api/agent/runs/{run_id}",
-  "/api/agent/runs/{run_id}/resume",
-  "/api/agent/runs/{run_id}/approval",
+export const REQUIRED_API_OPERATIONS = [
+  { method: "GET", path: "/api/config/llm" },
+  { method: "GET", path: "/api/config/llm/models" },
+  { method: "POST", path: "/api/config/llm" },
+  { method: "GET", path: "/api/agent" },
+  { method: "POST", path: "/api/agent/ensure" },
+  { method: "PUT", path: "/api/agent/project-instructions" },
+  { method: "GET", path: "/api/agent/sessions" },
+  { method: "POST", path: "/api/agent/sessions" },
+  { method: "GET", path: "/api/agent/sessions/{session_id}/messages" },
+  { method: "POST", path: "/api/agent/sessions/{session_id}/messages/stream" },
+  { method: "PATCH", path: "/api/agent/sessions/{session_id}/model" },
+  { method: "POST", path: "/api/agent/sessions/{session_id}/compress" },
+  { method: "DELETE", path: "/api/agent/sessions/{session_id}" },
+  { method: "GET", path: "/api/agent/skills" },
+  { method: "GET", path: "/api/agent/mcp" },
+  { method: "GET", path: "/api/agent/token-stats" },
+  { method: "GET", path: "/api/agent/runs/{run_id}" },
+  { method: "POST", path: "/api/agent/runs/{run_id}/resume" },
+  { method: "POST", path: "/api/agent/runs/{run_id}/approval" },
 ] as const;
+
+type OpenApiPathItem = Record<string, unknown>;
+
+export function findMissingApiOperations(paths: Record<string, unknown>): string[] {
+  return REQUIRED_API_OPERATIONS.flatMap(({ method, path }) => {
+    const item = paths[path];
+    const operation =
+      item && typeof item === "object" && !Array.isArray(item)
+        ? (item as OpenApiPathItem)[method.toLowerCase()]
+        : undefined;
+    return operation && typeof operation === "object" ? [] : [`${method} ${path}`];
+  });
+}
 
 type ServerConnection = {
   baseUrl: string;
@@ -111,9 +131,8 @@ async function compatibilityIssue(baseUrl: string): Promise<string | null> {
     if (!response.ok) return `openapi responded with HTTP ${response.status}`;
 
     const payload = (await response.json()) as { paths?: Record<string, unknown> };
-    const paths = payload.paths ?? {};
-    const missingPaths = REQUIRED_PATHS.filter((route) => !(route in paths));
-    return missingPaths.length === 0 ? null : `missing API routes: ${missingPaths.join(", ")}`;
+    const missingOperations = findMissingApiOperations(payload.paths ?? {});
+    return missingOperations.length === 0 ? null : `missing API operations: ${missingOperations.join(", ")}`;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return `could not inspect OpenAPI schema: ${message}`;

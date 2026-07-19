@@ -4,7 +4,7 @@ import { renderToString } from "ink";
 
 import { skillPresentation } from "./skill-presentation.js";
 import { BORDER } from "./theme.js";
-import { TranscriptEntryView, userMessageBoxProps } from "./transcript.js";
+import { processingScanSegments, TranscriptEntryView, userMessageBoxProps } from "./transcript.js";
 import { createTurnEntry } from "./transcript-state.js";
 
 function stripAnsi(text: string): string {
@@ -44,6 +44,26 @@ test("transcript turns frame user messages while aligning their content with rep
   assert.equal(userMessageBoxProps(2).width, 1);
 });
 
+test("processing placeholder sweeps its bright character from left to right", () => {
+  const firstFrame = processingScanSegments(0);
+  const nextFrame = processingScanSegments(1);
+  const finalFrame = processingScanSegments(9);
+
+  assert.equal(firstFrame.map((segment) => segment.text).join(""), "Processing");
+  assert.deepEqual(
+    firstFrame.map((segment) => segment.active),
+    [true, false, false, false, false, false, false, false, false, false],
+  );
+  assert.deepEqual(
+    nextFrame.map((segment) => segment.active),
+    [false, true, false, false, false, false, false, false, false, false],
+  );
+  assert.deepEqual(
+    finalFrame.map((segment) => segment.active),
+    [false, false, false, false, false, false, false, false, false, true],
+  );
+});
+
 test("transcript renders simple unlabelled relationship diagrams outside generic code blocks", () => {
   const entry = {
     ...createTurnEntry("Explain outgoing webhooks"),
@@ -78,6 +98,7 @@ test("transcript keeps JSON payloads in the code renderer", () => {
 test("transcript renders an invalid smith-ui payload through CodeBlock", () => {
   const entry = {
     ...createTurnEntry("Show a component"),
+    streaming: false,
     blocks: [
       {
         id: "ui-fallback",

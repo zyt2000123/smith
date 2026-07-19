@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from engine.mcp import client as mcp_client
 from engine.tool.interface import ToolCall
 from engine.mcp.config import (
     mcp_server_log_summary as _mcp_server_log_summary,
@@ -138,6 +139,71 @@ def test_mcp_client_sends_initialized_skips_notifications_and_pages_tools():
                 await client.close()
 
     assert asyncio.run(run()) == ["ok", "bad"]
+
+
+def test_mcp_client_rejects_repeated_tool_list_cursor():
+    class RepeatingCursorTransport:
+        label = "repeating-cursor"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def connect(self):
+            pass
+
+        async def send_request(self, method, params):
+            assert method == "tools/list"
+            self.calls += 1
+            await asyncio.sleep(0)
+            return {"tools": [], "nextCursor": "repeat"}
+
+        async def send_notification(self, method, params):
+            pass
+
+        async def close(self):
+            pass
+
+    async def run():
+        transport = RepeatingCursorTransport()
+        client = MCPClient(transport=transport)
+        with pytest.raises(RuntimeError, match="repeated cursor"):
+            await asyncio.wait_for(client.list_tools(), timeout=0.1)
+        return transport.calls
+
+    assert asyncio.run(run()) == 2
+
+
+def test_mcp_client_limits_tool_list_pages(monkeypatch):
+    monkeypatch.setattr(mcp_client, "MAX_MCP_TOOL_LIST_PAGES", 2)
+
+    class EndlessCursorTransport:
+        label = "endless-cursor"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def connect(self):
+            pass
+
+        async def send_request(self, method, params):
+            assert method == "tools/list"
+            self.calls += 1
+            return {"tools": [], "nextCursor": f"page-{self.calls}"}
+
+        async def send_notification(self, method, params):
+            pass
+
+        async def close(self):
+            pass
+
+    async def run():
+        transport = EndlessCursorTransport()
+        client = MCPClient(transport=transport)
+        with pytest.raises(RuntimeError, match="maximum page limit"):
+            await client.list_tools()
+        return transport.calls
+
+    assert asyncio.run(run()) == 2
 
 
 def test_mcp_tool_is_error_becomes_registry_error():

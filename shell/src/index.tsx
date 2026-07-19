@@ -12,8 +12,17 @@ import type { PendingApproval, SkillSummary } from "./api.js";
 import { approvalDetails, approvalReason, approvalSummary, approvalTitle } from "./approval.js";
 import { NodeBridge } from "./bridge.js";
 import type { CodeHighlighter } from "./code-block.js";
-import { buildSlashItems, filterSlash, parseSkill, runShellCommand, type SlashItem } from "./commands.js";
+import {
+  acceptsComposerSubmission,
+  buildSlashItems,
+  filterSlash,
+  parseSkill,
+  runShellCommand,
+  type SlashItem,
+  selectedSlashItem,
+} from "./commands.js";
 import { loadHistory, saveHistory } from "./history.js";
+import { LIFECYCLE_HOOKS } from "./hooks.js";
 import { RunProgress, StatusHud } from "./hud.js";
 import { useShellInput } from "./input.js";
 import { getVisibleList, SKILLS_PANEL_VISIBLE_ITEMS, SLASH_MENU_VISIBLE_ITEMS } from "./list-navigation.js";
@@ -36,6 +45,14 @@ import {
   setupFieldLabel,
   setupFields,
 } from "./setup.js";
+import {
+  filterSkillMentions,
+  filterSkills,
+  isSkillEnabled,
+  isSkillMentionQuery,
+  parseSkillMention,
+  selectedSkillMentionState,
+} from "./skill-mention.js";
 import { type AppStore, createAppStore } from "./store.js";
 import { ACCENT, BORDER, ERROR, INFO, MUTED, SELECTED_BACKGROUND, SELECTED_FOREGROUND, WARNING } from "./theme.js";
 import { TokenStatsPanel } from "./token-panel.js";
@@ -95,7 +112,9 @@ function HeroPanel() {
         ))
       )}
       <Text> </Text>
-      <Text color={INFO}>Type `/` for commands · Enter confirms · Esc goes back · `/help` for all</Text>
+      <Text color={INFO}>
+        Type `/` for commands · `@` for skills · Enter confirms · Esc goes back · `/help` for all
+      </Text>
     </Box>
   );
 }
@@ -155,12 +174,13 @@ function SessionsPanel() {
 function SkillsPanel() {
   const skills = useS((state) => state.skills);
   const selectedIndex = useS((state) => state.skillsIndex);
-  const visible = getVisibleList(skills, selectedIndex, SKILLS_PANEL_VISIBLE_ITEMS);
+  const enabledSkills = skills.filter(isSkillEnabled);
+  const visible = getVisibleList(enabledSkills, selectedIndex, SKILLS_PANEL_VISIBLE_ITEMS);
   return (
     <Box flexDirection="column">
-      <Text color={ACCENT}>Skills</Text>
-      {skills.length === 0 ? (
-        <Text color={MUTED}>No skills.</Text>
+      <Text color={ACCENT}>Enabled skills</Text>
+      {enabledSkills.length === 0 ? (
+        <Text color={MUTED}>No enabled skills.</Text>
       ) : (
         <>
           {visible.startIndex > 0 ? <Text color={MUTED}>↑ more skills</Text> : null}
@@ -175,9 +195,78 @@ function SkillsPanel() {
               </Box>
             );
           })}
-          {visible.startIndex + visible.items.length < skills.length ? <Text color={MUTED}>↓ more skills</Text> : null}
+          {visible.startIndex + visible.items.length < enabledSkills.length ? (
+            <Text color={MUTED}>↓ more skills</Text>
+          ) : null}
         </>
       )}
+    </Box>
+  );
+}
+
+function SkillActionsPanel() {
+  const selectedIndex = useS((state) => state.skillActionIndex);
+  const actions = [
+    { title: "1. List skills", description: "Tip: press @ to open enabled skills directly." },
+    { title: "2. Enable/Disable skills", description: "Turn skills on or off." },
+  ];
+  return (
+    <Box flexDirection="column">
+      <Text color={ACCENT}>Skills</Text>
+      <Text color={MUTED}>Choose an action</Text>
+      <Box flexDirection="column" marginTop={1}>
+        {actions.map((action, index) => {
+          const selected = index === selectedIndex;
+          return (
+            <Box key={action.title} width="100%" backgroundColor={selected ? SELECTED_BACKGROUND : undefined}>
+              <Text color={selected ? SELECTED_FOREGROUND : INFO} bold={selected}>
+                {selected ? ">" : " "} {action.title}
+              </Text>
+              <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{`  ${action.description}`}</Text>
+            </Box>
+          );
+        })}
+      </Box>
+      <Text color={MUTED}>↑/↓ select · Enter confirm · Esc back</Text>
+    </Box>
+  );
+}
+
+function SkillTogglePanel() {
+  const skills = useS((state) => state.skills);
+  const inputValue = useS((state) => state.inputValue);
+  const selectedIndex = useS((state) => state.skillsIndex);
+  const matchedSkills = filterSkills(skills, inputValue);
+  const visible = getVisibleList(matchedSkills, selectedIndex, SKILLS_PANEL_VISIBLE_ITEMS);
+  return (
+    <Box flexDirection="column">
+      <Text color={ACCENT}>Enable/Disable Skills</Text>
+      <Text color={MUTED}>Turn skills on or off. Changes are saved automatically.</Text>
+      <Text color={MUTED}>Type below to search skills.</Text>
+      {matchedSkills.length === 0 ? (
+        <Text color={MUTED}>No matching skills.</Text>
+      ) : (
+        <>
+          {visible.startIndex > 0 ? <Text color={MUTED}>↑ more skills</Text> : null}
+          {visible.items.map((skill, offset) => {
+            const index = visible.startIndex + offset;
+            const selected = index === selectedIndex;
+            const enabled = isSkillEnabled(skill);
+            return (
+              <Box key={skill.name} width="100%" backgroundColor={selected ? SELECTED_BACKGROUND : undefined}>
+                <Text color={selected ? SELECTED_FOREGROUND : INFO} bold={selected}>
+                  {selected ? ">" : " "} [{enabled ? "✓" : " "}] {skill.name}
+                </Text>
+                <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{`  ${truncate(skill.description, 60)}`}</Text>
+              </Box>
+            );
+          })}
+          {visible.startIndex + visible.items.length < matchedSkills.length ? (
+            <Text color={MUTED}>↓ more skills</Text>
+          ) : null}
+        </>
+      )}
+      <Text color={MUTED}>↑/↓ select · Enter toggle · Esc back</Text>
     </Box>
   );
 }
@@ -204,6 +293,81 @@ function McpPanel() {
           </Box>
         ))
       )}
+    </Box>
+  );
+}
+
+function HooksPanel() {
+  const selectedIndex = useS((state) => state.hooksIndex);
+  return (
+    <Box flexDirection="column">
+      <Text color={ACCENT} bold>
+        Hooks
+      </Text>
+      <Text color={MUTED}>Built-in lifecycle hooks. Handlers register on demand for each runtime.</Text>
+      <Box marginTop={1}>
+        <Box width={35}>
+          <Text color={INFO}>Event</Text>
+        </Box>
+        <Box width={11}>
+          <Text color={INFO}>Installed</Text>
+        </Box>
+        <Box width={9}>
+          <Text color={INFO}>Active</Text>
+        </Box>
+        <Text color={INFO}>Description</Text>
+      </Box>
+      {LIFECYCLE_HOOKS.map((hook, index) => {
+        const selected = index === selectedIndex;
+        const registrations = hook.handler ? 1 : 0;
+        return (
+          <Box key={hook.event} width="100%" backgroundColor={selected ? SELECTED_BACKGROUND : undefined}>
+            <Box width={35}>
+              <Text color={selected ? SELECTED_FOREGROUND : INFO} bold={selected}>
+                {selected ? "> " : "  "}
+                {hook.event}
+              </Text>
+            </Box>
+            <Box width={11}>
+              <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{registrations}</Text>
+            </Box>
+            <Box width={9}>
+              <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{registrations}</Text>
+            </Box>
+            <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{hook.description}</Text>
+          </Box>
+        );
+      })}
+      <Text color={MUTED}>
+        Counts describe built-in registrations; configurable or plugin hooks are not loaded yet.
+      </Text>
+      <Text color={MUTED}>↑/↓ select · Enter view details · Esc close</Text>
+    </Box>
+  );
+}
+
+function HookDetailsPanel() {
+  const selectedIndex = useS((state) => state.hooksIndex);
+  const hook = LIFECYCLE_HOOKS[selectedIndex] ?? LIFECYCLE_HOOKS[0];
+  if (!hook) return null;
+  return (
+    <Box flexDirection="column">
+      <Text color={ACCENT} bold>
+        {hook.event}
+      </Text>
+      <Text color={MUTED}>{hook.description}</Text>
+      <Box marginTop={1} flexDirection="column">
+        <Text color={INFO}>
+          Handler <Text color={MUTED}>{hook.handler}</Text>
+        </Text>
+        <Text color={INFO}>
+          Status <Text color={MUTED}>Enabled on dispatch</Text>
+        </Text>
+        <Text color={INFO}>
+          Details <Text color={MUTED}>{hook.detail}</Text>
+        </Text>
+      </Box>
+      <Text color={MUTED}>Esc back</Text>
     </Box>
   );
 }
@@ -243,6 +407,36 @@ function SlashMenu({ items, selectedIndex }: { items: SlashItem[]; selectedIndex
   );
 }
 
+function SkillMentionMenu({ items, selectedIndex }: { items: SkillSummary[]; selectedIndex: number }) {
+  const visible = getVisibleList(items, selectedIndex, SLASH_MENU_VISIBLE_ITEMS);
+  return (
+    <Box flexDirection="column" marginBottom={1} marginTop={1}>
+      <Text color={ACCENT}>Skill picker</Text>
+      {items.length === 0 ? (
+        <Text color={MUTED}>No matching skills.</Text>
+      ) : (
+        <>
+          {visible.startIndex > 0 ? <Text color={MUTED}>↑ more skills</Text> : null}
+          {visible.items.map((skill, offset) => {
+            const index = visible.startIndex + offset;
+            const selected = index === selectedIndex;
+            return (
+              <Box key={skill.name} width="100%" backgroundColor={selected ? SELECTED_BACKGROUND : undefined}>
+                <Text color={selected ? SELECTED_FOREGROUND : INFO} bold={selected}>
+                  {selected ? ">" : " "} @{skill.name}
+                </Text>
+                <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{`  ${truncate(skill.description, 60)}`}</Text>
+              </Box>
+            );
+          })}
+          {visible.startIndex + visible.items.length < items.length ? <Text color={MUTED}>↓ more skills</Text> : null}
+          <Text color={MUTED}>↑/↓ select · Enter insert · Esc cancel</Text>
+        </>
+      )}
+    </Box>
+  );
+}
+
 function ShellContent({
   mode,
   panel,
@@ -272,8 +466,12 @@ function ShellContent({
   return (
     <>
       {welcomeNotice ? <Text color={welcomeNotice.tone === "error" ? ERROR : MUTED}>{welcomeNotice.text}</Text> : null}
+      {panel === "skill-actions" ? <SkillActionsPanel /> : null}
       {panel === "skills" ? <SkillsPanel /> : null}
+      {panel === "skill-toggle" ? <SkillTogglePanel /> : null}
       {panel === "mcp" ? <McpPanel /> : null}
+      {panel === "hooks" ? <HooksPanel /> : null}
+      {panel === "hook-details" ? <HookDetailsPanel /> : null}
       {panel === "sessions" ? <SessionsPanel /> : null}
       {panel === "tokens" ? <TokenStatsPanel stats={tokenStats} selectedTab={tokenTab} /> : null}
       {panel === "tokens"
@@ -287,6 +485,7 @@ function ShellContent({
 
 type ShellFooterProps = {
   mode: AppStore["mode"];
+  panel: AppStore["panel"];
   busy: boolean;
   compressing: boolean;
   inputLocked: boolean;
@@ -302,6 +501,9 @@ type ShellFooterProps = {
   slashMenuOpen: boolean;
   slashItems: SlashItem[];
   slashIndex: number;
+  skillMentionMenuOpen: boolean;
+  skillMentions: SkillSummary[];
+  skillMentionIndex: number;
   viewMode: TranscriptViewMode;
   config: AppStore["config"];
   selectedModelProfile: AppStore["selectedModelProfile"];
@@ -431,6 +633,11 @@ function footerPlaceholder(props: ShellFooterProps): string {
   if (props.mode === "setup") {
     return props.activeSetupField === "save" ? "Enter to save" : `Edit ${setupFieldLabel(props.activeSetupField)}`;
   }
+  if (props.panel === "skill-actions") return "Use ↑/↓ and Enter to choose…";
+  if (props.panel === "skills") return "Use ↑/↓ and Enter to run a skill…";
+  if (props.panel === "skill-toggle") return "Type to search skills…";
+  if (props.panel === "hooks") return "Use ↑/↓ and Enter to inspect a hook…";
+  if (props.panel === "hook-details") return "Press Esc to return to hooks…";
   return props.pendingSkill ? `Ask Smith to run ${props.pendingSkill.name}…` : "Tell Smith what to do…";
 }
 
@@ -485,6 +692,9 @@ function FooterInput(props: ShellFooterProps) {
         />
       </Box>
       {props.slashMenuOpen ? <SlashMenu items={props.slashItems} selectedIndex={props.slashIndex} /> : null}
+      {props.skillMentionMenuOpen ? (
+        <SkillMentionMenu items={props.skillMentions} selectedIndex={props.skillMentionIndex} />
+      ) : null}
     </>
   );
 }
@@ -517,14 +727,24 @@ function ShellFooter(props: ShellFooterProps) {
 }
 
 function completeSlashSelection(input: string, slashMenuOpen: boolean, items: SlashItem[], index: number): boolean {
-  const selected = items[index];
-  if (!slashMenuOpen || !selected || input.split(/\s+/).length !== 1 || input === selected.command) return false;
+  const selected = selectedSlashItem(input, slashMenuOpen, items, index);
+  if (!selected) return false;
 
   if (selected.kind === "skill" && selected.skill) {
     armSkill(selected.skill);
   } else {
     getState().set({ inputValue: selected.command, statusLine: `Ready: ${selected.command}` });
   }
+  return true;
+}
+
+function completeSkillMentionSelection(skillMentionMenuOpen: boolean, items: SkillSummary[], index: number): boolean {
+  if (!skillMentionMenuOpen) return false;
+
+  const selected = items[index];
+  if (!selected) return false;
+
+  getState().set(selectedSkillMentionState(selected));
   return true;
 }
 
@@ -578,39 +798,70 @@ async function submitWhileBusy(
   if (skill) getState().set({ pendingSkill: null });
 }
 
+async function submitSlashCommand(
+  input: string,
+  hasExplicitSkill: boolean,
+  slashMenuOpen: boolean,
+  slashItems: SlashItem[],
+  slashIndex: number,
+  exit: () => void,
+): Promise<boolean> {
+  if (!input.startsWith("/") || hasExplicitSkill) return false;
+
+  const selected = selectedSlashItem(input, slashMenuOpen, slashItems, slashIndex);
+  if (selected?.kind === "command") {
+    rememberSubmittedInput(input);
+    await runShellCommand(selected.command, { bridge, exit, getState, workingDir: PROJECT_CWD });
+    return true;
+  }
+  if (completeSlashSelection(input, slashMenuOpen, slashItems, slashIndex)) {
+    rememberSubmittedInput(input);
+    return true;
+  }
+
+  rememberSubmittedInput(input);
+  await runShellCommand(input, { bridge, exit, getState, workingDir: PROJECT_CWD });
+  return true;
+}
+
 async function submitChat(
   value: string,
+  panel: AppStore["panel"],
   busy: boolean,
   pendingSkill: SkillSummary | null,
   skills: SkillSummary[],
   slashMenuOpen: boolean,
   slashItems: SlashItem[],
   slashIndex: number,
+  skillMentionMenuOpen: boolean,
+  skillMentions: SkillSummary[],
+  skillMentionIndex: number,
   exit: () => void,
 ): Promise<void> {
+  if (!acceptsComposerSubmission(panel)) return;
   const input = value.trim();
   if (!input) return;
 
-  const explicitSkill = parseSkill(input, skills);
+  if (completeSkillMentionSelection(skillMentionMenuOpen, skillMentions, skillMentionIndex)) return;
+
+  const explicitSkill = parseSkillMention(input, skills) ?? parseSkill(input, skills);
   const skill = explicitSkill?.skill ?? pendingSkill;
   const payload = explicitSkill?.prompt || input;
+
+  if (explicitSkill && !explicitSkill.prompt) {
+    rememberSubmittedInput(input);
+    armSkill(explicitSkill.skill);
+    return;
+  }
 
   if (busy) {
     await submitWhileBusy(input, payload, skill, slashMenuOpen, slashItems, slashIndex);
     return;
   }
 
-  rememberSubmittedInput(input);
-  if (explicitSkill && !explicitSkill.prompt) {
-    armSkill(explicitSkill.skill);
-    return;
-  }
-  if (input.startsWith("/") && !explicitSkill) {
-    if (completeSlashSelection(input, slashMenuOpen, slashItems, slashIndex)) return;
-    await runShellCommand(input, { bridge, exit, getState, workingDir: PROJECT_CWD });
-    return;
-  }
+  if (await submitSlashCommand(input, Boolean(explicitSkill), slashMenuOpen, slashItems, slashIndex, exit)) return;
 
+  rememberSubmittedInput(input);
   if (skill) getState().set({ pendingSkill: null });
   const accepted = await bridge.sendMessage(payload, skill?.name);
   if (!accepted) getState().set({ inputValue: input });
@@ -699,10 +950,20 @@ function SmithApp() {
   const setupFlow = useS((state) => state.setupFlow);
   const slashIndex = useS((state) => state.slashIndex);
   const skillsIndex = useS((state) => state.skillsIndex);
+  const skillActionIndex = useS((state) => state.skillActionIndex);
+  const hooksIndex = useS((state) => state.hooksIndex);
+  const skillMentionIndex = useS((state) => state.skillMentionIndex);
 
   const activeSetupField = setupFieldAt(setupIndex, setupFlow);
   const slashItems = useMemo(() => filterSlash(buildSlashItems(skills), inputValue), [inputValue, skills]);
   const slashMenuOpen = mode === "chat" && inputValue.startsWith("/");
+  const skillMentionMenuOpen = mode === "chat" && isSkillMentionQuery(inputValue);
+  const skillMentions = useMemo(() => filterSkillMentions(skills, inputValue), [inputValue, skills]);
+  const visibleSkills = useMemo(() => {
+    if (panel === "skill-toggle") return filterSkills(skills, inputValue);
+    if (panel === "skills") return skills.filter(isSkillEnabled);
+    return skills;
+  }, [inputValue, panel, skills]);
 
   const { done, active } = useMemo(() => splitTranscript(transcript), [transcript]);
   const staticItems = useMemo<StaticItem[]>(() => [{ kind: "hero", id: "hero" }, ...done], [done]);
@@ -714,8 +975,11 @@ function SmithApp() {
     if (slashIndex >= slashItems.length) getState().set({ slashIndex: 0 });
   }, [slashIndex, slashItems.length]);
   useEffect(() => {
-    if (skillsIndex >= skills.length) getState().set({ skillsIndex: 0 });
-  }, [skills.length, skillsIndex]);
+    if (skillsIndex >= visibleSkills.length) getState().set({ skillsIndex: 0 });
+  }, [skillsIndex, visibleSkills.length]);
+  useEffect(() => {
+    if (skillMentionIndex >= skillMentions.length) getState().set({ skillMentionIndex: 0 });
+  }, [skillMentionIndex, skillMentions.length]);
   const handleInputChange = useCallback(
     (value: string) => {
       const suppressed = suppressRef.current;
@@ -723,15 +987,48 @@ function SmithApp() {
         suppressRef.current = null;
         if (value === `${inputValue}${suppressed}`) return;
       }
+      if (panel !== "chat") {
+        getState().set({ inputValue: value, skillsIndex: 0 });
+        return;
+      }
+      if (isSkillMentionQuery(value)) {
+        getState().set({ inputValue: value, pendingSkill: null, skillMentionIndex: 0 });
+        return;
+      }
       getState().set({ inputValue: value });
     },
-    [inputValue],
+    [inputValue, panel],
   );
   const handleChatSubmit = useCallback(
     (value: string) => {
-      void submitChat(value, busy, pendingSkill, skills, slashMenuOpen, slashItems, slashIndex, exit);
+      void submitChat(
+        value,
+        panel,
+        busy,
+        pendingSkill,
+        skills,
+        slashMenuOpen,
+        slashItems,
+        slashIndex,
+        skillMentionMenuOpen,
+        skillMentions,
+        skillMentionIndex,
+        exit,
+      );
     },
-    [busy, exit, pendingSkill, skills, slashIndex, slashItems, slashMenuOpen],
+    [
+      busy,
+      exit,
+      panel,
+      pendingSkill,
+      skillMentionIndex,
+      skillMentionMenuOpen,
+      skillMentions,
+      skills,
+      slashIndex,
+      slashItems,
+      slashMenuOpen,
+    ],
   );
   const handleSetupSubmit = useCallback(
     (value: string) => {
@@ -756,8 +1053,13 @@ function SmithApp() {
     slashMenuOpen,
     slashItems,
     slashIndex,
-    skills,
+    skills: visibleSkills,
     skillsIndex,
+    skillActionIndex,
+    hooksIndex,
+    skillMentionMenuOpen,
+    skillMentions,
+    skillMentionIndex,
     panel,
     pendingSkill,
     configConfigured: Boolean(config?.configured),
@@ -809,6 +1111,7 @@ function SmithApp() {
             selectedModelProfile={selectedModelProfile}
             inputValue={inputValue}
             mode={mode}
+            panel={panel}
             onChatSubmit={handleChatSubmit}
             onInputChange={handleInputChange}
             onSetupSubmit={handleSetupSubmit}
@@ -818,6 +1121,9 @@ function SmithApp() {
             slashIndex={slashIndex}
             slashItems={slashItems}
             slashMenuOpen={slashMenuOpen}
+            skillMentionIndex={skillMentionIndex}
+            skillMentionMenuOpen={skillMentionMenuOpen}
+            skillMentions={skillMentions}
             statusLine={statusLine}
             runStartedAt={runStartedAt}
             turnTokenUsage={turnTokenUsage}

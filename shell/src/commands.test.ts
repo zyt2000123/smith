@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { NodeBridge } from "./bridge.js";
-import { buildSlashItems, filterSlash, runShellCommand } from "./commands.js";
+import {
+  acceptsComposerSubmission,
+  buildSlashItems,
+  filterSlash,
+  parseSkill,
+  runShellCommand,
+  selectedSlashItem,
+} from "./commands.js";
 import { createAppStore } from "./store.js";
 
 function skill(name: string) {
@@ -19,7 +26,7 @@ test("slash filtering exposes one resume command", () => {
   const skills = Array.from({ length: 8 }, (_, index) => skill(`skill-${index + 1}`));
   const items = filterSlash(buildSlashItems(skills), "/");
 
-  assert.equal(items.length, 14);
+  assert.equal(items.length, 16);
   assert.equal(
     items.some((item) => item.command === "/init"),
     true,
@@ -29,7 +36,15 @@ test("slash filtering exposes one resume command", () => {
     true,
   );
   assert.equal(
+    items.some((item) => item.command === "/reload"),
+    true,
+  );
+  assert.equal(
     items.some((item) => item.command === "/skills"),
+    true,
+  );
+  assert.equal(
+    items.some((item) => item.command === "/hooks"),
     true,
   );
   assert.equal(
@@ -48,6 +63,33 @@ test("slash filtering exposes one resume command", () => {
     items.some((item) => item.kind === "skill"),
     false,
   );
+});
+
+test("disabled skills cannot be selected through the direct skill command", () => {
+  assert.equal(parseSkill("/skill research find primary sources", [{ ...skill("research"), enabled: false }]), null);
+});
+
+test("hooks opens the lifecycle hooks panel", async () => {
+  const store = createAppStore();
+
+  await runShellCommand("/hooks", { bridge: {} as NodeBridge, exit: () => {}, getState: store.getState });
+
+  assert.equal(store.getState().panel, "hooks");
+  assert.equal(store.getState().hooksIndex, 0);
+  assert.match(store.getState().statusLine, /lifecycle hook/);
+});
+
+test("welcome accepts the first command submitted from the composer", () => {
+  assert.equal(acceptsComposerSubmission("welcome"), true);
+  assert.equal(acceptsComposerSubmission("chat"), true);
+  assert.equal(acceptsComposerSubmission("hooks"), false);
+});
+
+test("the highlighted hooks command is confirmed with one Enter", () => {
+  const items = filterSlash(buildSlashItems([]), "/");
+  const hooksIndex = items.findIndex((item) => item.command === "/hooks");
+
+  assert.equal(selectedSlashItem("/", true, items, hooksIndex)?.command, "/hooks");
 });
 
 test("resume recovers the retained or explicitly named run", async () => {
@@ -130,6 +172,42 @@ test("new keeps the old session while clear delegates deletion", async () => {
   assert.equal(clearCalls, 1);
   assert.equal(clearStore.getState().currentSession, null);
   assert.deepEqual(clearStore.getState().sessions, []);
+});
+
+test("reload starts a fresh session so the next run reads the current context files", async () => {
+  const oldSession = {
+    id: "session-1",
+    agent_id: "agent-1",
+    title: "old",
+    created_at: "now",
+    message_count: 1,
+  };
+  const store = createAppStore();
+  store.getState().set({ currentSession: oldSession, sessions: [oldSession], inputValue: "draft" });
+  let reloadCalls = 0;
+  const bridge = {
+    reloadContext: () => {
+      reloadCalls += 1;
+      store.getState().startFreshSession();
+      return true;
+    },
+  } as unknown as NodeBridge;
+
+  await runShellCommand("/reload", { bridge, exit: () => {}, getState: store.getState });
+
+  assert.equal(reloadCalls, 1);
+  assert.equal(store.getState().currentSession, null);
+  assert.equal(store.getState().sessions[0]?.id, "session-1");
+  assert.equal(store.getState().statusLine, "Context reloaded. Send the next task to start fresh.");
+});
+
+test("reload rejects arguments", async () => {
+  const store = createAppStore();
+  const bridge = { reloadContext: () => true } as unknown as NodeBridge;
+
+  await runShellCommand("/reload now", { bridge, exit: () => {}, getState: store.getState });
+
+  assert.equal(store.getState().statusLine, "Usage: /reload");
 });
 
 test("clear keeps the current session when deletion fails", async () => {

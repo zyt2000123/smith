@@ -1,6 +1,7 @@
 """List directory tool — tree-style directory listing."""
 
 import os
+from pathlib import Path
 
 TOOL_META = {
     "name": "list_dir",
@@ -28,9 +29,20 @@ EXCLUDED = {".git", "node_modules", "__pycache__", ".venv", "dist", ".build", ".
 
 
 async def execute(*, path: str = ".", max_depth: int = 2) -> str:
-    base = os.path.abspath(path)
+    base = os.path.realpath(path)
     if not os.path.isdir(base):
         return f"Error: not a directory: {base}"
+
+    base_path = Path(base).resolve()
+
+    def is_safe_entry(entry_path: str) -> bool:
+        """Only inspect non-symlink entries that resolve below the requested base."""
+        if os.path.islink(entry_path):
+            return False
+        try:
+            return Path(entry_path).resolve().is_relative_to(base_path)
+        except (OSError, ValueError):
+            return False
 
     max_depth = max(1, min(max_depth, 5))
     lines: list[str] = [f"# {base}"]
@@ -45,8 +57,18 @@ async def execute(*, path: str = ".", max_depth: int = 2) -> str:
         except PermissionError:
             return
 
-        dirs = [e for e in entries if os.path.isdir(os.path.join(dir_path, e)) and e not in EXCLUDED]
-        files = [e for e in entries if os.path.isfile(os.path.join(dir_path, e)) and e not in EXCLUDED]
+        dirs = [
+            entry for entry in entries
+            if entry not in EXCLUDED
+            and is_safe_entry(os.path.join(dir_path, entry))
+            and os.path.isdir(os.path.join(dir_path, entry))
+        ]
+        files = [
+            entry for entry in entries
+            if entry not in EXCLUDED
+            and is_safe_entry(os.path.join(dir_path, entry))
+            and os.path.isfile(os.path.join(dir_path, entry))
+        ]
 
         for f in files:
             if count >= MAX_ENTRIES:

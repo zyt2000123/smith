@@ -171,7 +171,7 @@ class AuditLog:
             "allowed": result.allowed,
             "level": result.level.value,
             "reason": result.reason or None,
-            **extra,
+            **_summarize_args(extra),
         }
         try:
             with open(self._path, "a", encoding="utf-8") as f:
@@ -180,15 +180,44 @@ class AuditLog:
             pass
 
 
+_SENSITIVE_ARG_KEY_PARTS = (
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "passwd",
+    "password",
+    "privatekey",
+    "secret",
+    "token",
+)
+
+
+def _is_sensitive_arg_key(key: object) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+    return any(part in normalized for part in _SENSITIVE_ARG_KEY_PARTS)
+
+
+def _summarize_value(value: object, max_len: int) -> object:
+    if isinstance(value, dict):
+        return _summarize_args(value, max_len=max_len)
+    if isinstance(value, list):
+        return [_summarize_value(item, max_len) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_summarize_value(item, max_len) for item in value)
+    if isinstance(value, str) and len(value) > max_len:
+        return value[:max_len] + f"...({len(value)} chars)"
+    return value
+
+
 def _summarize_args(args: dict, max_len: int = 200) -> dict:
+    """Recursively redact credential-bearing argument fields for audit storage."""
     redacted = {}
     for k, v in args.items():
-        if k in ("api_key", "password", "secret", "token"):
+        if _is_sensitive_arg_key(k):
             redacted[k] = "***"
-        elif isinstance(v, str) and len(v) > max_len:
-            redacted[k] = v[:max_len] + f"...({len(v)} chars)"
         else:
-            redacted[k] = v
+            redacted[k] = _summarize_value(v, max_len)
     return redacted
 
 
@@ -294,6 +323,13 @@ class ToolGuard:
     _LIST_PATH_ARGS: dict[str, tuple[str, ...]] = {
         "git_ops": ("files",),
     }
+    # These legacy provider defaults are process-CWD fallbacks unless the
+    # registry has already materialized them within the scoped workspace.
+    _NONEMPTY_PATH_DEFAULTS: dict[str, frozenset[str]] = {
+        "grep": frozenset({"path"}),
+        "glob_files": frozenset({"path"}),
+        "list_dir": frozenset({"path"}),
+    }
     _WRITE_TOOLS = frozenset({"write_file", "edit_file"})
     _APPROVAL_TOOLS = frozenset({"write_file", "edit_file", "git_ops", "shell"})
     _READ_ONLY_GIT_ACTIONS = frozenset({"status", "diff", "discover"})
@@ -346,6 +382,16 @@ class ToolGuard:
         is_write = tool_name in self._WRITE_TOOLS
         return path_args, list_path_args, is_write
 
+    def _path_arg_uses_nonempty_default(self, tool_name: str, arg_name: str) -> bool:
+        """Whether an omitted path would make the provider use an implicit path."""
+        definition = self._tool_registry.get(tool_name)
+        if definition is not None and isinstance(definition.parameters, dict):
+            properties = definition.parameters.get("properties")
+            parameter = properties.get(arg_name) if isinstance(properties, dict) else None
+            default = parameter.get("default") if isinstance(parameter, dict) else None
+            return isinstance(default, str) and bool(default)
+        return arg_name in self._NONEMPTY_PATH_DEFAULTS.get(tool_name, frozenset())
+
     def _check_file_paths(self, tool_call: ToolCall) -> GuardResult | None:
         path_args, list_path_args, is_write = self._resolve_path_metadata(tool_call.name)
         if not path_args and not list_path_args and tool_call.name != "shell":
@@ -357,6 +403,22 @@ class ToolGuard:
             path_val = tool_call.arguments.get(arg_name)
             if path_val:
                 paths_to_check.append((str(path_val), is_write))
+            elif (
+                self.file_guard.is_working_directory_scoped
+                and self._path_arg_uses_nonempty_default(tool_call.name, arg_name)
+            ):
+                # The registry must first materialize the provider's default
+                # (such as ``path='.'``) within the workspace.  Letting a raw
+                # optional path through here would make the provider use the
+                # server process CWD instead.
+                return GuardResult(
+                    allowed=False,
+                    reason=(
+                        f"Path argument '{arg_name}' must be canonicalized "
+                        "before policy checks"
+                    ),
+                    boundary_block=True,
+                )
 
         cwd_val = tool_call.arguments.get("cwd")
         cwd = str(cwd_val) if cwd_val else ""

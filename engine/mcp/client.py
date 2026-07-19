@@ -27,6 +27,7 @@ SUPPORTED_PROTOCOL_VERSIONS = {
 CLIENT_INFO = {"name": "agent-smith", "version": "0.2.0"}
 MAX_TOOL_NAME_LENGTH = 64
 MAX_MCP_RESPONSE_BYTES = 1024 * 1024
+MAX_MCP_TOOL_LIST_PAGES = 100
 
 
 @dataclass
@@ -347,7 +348,8 @@ class MCPClient:
         """Discover available tools from the MCP server."""
         tools: list[MCPTool] = []
         cursor: str | None = None
-        while True:
+        seen_cursors: set[str] = set()
+        for _page in range(MAX_MCP_TOOL_LIST_PAGES):
             params = {"cursor": cursor} if cursor else {}
             result = await self._send("tools/list", params)
             for t in result.get("tools", []):
@@ -358,9 +360,14 @@ class MCPClient:
                 ))
             next_cursor = result.get("nextCursor")
             if not isinstance(next_cursor, str) or not next_cursor:
-                break
+                return tools
+            if next_cursor in seen_cursors:
+                raise RuntimeError("MCP tools/list returned a repeated cursor")
+            seen_cursors.add(next_cursor)
             cursor = next_cursor
-        return tools
+        raise RuntimeError(
+            f"MCP tools/list exceeded maximum page limit ({MAX_MCP_TOOL_LIST_PAGES})"
+        )
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         """Call a tool on the MCP server and return the text result."""

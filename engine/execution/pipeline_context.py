@@ -23,6 +23,7 @@ CTX_FORCED_SKILL = "forced_skill"
 
 # --- engine-internal (never checkpointed) ----------------------------------
 CTX_STATE_DIR = "_state_dir"
+CTX_WORKING_DIR = "_working_dir"
 CTX_RETRY_HINT = "_rubric_retry_hint"
 
 # --- skill-facing feedback --------------------------------------------------

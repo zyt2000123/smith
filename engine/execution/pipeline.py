@@ -24,6 +24,7 @@ from .pipeline_context import (
     CTX_RUBRIC_FEEDBACK,
     CTX_SESSION_ID,
     CTX_STATE_DIR,
+    CTX_WORKING_DIR,
     output_key,
 )
 from .react_loop import react_event_loop
@@ -59,6 +60,7 @@ async def run_pipeline(
     context: dict,
     gate_llm: "LLMPort | None" = None,
     start_node_idx: int = 0,
+    disabled_skill_names: frozenset[str] = frozenset(),
 ) -> AsyncGenerator[ExecutionEvent, None]:
     """Execute a pipeline: walk nodes sequentially, ReAct each, gate-check.
 
@@ -76,6 +78,14 @@ async def run_pipeline(
         node = chain.nodes[node_idx]
 
         if node.condition is not None and not node.condition(context):
+            node_idx += 1
+            continue
+
+        # A user-disabled skill is distinct from one that is simply absent
+        # from the registry.  The latter keeps the historical generic-ReAct
+        # fallback, while the former must not execute at all.
+        if node.skill_name in disabled_skill_names:
+            logger.info("skipping user-disabled pipeline skill %r", node.skill_name)
             node_idx += 1
             continue
 
@@ -140,8 +150,9 @@ async def run_pipeline(
                         "provision_id": provision_id, "reason": reason,
                     })
                     provision_settled = True
-                    if result.text:
-                        yield ExecutionEvent(EventType.TEXT_DELTA, {"text": result.text})
+                    # ``result.text`` was never accepted by this node's gate.
+                    # It may be a content-filtered or truncated provider draft,
+                    # so never turn it into a normal reply (or persisted turn).
                     _clear_checkpoint(context)
                     yield ExecutionEvent(EventType.SKILL_END, {
                         "skill": node.skill_name,
@@ -367,6 +378,7 @@ def _save_checkpoint(context: dict, node_idx: int) -> None:
             skill_chain_index=node_idx,
             context={k: v for k, v in context.items() if not k.startswith("_")},
             timestamp=datetime.now(timezone.utc).isoformat(),
+            working_dir=str(context.get(CTX_WORKING_DIR) or ""),
         ))
     except Exception:
         logger.exception("failed to save session checkpoint")

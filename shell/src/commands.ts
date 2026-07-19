@@ -1,7 +1,9 @@
 import type { SkillSummary } from "./api.js";
 import { errorMessage, type NodeBridge } from "./bridge.js";
+import { LIFECYCLE_HOOKS } from "./hooks.js";
 import { createSetupDraft } from "./setup.js";
-import type { AppStore } from "./store.js";
+import { isSkillEnabled } from "./skill-mention.js";
+import type { AppStore, Panel } from "./store.js";
 
 export type SlashItem = {
   id: string;
@@ -24,6 +26,7 @@ type CommandHandler = (args: string[], context: CommandContext) => Promise<void>
 
 const HELP_TEXT = [
   "- `/new` — start a fresh session and keep the current session in history",
+  "- `/reload` — start fresh after changing SMITH.md or other context files",
   "- `/init` — create a project .smith/SMITH.md instruction template",
   "- `/clear` — delete the current session and start fresh",
   "- `/compress` — summarize and persist the active session context",
@@ -32,6 +35,7 @@ const HELP_TEXT = [
   "- `/sessions` — recent sessions",
   "- `/token` — local token usage dashboard",
   "- `/skills` — inspect or run a standard SKILL.md skill",
+  "- `/hooks` — inspect runtime lifecycle hooks",
   "- `/mcp` — inspect configured MCP servers and tools",
   "- `/resume [session-id]` — recover the latest interrupted run, or open a session; use `/resume run <run-id>` for a specific run",
   "- `/compact` — switch to compact view; Ctrl+O toggles compact/transcript",
@@ -55,6 +59,14 @@ export function buildSlashItems(_skills: SkillSummary[]): SlashItem[] {
       title: "/new",
       command: "/new",
       description: "New session; keep history.",
+      category: "Commands",
+    },
+    {
+      id: "reload",
+      kind: "command",
+      title: "/reload",
+      command: "/reload",
+      description: "Start fresh with current context files.",
       category: "Commands",
     },
     {
@@ -130,6 +142,14 @@ export function buildSlashItems(_skills: SkillSummary[]): SlashItem[] {
       category: "Commands",
     },
     {
+      id: "hooks",
+      kind: "command",
+      title: "/hooks",
+      command: "/hooks",
+      description: "View runtime lifecycle hooks.",
+      category: "Commands",
+    },
+    {
       id: "clear",
       kind: "command",
       title: "/clear",
@@ -158,11 +178,28 @@ export function filterSlash(items: SlashItem[], input: string): SlashItem[] {
   return items.filter((item) => `${item.command} ${item.title} ${item.description}`.toLowerCase().includes(query));
 }
 
+/** Return the highlighted slash entry only while the composer still contains a partial command. */
+export function selectedSlashItem(
+  input: string,
+  slashMenuOpen: boolean,
+  items: SlashItem[],
+  index: number,
+): SlashItem | null {
+  const selected = items[index];
+  if (!slashMenuOpen || !selected || input.split(/\s+/).length !== 1 || input === selected.command) return null;
+  return selected;
+}
+
+/** The welcome screen has the same composer as chat, so it must accept the first command or prompt. */
+export function acceptsComposerSubmission(panel: Panel): boolean {
+  return panel === "welcome" || panel === "chat";
+}
+
 export function parseSkill(raw: string, skills: SkillSummary[]): { skill: SkillSummary; prompt: string } | null {
   const match = raw.trim().match(/^\/skill\s+(\S+)(?:\s+([\s\S]+))?$/);
   if (!match) return null;
 
-  const skill = skills.find((candidate) => candidate.name === match[1]);
+  const skill = skills.find((candidate) => candidate.name === match[1] && isSkillEnabled(candidate));
   return skill ? { skill, prompt: match[2]?.trim() || "" } : null;
 }
 
@@ -222,6 +259,16 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
   "/new": async (_args, context) => {
     context.bridge.startNewSession();
   },
+  "/reload": async (args, context) => {
+    const state = context.getState();
+    if (args.length > 0) {
+      state.set({ statusLine: "Usage: /reload" });
+      return;
+    }
+    if (context.bridge.reloadContext()) {
+      state.set({ statusLine: "Context reloaded. Send the next task to start fresh." });
+    }
+  },
   "/init": async (args, context) => {
     const state = context.getState();
     if (args.length > 0) {
@@ -249,17 +296,17 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
   },
   "/skills": (_args, context) => {
     const state = context.getState();
-    state.set({ panel: "skills", statusLine: `${state.skills.length} skill(s).` });
+    state.set({ panel: "skill-actions", inputValue: "", skillActionIndex: 0, statusLine: "Choose an action." });
   },
   "/skill": async (args, context) => {
     const state = context.getState();
     if (args.length === 0) {
-      state.set({ panel: "skills", statusLine: `${state.skills.length} skill(s).` });
+      state.set({ panel: "skill-actions", inputValue: "", skillActionIndex: 0, statusLine: "Choose an action." });
       return;
     }
-    const skill = state.skills.find((candidate) => candidate.name === args[0]);
+    const skill = state.skills.find((candidate) => candidate.name === args[0] && isSkillEnabled(candidate));
     if (!skill) {
-      state.set({ statusLine: `Unknown skill: ${args[0]}` });
+      state.set({ statusLine: `Unknown or disabled skill: ${args[0]}` });
       return;
     }
     const prompt = args.slice(1).join(" ").trim();
@@ -273,6 +320,15 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
     await context.bridge.refreshMcpServers();
     const state = context.getState();
     state.set({ panel: "mcp", statusLine: `${state.mcpServers.length} MCP server(s).` });
+  },
+  "/hooks": (_args, context) => {
+    const state = context.getState();
+    state.set({
+      panel: "hooks",
+      inputValue: "",
+      hooksIndex: 0,
+      statusLine: `${LIFECYCLE_HOOKS.length} built-in lifecycle hooks.`,
+    });
   },
   "/model": async (args, context) => {
     const state = context.getState();
@@ -324,7 +380,7 @@ export async function runShellCommand(raw: string, context: CommandContext): Pro
   }
 
   const state = context.getState();
-  const skill = state.skills.find((candidate) => candidate.name === command?.slice(1));
+  const skill = state.skills.find((candidate) => candidate.name === command?.slice(1) && isSkillEnabled(candidate));
   if (!skill) {
     state.set({ statusLine: `Unknown: ${command}` });
     return;

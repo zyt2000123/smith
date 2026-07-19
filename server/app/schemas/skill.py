@@ -7,3 +7,8 @@ class SkillSummaryOut(BaseModel):
     source: str
     version: str
     argument_hint: str = ""
+    enabled: bool = True
+
+
+class SkillEnabledUpdate(BaseModel):
+    enabled: bool

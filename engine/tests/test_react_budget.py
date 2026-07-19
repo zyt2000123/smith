@@ -491,6 +491,48 @@ def test_react_event_loop_discards_length_draft_when_continuation_calls_tool():
     assert finals == [{"text": "answer", "already_streamed": True}]
 
 
+def test_react_event_loop_retracts_pending_draft_when_compression_fails():
+    class CompressionFailingStreamingLLM(StreamingFakeLLM):
+        context_window = 10_000
+
+        def __init__(self) -> None:
+            super().__init__([
+                [
+                    ProviderEvent(ProviderEventType.OUTPUT_TEXT_DELTA, {"delta": "x" * 24_000}),
+                    ProviderEvent(
+                        ProviderEventType.RESPONSE_COMPLETED,
+                        {"finish_reason": "length", "raw_finish_reason": "length"},
+                    ),
+                ],
+            ])
+
+        async def chat(self, messages, tools=None, prefix_cache_key=None):
+            raise RuntimeError("compactor unavailable")
+
+    async def run():
+        events = []
+        try:
+            async for event in _react_event_loop(
+                CompressionFailingStreamingLLM(),
+                [{"role": "user", "content": "answer completely"}],
+                _registry(),
+            ):
+                events.append(event)
+        except RuntimeError as exc:
+            return events, str(exc)
+        raise AssertionError("compression failure should propagate")
+
+    events, error = asyncio.run(run())
+    drafts = [event.data for event in events if event.type == EventType.PROVISIONAL_TEXT_DELTA]
+    retractions = [event.data for event in events if event.type == EventType.PROVISIONAL_RETRACT]
+
+    assert error == "compactor unavailable"
+    assert len(drafts) == 1
+    assert retractions == [
+        {"provision_id": drafts[0]["provision_id"], "reason": "compression_error"},
+    ]
+
+
 def test_react_event_loop_marks_repeated_model_length_as_incomplete():
     async def run():
         llm = FakeLLM([
@@ -950,6 +992,45 @@ def test_react_event_loop_stream_fallback_on_early_error():
         if e.type == EventType.TEXT_DELTA
     )
     assert text == "fallback result"
+
+
+def test_react_event_loop_does_not_replay_after_reasoning_only_stream_error():
+    """A partially consumed reasoning stream is not safe to replay."""
+    async def run() -> tuple[bool, int]:
+        class ReasoningThenDisconnectLLM(FakeLLM):
+            stream = True
+
+            def __init__(self) -> None:
+                super().__init__([ChatResponse(text="must not be replayed")])
+                self.fallback_calls = 0
+
+            async def chat_events(self, messages, tools=None):
+                yield ProviderEvent(
+                    ProviderEventType.REASONING_DELTA,
+                    {"delta": "checking the available tools"},
+                )
+                raise ConnectionError("stream died after reasoning")
+
+            async def chat(self, messages, tools=None, prefix_cache_key=None):
+                self.fallback_calls += 1
+                return await super().chat(messages, tools, prefix_cache_key)
+
+        llm = ReasoningThenDisconnectLLM()
+        try:
+            async for _event in _react_event_loop(
+                llm,
+                [{"role": "user", "content": "hello"}],
+                _registry(),
+            ):
+                pass
+        except ConnectionError:
+            return True, llm.fallback_calls
+        return False, llm.fallback_calls
+
+    interrupted, fallback_calls = asyncio.run(run())
+
+    assert interrupted is True
+    assert fallback_calls == 0
 
 
 def _assert_tool_pairing_intact(messages: list[dict]) -> None:

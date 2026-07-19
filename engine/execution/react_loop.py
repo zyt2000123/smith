@@ -447,6 +447,9 @@ async def react_event_loop(
         except Exception:
             if compression_started:
                 yield ExecutionEvent(EventType.CONTEXT_COMPRESSION_END)
+            for provision_id in active_provision_ids:
+                yield _provisional_retract_event(provision_id, "compression_error")
+            active_provision_ids.clear()
             raise
         if compression_started:
             yield ExecutionEvent(EventType.CONTEXT_COMPRESSION_END)
@@ -501,17 +504,22 @@ async def react_event_loop(
                             if raw_provision_id not in active_provision_ids:
                                 active_provision_ids.append(raw_provision_id)
                             yield _provisional_text_event(raw_provision_id, delta)
-                    # ponytail: only block fallback after user-visible content
+                    # A streamed reasoning delta is not user-visible, but it
+                    # still proves the provider has begun a response.  A
+                    # fallback would replay that turn and can produce a
+                    # different tool plan, so only retry a stream that failed
+                    # before every semantic response delta.
                     if not saw_content_event and provider_event.type in (
                         ProviderEventType.OUTPUT_TEXT_DELTA,
+                        ProviderEventType.REASONING_DELTA,
                         ProviderEventType.FUNCTION_CALL_ARGUMENTS_DELTA,
                     ):
                         saw_content_event = True
             except Exception:
-                # Fallback to non-streaming only if no text/tool content was
-                # emitted for this response and no earlier continuation is
-                # still visible as a provisional draft.  Otherwise the
-                # fallback could append an unseen suffix to a committed prefix.
+                # Fallback to non-streaming only if this response emitted no
+                # semantic delta and no earlier continuation is still visible
+                # as a provisional draft.  Otherwise the fallback could
+                # replay an unseen suffix or a different tool plan.
                 if saw_content_event or active_provision_ids:
                     for provision_id in active_provision_ids:
                         yield _provisional_retract_event(provision_id, "stream_error")

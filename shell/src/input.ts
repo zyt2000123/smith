@@ -4,6 +4,7 @@ import type { MutableRefObject } from "react";
 import type { SkillSummary } from "./api.js";
 import type { NodeBridge } from "./bridge.js";
 import type { SlashItem } from "./commands.js";
+import { LIFECYCLE_HOOKS } from "./hooks.js";
 import {
   type ListNavigation,
   moveListIndex,
@@ -12,6 +13,7 @@ import {
 } from "./list-navigation.js";
 import { advanceModelPicker, moveModelPicker } from "./model-picker.js";
 import { fieldValue, isEditableSetupField, nextSetupIndex, setSetupField, setupFieldAt } from "./setup.js";
+import { isSkillEnabled, selectedSkillMentionState } from "./skill-mention.js";
 import type { AppStore, Mode, Panel } from "./store.js";
 import { TOKEN_TABS } from "./token-stats.js";
 import type { TranscriptViewMode } from "./transcript-state.js";
@@ -28,6 +30,11 @@ export type ShellInputOptions = {
   slashIndex: number;
   skills: SkillSummary[];
   skillsIndex: number;
+  skillActionIndex: number;
+  hooksIndex: number;
+  skillMentionMenuOpen: boolean;
+  skillMentions: SkillSummary[];
+  skillMentionIndex: number;
   panel: Panel;
   pendingSkill: SkillSummary | null;
   configConfigured: boolean;
@@ -119,7 +126,13 @@ export function handleSlashNavigation(key: Key, options: ShellInputOptions): boo
 }
 
 export function handleSkillsNavigation(key: Key, options: ShellInputOptions): boolean {
-  if (options.slashMenuOpen || options.panel !== "skills" || options.skills.length === 0) return false;
+  if (
+    options.slashMenuOpen ||
+    (options.panel !== "skills" && options.panel !== "skill-toggle") ||
+    options.skills.length === 0
+  ) {
+    return false;
+  }
 
   const navigation = navigationFromKey(key);
   if (!navigation) return false;
@@ -127,6 +140,74 @@ export function handleSkillsNavigation(key: Key, options: ShellInputOptions): bo
   options.getState().set({
     skillsIndex: moveListIndex(options.skillsIndex, options.skills.length, navigation, SKILLS_PANEL_VISIBLE_ITEMS),
   });
+  return true;
+}
+
+export function handleSkillActionsNavigation(key: Key, options: ShellInputOptions): boolean {
+  if (options.panel !== "skill-actions") return false;
+
+  const navigation = navigationFromKey(key);
+  if (!navigation) return false;
+  options.getState().set({ skillActionIndex: moveListIndex(options.skillActionIndex, 2, navigation, 2) });
+  return true;
+}
+
+export function handleSkillActionsSelection(key: Key, options: ShellInputOptions): boolean {
+  if (!key.return || options.panel !== "skill-actions") return false;
+
+  options.getState().set({
+    panel: options.skillActionIndex === 0 ? "skills" : "skill-toggle",
+    inputValue: "",
+    skillsIndex: 0,
+    statusLine: "",
+  });
+  return true;
+}
+
+export function handleHooksNavigation(key: Key, options: ShellInputOptions): boolean {
+  if (options.panel !== "hooks") return false;
+
+  const navigation = navigationFromKey(key);
+  if (!navigation) return false;
+  options.getState().set({
+    hooksIndex: moveListIndex(options.hooksIndex, LIFECYCLE_HOOKS.length, navigation, SKILLS_PANEL_VISIBLE_ITEMS),
+  });
+  return true;
+}
+
+export function handleHooksSelection(key: Key, options: ShellInputOptions): boolean {
+  if (!key.return || options.panel !== "hooks") return false;
+
+  options.getState().set({ panel: "hook-details", inputValue: "", statusLine: "" });
+  return true;
+}
+
+export function handleSkillMentionNavigation(key: Key, options: ShellInputOptions): boolean {
+  if (!options.skillMentionMenuOpen) return false;
+  if (key.tab) return true;
+  if (options.skillMentions.length === 0) return false;
+
+  const navigation = navigationFromKey(key);
+  if (!navigation) return false;
+
+  options.getState().set({
+    skillMentionIndex: moveListIndex(
+      options.skillMentionIndex,
+      options.skillMentions.length,
+      navigation,
+      SKILLS_PANEL_VISIBLE_ITEMS,
+    ),
+  });
+  return true;
+}
+
+export function handleSkillMentionSelection(key: Key, options: ShellInputOptions): boolean {
+  if (!key.return || !options.skillMentionMenuOpen || options.skillMentions.length === 0) return false;
+
+  const selected = options.skillMentions[options.skillMentionIndex];
+  if (!selected) return false;
+
+  options.getState().set(selectedSkillMentionState(selected));
   return true;
 }
 
@@ -141,10 +222,20 @@ export function handleSkillsSelection(key: Key, options: ShellInputOptions): boo
 
   state.set({
     panel: "chat",
-    inputValue: "",
+    inputValue: `@${selected.name} `,
     pendingSkill: selected,
     statusLine: "",
   });
+  return true;
+}
+
+export function handleSkillToggle(key: Key, options: ShellInputOptions): boolean {
+  if (!key.return || options.panel !== "skill-toggle" || options.skills.length === 0) return false;
+
+  const selected = options.skills[options.skillsIndex];
+  if (!selected) return false;
+
+  void options.bridge.setSkillEnabled(selected.name, !isSkillEnabled(selected));
   return true;
 }
 
@@ -216,8 +307,24 @@ export function handleEscape(key: Key, options: ShellInputOptions): boolean {
   if (!key.escape) return false;
 
   const state = options.getState();
+  if (options.skillMentionMenuOpen) {
+    state.set({ inputValue: "", skillMentionIndex: 0 });
+    return true;
+  }
   if (options.slashMenuOpen) {
     state.set({ inputValue: "", slashIndex: 0 });
+    return true;
+  }
+  if (options.panel === "hook-details") {
+    state.set({ panel: "hooks", inputValue: "", statusLine: "Back." });
+    return true;
+  }
+  if (options.panel === "skills" || options.panel === "skill-toggle") {
+    state.set({ panel: "skill-actions", inputValue: "", skillsIndex: 0, statusLine: "Back." });
+    return true;
+  }
+  if (options.panel === "skill-actions") {
+    state.set({ panel: "chat", inputValue: "", statusLine: "Back." });
     return true;
   }
   if (options.panel !== "chat") {
@@ -246,7 +353,14 @@ export function handleQueuedEdit(key: Key, options: ShellInputOptions): boolean 
 }
 
 function handleHistoryNavigation(key: Key, options: ShellInputOptions): boolean {
-  if (options.slashMenuOpen || (!key.upArrow && !key.downArrow)) return false;
+  if (
+    options.panel !== "chat" ||
+    options.slashMenuOpen ||
+    options.skillMentionMenuOpen ||
+    (!key.upArrow && !key.downArrow)
+  ) {
+    return false;
+  }
 
   const state = options.getState();
   if (state.inputHistory.length === 0) return false;
@@ -269,9 +383,22 @@ function handleHistoryNavigation(key: Key, options: ShellInputOptions): boolean 
 function cyclePanel(key: Key, options: ShellInputOptions): void {
   if (!key.tab || options.slashMenuOpen) return;
 
-  const panels: Panel[] = ["welcome", "sessions", "skills", "mcp", "tokens", "chat"];
+  const panels: Panel[] = ["welcome", "sessions", "skill-actions", "mcp", "hooks", "tokens", "chat"];
   const index = panels.indexOf(options.panel);
   options.getState().set({ panel: panels[(index + 1) % panels.length] });
+}
+
+function handlePickerInput(key: Key, options: ShellInputOptions): boolean {
+  if (handleHooksSelection(key, options)) return true;
+  if (handleHooksNavigation(key, options)) return true;
+  if (handleSkillActionsSelection(key, options)) return true;
+  if (handleSkillActionsNavigation(key, options)) return true;
+  if (handleSkillToggle(key, options)) return true;
+  if (handleSkillMentionSelection(key, options)) return true;
+  if (handleSlashNavigation(key, options)) return true;
+  if (handleSkillMentionNavigation(key, options)) return true;
+  if (handleSkillsSelection(key, options)) return true;
+  return handleSkillsNavigation(key, options);
 }
 
 function routeInput(input: string, key: Key, options: ShellInputOptions): void {
@@ -285,9 +412,7 @@ function routeInput(input: string, key: Key, options: ShellInputOptions): void {
   if (handleApprovalInput(key, options)) return;
   if (handleViewToggle(input, key, options)) return;
   if (handleQueuedEdit(key, options)) return;
-  if (handleSlashNavigation(key, options)) return;
-  if (handleSkillsSelection(key, options)) return;
-  if (handleSkillsNavigation(key, options)) return;
+  if (handlePickerInput(key, options)) return;
   if (handleTokenNavigation(key, options)) return;
   if (handleEscape(key, options)) return;
   if (handleHistoryNavigation(key, options)) return;

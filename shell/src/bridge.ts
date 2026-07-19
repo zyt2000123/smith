@@ -27,6 +27,7 @@ import {
   type StreamEvent,
   type StreamTerminalStatus,
   setLlmConfig,
+  setSkillEnabled,
   streamMessage,
   streamRunResume,
   updateSessionModel,
@@ -326,6 +327,27 @@ export class NodeBridge {
     if (baseUrl && agent) this.s.set({ skills: await listSkills(baseUrl) });
   }
 
+  async setSkillEnabled(skillName: string, enabled: boolean): Promise<void> {
+    const { baseUrl } = this.s;
+    if (!baseUrl) return;
+
+    this.s.set({ inputLocked: true, statusLine: `${enabled ? "Enabling" : "Disabling"} ${skillName}…` });
+    try {
+      const updated = await setSkillEnabled(baseUrl, skillName, enabled);
+      const state = this.s;
+      const isEnabled = updated.enabled !== false;
+      state.set({
+        skills: state.skills.map((skill) => (skill.name === updated.name ? updated : skill)),
+        pendingSkill: !isEnabled && state.pendingSkill?.name === updated.name ? null : state.pendingSkill,
+        statusLine: `${isEnabled ? "Enabled" : "Disabled"}: ${updated.name}`,
+      });
+    } catch (error) {
+      this.s.set({ statusLine: `Skill update failed: ${errorMessage(error)}` });
+    } finally {
+      this.s.set({ inputLocked: false });
+    }
+  }
+
   async refreshMcpServers(): Promise<void> {
     const { baseUrl, agent } = this.s;
     if (!baseUrl || !agent) return;
@@ -521,6 +543,12 @@ export class NodeBridge {
     clearTerminal();
     this.s.startFreshSession();
     return true;
+  }
+
+  reloadContext(): boolean {
+    // PromptAssembler reads context files for each new run. A fresh session makes
+    // the reload boundary explicit while preserving the old session in history.
+    return this.startNewSession();
   }
 
   async clearCurrentSession(): Promise<boolean> {
