@@ -43,3 +43,14 @@ class RunIncidentOut(BaseModel):
     reason: str | None = None
     occurred_at: str
     evidence: dict[str, int | str]
+
+
+class RunDiagnosisOut(BaseModel):
+    run_id: str
+    agent_id: str
+    status: str
+    failure_node: str | None = None
+    primary_category: str | None = None
+    summary: str
+    evidence: list[str]
+    recommendation: str | None = None

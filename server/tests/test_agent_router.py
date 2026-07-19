@@ -83,6 +83,15 @@ def test_observability_routes_delegate_to_agent_service() -> None:
                 "occurred_at": "2026-07-19T00:01:00+00:00", "evidence": {"timeout_count": 1},
             }]
 
+        async def get_run_diagnosis(self, run_id: str) -> dict:
+            assert run_id == "run-1"
+            return {
+                "run_id": run_id, "agent_id": "smith", "status": "needs_attention",
+                "failure_node": "tool:shell", "primary_category": "tool_timeout",
+                "summary": "One or more tool calls timed out.", "evidence": ["tool=shell"],
+                "recommendation": "Review the affected tool's timeout and retry policy; validate the target before retrying.",
+            }
+
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_agent_service] = lambda: FakeAgentService()
@@ -92,11 +101,13 @@ def test_observability_routes_delegate_to_agent_service() -> None:
         detail = client.get("/api/agent/observability/runs/run-1")
         trace = client.get("/api/agent/observability/runs/run-1/trace?limit=10")
         incidents = client.get("/api/agent/observability/incidents?limit=20")
+        diagnosis = client.get("/api/agent/observability/runs/run-1/diagnosis")
 
     assert runs.status_code == 200
     assert detail.json()["run_id"] == "run-1"
     assert trace.json()[0]["seq"] == 1
     assert incidents.json()[0]["category"] == "tool_timeout"
+    assert diagnosis.json()["failure_node"] == "tool:shell"
 
 
 def test_project_instruction_route_delegates_to_agent_service() -> None:

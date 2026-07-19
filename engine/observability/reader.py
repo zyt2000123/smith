@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .diagnosis import RunDiagnosis, RunDiagnoser
 from .incidents import IncidentDetector, RunIncident
 from .summary_store import RunSummaryRecord, RunSummaryStore
 from .trace_store import TraceStore
@@ -17,6 +18,7 @@ class ObservabilityReader:
         self._summaries = RunSummaryStore(profile_dir)
         self._traces = TraceStore(profile_dir)
         self._incidents = IncidentDetector()
+        self._diagnoser = RunDiagnoser(self._incidents)
 
     def list_runs(self, agent_id: str, *, limit: int = 50) -> list[RunSummaryRecord]:
         return self._summaries.list(agent_id, limit=limit)
@@ -39,3 +41,10 @@ class ObservabilityReader:
         for record in self.list_runs(agent_id, limit=limit):
             incidents.extend(self._incidents.detect(record, self._traces.read(record.metadata.run_id)))
         return sorted(incidents, key=lambda incident: incident.occurred_at, reverse=True)[:limit]
+
+    def get_diagnosis(self, run_id: str) -> RunDiagnosis | None:
+        """Derive a structured RCA for one completed run."""
+        record = self.get_run(run_id)
+        if record is None:
+            return None
+        return self._diagnoser.diagnose(record, self._traces.read(run_id))

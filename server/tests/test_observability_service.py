@@ -65,6 +65,13 @@ def test_observability_service_derives_tool_timeout_incidents(tmp_path: Path) ->
         ("tool_timeout", "error"),
     ]
 
+    diagnosis = service.get_diagnosis("smith-id", "run-timeout")
+
+    assert diagnosis.failure_node == "tool:shell"
+    assert diagnosis.primary_category == "tool_timeout"
+    assert diagnosis.evidence == ["timeout_count=1", "tool=shell"]
+    assert diagnosis.recommendation is not None
+
 
 def test_observability_service_does_not_expose_another_agents_run(tmp_path: Path) -> None:
     service = _service_with_run(tmp_path)

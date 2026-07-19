@@ -6,6 +6,7 @@ aggregate projections, and all supported read access. Execution code uses
 to know the trace or summary storage layout.
 """
 
+from .diagnosis import RunDiagnosis, RunDiagnoser
 from .events import EventType, ExecutionEvent, raw_text_delta
 from .incidents import IncidentDetector, RunIncident
 from .projections import RunSummary, RunSummaryProjection
@@ -20,6 +21,8 @@ __all__ = (
     "ExecutionEvent",
     "IncidentDetector",
     "RunEventRecorder",
+    "RunDiagnosis",
+    "RunDiagnoser",
     "RunIncident",
     "RunObservation",
     "RunObservationContext",
