@@ -147,6 +147,84 @@ test("leaving the token panel while it loads does not reopen it", async () => {
   globalThis.fetch = originalFetch;
 });
 
+test("run explorer keeps recorded runs visible when optional health data is unavailable", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/observability/runs")) {
+      return new Response(
+        JSON.stringify([
+          {
+            run_id: "run-1",
+            agent_id: "agent-1",
+            created_at: "2026-01-01T00:00:00Z",
+            finished_at: "2026-01-01T00:01:00Z",
+            event_count: 3,
+            tool_call_count: 1,
+            backtrack_count: 0,
+            approval_required_count: 0,
+            total_tokens: 12,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.includes("/observability/health")) return new Response("unavailable", { status: 503 });
+    if (url.includes("/observability/incidents")) {
+      return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const store = createAppStore();
+    store.getState().set({ baseUrl: "http://127.0.0.1:8140" });
+    await new NodeBridge(store).openRunExplorer();
+
+    assert.equal(store.getState().panel, "runs");
+    assert.equal(store.getState().observabilityRuns?.[0]?.run_id, "run-1");
+    assert.equal(store.getState().observabilityHealth, null);
+    assert.deepEqual(store.getState().observabilityIncidents, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("trace shows diagnosis when the optional improvement proposal is unavailable", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/diagnosis")) {
+      return new Response(
+        JSON.stringify({
+          run_id: "run-1",
+          agent_id: "agent-1",
+          status: "needs_attention",
+          summary: "A tool timed out.",
+          evidence: ["tool=web_fetch"],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.endsWith("/improvement-proposal")) return new Response("unavailable", { status: 503 });
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const store = createAppStore();
+    store.getState().set({ baseUrl: "http://127.0.0.1:8140" });
+    await new NodeBridge(store).showTrace("run-1");
+
+    const lastEntry = store.getState().transcript.at(-1);
+    assert.equal(lastEntry?.kind, "system");
+    assert.match(lastEntry?.kind === "system" ? lastEntry.text : "", /A tool timed out/);
+    assert.match(lastEntry?.kind === "system" ? lastEntry.text : "", /Proposal: unavailable/);
+    assert.equal(store.getState().statusLine, "Trace for run-1.");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("clearing a session locks out new requests until deletion finishes", async () => {
   const originalFetch = globalThis.fetch;
   let release!: (response: Response) => void;

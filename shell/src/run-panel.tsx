@@ -20,7 +20,7 @@ export function RunExplorerPanel({
   health: AgentHealth | null;
   incidents: RunIncident[] | null;
 }) {
-  if (runs === null || health === null || incidents === null) return <Text color={MUTED}>Loading observability…</Text>;
+  if (runs === null) return <Text color={MUTED}>Loading observability…</Text>;
   if (runs.length === 0) return <Text color={MUTED}>No completed or interrupted runs recorded yet.</Text>;
   return (
     <Box flexDirection="column">
@@ -28,14 +28,22 @@ export function RunExplorerPanel({
         Observability
       </Text>
       <Text color={MUTED}>Local run health · `/trace &lt;run-id&gt;` for RCA · Esc back</Text>
-      <Box marginTop={1} gap={2}>
-        <Text color={health.success_rate >= 0.8 ? INFO : WARNING}>
-          success {(health.success_rate * 100).toFixed(0)}% ({health.completed_count}/{health.run_count})
-        </Text>
-        <Text color={MUTED}>{formatTokenCount(health.tokens_per_run)} tokens/run</Text>
-        <Text color={MUTED}>{health.average_backtracks.toFixed(1)} backtracks/run</Text>
-      </Box>
-      {incidents.length ? (
+      {health ? (
+        <Box marginTop={1} gap={2}>
+          <Text color={health.success_rate >= 0.8 ? INFO : WARNING}>
+            success {(health.success_rate * 100).toFixed(0)}% ({health.completed_count}/{health.run_count})
+          </Text>
+          <Text color={MUTED}>{formatTokenCount(health.tokens_per_run)} tokens/run</Text>
+          <Text color={MUTED}>{health.average_backtracks.toFixed(1)} backtracks/run</Text>
+        </Box>
+      ) : (
+        <Text color={WARNING}>Health summary is unavailable.</Text>
+      )}
+      {incidents === null ? (
+        <Box marginTop={1}>
+          <Text color={WARNING}>Incident summary is unavailable.</Text>
+        </Box>
+      ) : incidents.length ? (
         <Box flexDirection="column" marginTop={1}>
           <Text color={WARNING}>Incidents</Text>
           {incidents.slice(0, 3).map((incident) => (

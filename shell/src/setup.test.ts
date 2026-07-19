@@ -7,6 +7,7 @@ import type { SetupDraft } from "./store.js";
 
 function draft(overrides: Partial<SetupDraft> = {}): SetupDraft {
   return {
+    vendor: "OpenAI",
     provider: "openai",
     base_url: "https://api.openai.com/v1",
     model: "gpt-4.1-mini",
@@ -23,14 +24,18 @@ function draft(overrides: Partial<SetupDraft> = {}): SetupDraft {
   };
 }
 
-test("initial setup only asks for the five essential model fields", () => {
-  assert.deepEqual([...INITIAL_SETUP_FIELDS], ["provider", "base_url", "api_key", "model", "review_model", "save"]);
+test("initial setup separates the supplier name from the compatible protocol", () => {
+  assert.deepEqual(
+    [...INITIAL_SETUP_FIELDS],
+    ["vendor", "provider", "base_url", "api_key", "model", "review_model", "save"],
+  );
 });
 
-test("setup draft restores the five essential values from saved config", () => {
+test("setup draft restores the essential values from saved config", () => {
   const config: LlmConfig = {
     configured: true,
     has_api_key: true,
+    vendor: "OpenAI",
     provider: "openai",
     base_url: "https://api.openai.com/v1",
     model: "gpt-4.1-mini",
@@ -50,6 +55,7 @@ test("setup draft restores the five essential values from saved config", () => {
     gate: { model: "cheap-gate-model", max_output_tokens: 512, timeout_profile: "gate" },
   });
   assert.equal(result.max_output_tokens, "2048");
+  assert.equal(result.vendor, "OpenAI");
   assert.equal(result.routes.includes("api_key"), false);
   assert.equal(result.review_model, "cheap-gate-model");
   assert.deepEqual(JSON.parse(result.timeout_profiles), { gate: { read: 45, stream_read: 50 } });
@@ -59,6 +65,7 @@ test("setup saves only essential fields and clears legacy advanced settings", ()
   const result = buildLlmConfigInput(draft({ review_model: "review-model" }));
 
   assert.deepEqual(result, {
+    vendor: "OpenAI",
     provider: "openai",
     base_url: "https://api.openai.com/v1",
     model: "gpt-4.1-mini",

@@ -20,7 +20,6 @@ class GeminiAdapter(OpenAIAdapter):
     capabilities = ProviderCapabilities(
         streaming=True,
         tool_calls=True,
-        reasoning=True,
         prefix_cache_key=False,
     )
 

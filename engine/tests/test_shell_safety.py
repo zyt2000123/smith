@@ -15,8 +15,8 @@ import sys
 from pathlib import Path
 
 from engine.safety.tool_guard import ToolGuard
-from engine.tool import environment as environment_module
-from engine.tool.environment import MAX_OUTPUT, LocalExecutionEnvironment
+from engine.sandbox import host as environment_module
+from engine.sandbox import MAX_OUTPUT, LocalExecutionEnvironment
 from engine.tool.interface import ToolCall
 from engine.tool.registry import ToolRegistry
 

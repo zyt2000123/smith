@@ -898,8 +898,8 @@ async function submitSetup(
   const state = getState();
   if (activeField === "save") {
     const draft = state.setupDraft;
-    if (!draft.base_url.trim() || !draft.model.trim()) {
-      state.set({ statusLine: "Base URL and model required." });
+    if (!draft.vendor.trim() || !draft.base_url.trim() || !draft.model.trim()) {
+      state.set({ statusLine: "Supplier name, base URL, and model required." });
       return;
     }
     if (!draft.api_key.trim() && !configHasApiKey) {

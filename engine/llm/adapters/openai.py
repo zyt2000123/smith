@@ -19,7 +19,7 @@ from ..contracts import (
     ToolCallData,
 )
 from ..events import ProviderEvent, ProviderEventType, normalize_finish_reason
-from ._http import HTTPAdapterMixin
+from ._http import HTTPAdapterMixin, SSEStreamLimiter
 from ._retry import MAX_RETRIES, is_retryable_status, retry_after_seconds
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,6 @@ class OpenAIAdapter(HTTPAdapterMixin):
     capabilities = ProviderCapabilities(
         streaming=True,
         tool_calls=True,
-        reasoning=True,
         prefix_cache_key=True,
     )
     _completion_path = "/chat/completions"
@@ -50,6 +49,7 @@ class OpenAIAdapter(HTTPAdapterMixin):
             base_url=self.base_url,
             headers={"Authorization": f"Bearer {self.api_key}"},
             timeout=self.timeouts.stream_timeout(),
+            trust_env=False,
         )
 
     async def complete(self, request: LLMRequest) -> ChatResponse:
@@ -93,11 +93,14 @@ class OpenAIAdapter(HTTPAdapterMixin):
                 response = await self._http.send(http_request, stream=True)
                 response.raise_for_status()
                 yield ProviderEvent(ProviderEventType.RESPONSE_CREATED, {"model": self.model})
+                limiter = SSEStreamLimiter()
                 async for line in response.aiter_lines():
+                    limiter.consume_line(line)
                     if not line.startswith("data:"):
                         continue
                     payload = line[5:].lstrip(" ")
                     if payload.strip() == "[DONE]":
+                        limiter.finish_event()
                         saw_done = True
                         break
 
@@ -163,6 +166,7 @@ class OpenAIAdapter(HTTPAdapterMixin):
                     finish_reason = choice.get("finish_reason")
                     if isinstance(finish_reason, str):
                         raw_finish_reason = finish_reason
+                    limiter.finish_event()
 
                 if not saw_done:
                     raise LLMResponseError("Provider stream ended before the [DONE] sentinel.")

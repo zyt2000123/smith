@@ -25,7 +25,7 @@ from ..contracts import (
     ToolCallData,
 )
 from ..events import ProviderEvent, ProviderEventType, normalize_finish_reason
-from ._http import HTTPAdapterMixin
+from ._http import HTTPAdapterMixin, SSEStreamLimiter
 from ._retry import MAX_RETRIES, is_retryable_status, retry_after_seconds
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,6 @@ class AnthropicAdapter(HTTPAdapterMixin):
     capabilities = ProviderCapabilities(
         streaming=True,
         tool_calls=True,
-        reasoning=True,
         prefix_cache_key=False,
     )
     _completion_path = "/v1/messages"
@@ -65,6 +64,7 @@ class AnthropicAdapter(HTTPAdapterMixin):
                 "content-type": "application/json",
             },
             timeout=self.timeouts.stream_timeout(),
+            trust_env=False,
         )
 
     async def complete(self, request: LLMRequest) -> ChatResponse:
@@ -475,10 +475,13 @@ class AnthropicAdapter(HTTPAdapterMixin):
     async def _iter_sse(response: httpx.Response) -> AsyncIterator[tuple[str | None, str]]:
         event_name: str | None = None
         data_lines: list[str] = []
+        limiter = SSEStreamLimiter()
         async for line in response.aiter_lines():
+            limiter.consume_line(line)
             if line == "":
                 if data_lines:
                     yield event_name, "\n".join(data_lines)
+                    limiter.finish_event()
                 event_name = None
                 data_lines = []
                 continue

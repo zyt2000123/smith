@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from engine.tool import environment as environment_module
-from engine.tool.environment import (
+from engine.sandbox import host as environment_module
+from engine.sandbox import (
     MAX_OUTPUT,
     CommandResult,
     ExecutionEnvironment,
@@ -354,6 +354,33 @@ def test_registry_allows_either_tools_under_any_environment() -> None:
     assert result.content == "env=sandbox"
 
 
+def test_registry_routes_host_and_sandbox_tools_to_their_declared_backends() -> None:
+    class FakeSandbox:
+        name = "sandbox"
+
+        async def run_command(
+            self, command=None, *, argv=None, cwd=None, timeout_seconds=30.0, env=None
+        ) -> CommandResult:
+            return CommandResult(exit_code=0)
+
+    registry = ToolRegistry()
+
+    async def probe(*, environment=None) -> str:
+        return f"env={environment.name}"
+
+    registry.register("host_probe", "", {}, probe, execution_environment="host")
+    registry.register("sandbox_probe", "", {}, probe, execution_environment="sandbox")
+    registry.bind_execution_environment(FakeSandbox())
+
+    host = asyncio.run(registry.execute(ToolCall(id="host", name="host_probe")))
+    sandbox = asyncio.run(
+        registry.execute(ToolCall(id="sandbox", name="sandbox_probe"))
+    )
+
+    assert host.content == "env=host"
+    assert sandbox.content == "env=sandbox"
+
+
 def test_git_ops_runs_through_the_environment_end_to_end(tmp_path: Path) -> None:
     init = asyncio.run(
         LocalExecutionEnvironment().run_command(argv=["git", "init", str(tmp_path)])
@@ -362,7 +389,6 @@ def test_git_ops_runs_through_the_environment_end_to_end(tmp_path: Path) -> None
 
     registry = ToolRegistry()
     registry.load_providers(ROOT / "agents" / "tools")
-
     result = asyncio.run(
         registry.execute(
             ToolCall(

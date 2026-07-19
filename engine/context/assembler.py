@@ -36,7 +36,9 @@ _RUNTIME_CONTEXT_FENCE = (
     "The following fields are authoritative, non-secret runtime facts. If the user asks "
     "about a listed field, answer it directly in this response. Do not claim that you "
     "cannot inspect it or ask permission to look it up. Never reveal API keys, credentials, "
-    "base URLs, or configuration that is not listed here."
+    "base URLs, or configuration that is not listed here. When current_vendor and "
+    "current_provider are both listed, describe the former as the supplier and the latter "
+    "as the compatibility protocol; never conflate them."
 )
 
 _log = logging.getLogger(__name__)

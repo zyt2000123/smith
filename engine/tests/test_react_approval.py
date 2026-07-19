@@ -26,7 +26,10 @@ def test_react_loop_executes_a_guarded_tool_only_after_approval(tmp_path: Path) 
             Path(path).write_text(content, encoding="utf-8")
             return "written"
 
-        registry.register("write_file", "Write", {}, write_file)
+        registry.register(
+            "write_file", "Write", {}, write_file,
+            permission_level="write", approval_policy="policy", side_effect="write",
+        )
         guard = ToolGuard(tmp_path / "missing-rules.json", allowed_dirs=[tmp_path])
         guard.bind_definitions(registry.definitions())
         llm = _ApprovalLLM(target)
@@ -86,7 +89,10 @@ def test_react_loop_treats_approval_timeout_as_blocked_without_executing_tool(tm
             Path(path).write_text(content, encoding="utf-8")
             return "written"
 
-        registry.register("write_file", "Write", {}, write_file)
+        registry.register(
+            "write_file", "Write", {}, write_file,
+            permission_level="write", approval_policy="policy", side_effect="write",
+        )
         guard = ToolGuard(tmp_path / "missing-rules.json", allowed_dirs=[tmp_path])
         guard.bind_definitions(registry.definitions())
         events = []

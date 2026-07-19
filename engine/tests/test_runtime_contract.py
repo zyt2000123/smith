@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -235,6 +236,9 @@ def test_prepare_runtime_scopes_tool_paths_to_the_request_working_dir(tmp_path: 
             lambda **_kwargs: "OK",
             path_args=("path",),
             is_write_tool=True,
+            permission_level="write",
+            approval_policy="policy",
+            side_effect="write",
         )
         services.tool_registry.register(
             "shell",
@@ -242,6 +246,10 @@ def test_prepare_runtime_scopes_tool_paths_to_the_request_working_dir(tmp_path: 
             {"type": "object", "properties": {"cwd": {"type": "string"}}},
             lambda **_kwargs: "OK",
             path_args=("cwd",),
+            opaque_command=True,
+            permission_level="execute",
+            approval_policy="always",
+            side_effect="external",
         )
         guard = ToolGuard(tmp_path / "missing-rules.json")
         services.tool_guard = guard
@@ -275,6 +283,79 @@ def test_prepare_runtime_scopes_tool_paths_to_the_request_working_dir(tmp_path: 
     assert guard.check(write).allowed
     assert not guard.check(shell).allowed
     assert not guard.check(escaped).allowed
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt is macOS-only")
+def test_prepare_runtime_routes_sandbox_tools_to_macos_seatbelt(tmp_path: Path) -> None:
+    async def run() -> tuple[Path, object]:
+        runtime, services, _ = _runtime(tmp_path)
+        project_dir = tmp_path / "sandboxed_project"
+        project_dir.mkdir()
+        (runtime.profile_dir / "config.yaml").write_text(
+            "tools:\n  enabled: [sandbox_probe]\n", encoding="utf-8"
+        )
+        (runtime.agents_dir / "tools" / "sandbox_probe.py").write_text(
+            "TOOL_META = {\n"
+            "    'name': 'sandbox_probe',\n"
+            "    'parameters': {'type': 'object', 'properties': {}},\n"
+            "    'execution_environment': 'sandbox',\n"
+            "}\n"
+            "async def execute(*, environment=None):\n"
+            "    return f'env={environment.name}'\n",
+            encoding="utf-8",
+        )
+        await prepare_runtime(
+            EngineRequest(message="Inspect the project", working_dir=str(project_dir)),
+            runtime,
+            services,
+        )
+        result = await services.tool_registry.execute(
+            ToolCall(id="sandbox", name="sandbox_probe", arguments={})
+        )
+        return project_dir, result
+
+    project_dir, result = asyncio.run(run())
+
+    assert not result.is_error, result.content
+    assert result.content == "env=sandbox"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt is macOS-only")
+def test_prepare_runtime_executes_builtin_shell_inside_macos_seatbelt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def run() -> object:
+        runtime, services, _ = _runtime(tmp_path)
+        project_dir = tmp_path / "sandboxed_shell_project"
+        project_dir.mkdir()
+        monkeypatch.setenv("SMITH_RUNTIME_SECRET", "must-not-leak")
+        (runtime.profile_dir / "config.yaml").write_text(
+            "tools:\n  enabled: [shell]\n", encoding="utf-8"
+        )
+        shell_source = (
+            Path(__file__).resolve().parents[2] / "agents" / "tools" / "shell.py"
+        )
+        (runtime.agents_dir / "tools" / "shell.py").write_text(
+            shell_source.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        await prepare_runtime(
+            EngineRequest(message="Inspect the project", working_dir=str(project_dir)),
+            runtime,
+            services,
+        )
+        return await services.tool_registry.execute(
+            ToolCall(
+                id="shell",
+                name="shell",
+                arguments={"command": 'printf "%s|%s" "$SMITH_RUNTIME_SECRET" "$HOME"'},
+            )
+        )
+
+    result = asyncio.run(run())
+
+    assert not result.is_error, result.content
+    assert "must-not-leak" not in result.content
+    assert "sandboxed_shell_project" in result.content
 
 
 def test_prepare_runtime_binds_memory_ops_but_keeps_it_hidden(tmp_path: Path) -> None:

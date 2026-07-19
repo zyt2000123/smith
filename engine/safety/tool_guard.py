@@ -23,26 +23,6 @@ class PermissionLevel(Enum):
     DESTRUCTIVE = "destructive"
 
 
-TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
-    "read_file": PermissionLevel.READ,
-    "grep": PermissionLevel.READ,
-    "glob_files": PermissionLevel.READ,
-    "list_dir": PermissionLevel.READ,
-    "web_search": PermissionLevel.READ,
-    "web_fetch": PermissionLevel.READ,
-    "websearch": PermissionLevel.READ,
-    "webfetch": PermissionLevel.READ,
-    "memory_ops": PermissionLevel.WRITE,
-    "skill_load": PermissionLevel.READ,
-    "todo": PermissionLevel.READ,
-    "write_file": PermissionLevel.WRITE,
-    "edit_file": PermissionLevel.WRITE,
-    "skill_manage": PermissionLevel.WRITE,
-    "git_ops": PermissionLevel.WRITE,
-    "shell": PermissionLevel.EXECUTE,
-}
-
-
 @dataclass
 class GuardResult:
     allowed: bool
@@ -308,32 +288,6 @@ def _rule_match_targets(arguments: dict) -> list[str]:
 # ── Main guard ──────────────────────────────────────────────
 
 class ToolGuard:
-    # Fallback lookup tables — used when a tool has no security metadata on its
-    # ToolDefinition.  New tools should declare metadata instead of adding rows.
-    _PATH_ARGS: dict[str, tuple[str, ...]] = {
-        "read_file": ("path", "file_path"),
-        "write_file": ("path", "file_path"),
-        "edit_file": ("path", "file_path"),
-        "grep": ("path",),
-        "glob_files": ("path",),
-        "list_dir": ("path",),
-        "git_ops": ("cwd", "path"),
-        "shell": ("cwd",),
-    }
-    _LIST_PATH_ARGS: dict[str, tuple[str, ...]] = {
-        "git_ops": ("files",),
-    }
-    # These legacy provider defaults are process-CWD fallbacks unless the
-    # registry has already materialized them within the scoped workspace.
-    _NONEMPTY_PATH_DEFAULTS: dict[str, frozenset[str]] = {
-        "grep": frozenset({"path"}),
-        "glob_files": frozenset({"path"}),
-        "list_dir": frozenset({"path"}),
-    }
-    _WRITE_TOOLS = frozenset({"write_file", "edit_file"})
-    _APPROVAL_TOOLS = frozenset({"write_file", "edit_file", "git_ops", "shell"})
-    _READ_ONLY_GIT_ACTIONS = frozenset({"status", "diff", "discover"})
-
     def __init__(
         self,
         rules_path: Path,
@@ -367,20 +321,15 @@ class ToolGuard:
         """Constrain project-facing file tools to one resolved workspace."""
         self.file_guard.set_working_directory(working_dir)
 
-    def _resolve_path_metadata(self, tool_name: str) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
-        """Return (path_args, list_path_args, is_write) for *tool_name*.
-
-        Checks tool-declared metadata first, falls back to the hardcoded
-        tables for tools that haven't declared their own metadata yet.
-        """
+    def _resolve_path_metadata(
+        self,
+        tool_name: str,
+    ) -> tuple[tuple[str, ...], tuple[str, ...], bool, bool]:
+        """Return path and opaque-command metadata for a registered tool."""
         defn = self._tool_registry.get(tool_name)
-        if defn is not None and (defn.path_args or defn.list_path_args):
-            return defn.path_args, defn.list_path_args, defn.is_write_tool
-
-        path_args = self._PATH_ARGS.get(tool_name, ())
-        list_path_args = self._LIST_PATH_ARGS.get(tool_name, ())
-        is_write = tool_name in self._WRITE_TOOLS
-        return path_args, list_path_args, is_write
+        if defn is None:
+            return (), (), False, False
+        return defn.path_args, defn.list_path_args, defn.is_write_tool, defn.opaque_command
 
     def _path_arg_uses_nonempty_default(self, tool_name: str, arg_name: str) -> bool:
         """Whether an omitted path would make the provider use an implicit path."""
@@ -390,11 +339,11 @@ class ToolGuard:
             parameter = properties.get(arg_name) if isinstance(properties, dict) else None
             default = parameter.get("default") if isinstance(parameter, dict) else None
             return isinstance(default, str) and bool(default)
-        return arg_name in self._NONEMPTY_PATH_DEFAULTS.get(tool_name, frozenset())
+        return False
 
     def _check_file_paths(self, tool_call: ToolCall) -> GuardResult | None:
-        path_args, list_path_args, is_write = self._resolve_path_metadata(tool_call.name)
-        if not path_args and not list_path_args and tool_call.name != "shell":
+        path_args, list_path_args, is_write, opaque_command = self._resolve_path_metadata(tool_call.name)
+        if not path_args and not list_path_args and not opaque_command:
             return None
 
         paths_to_check: list[tuple[str, bool]] = []
@@ -433,7 +382,7 @@ class ToolGuard:
                     p = Path(cwd) / p
                 paths_to_check.append((str(p), is_write))
 
-        if tool_call.name == "shell":
+        if opaque_command:
             cmd = tool_call.arguments.get("command", "")
             if self.file_guard.is_working_directory_scoped:
                 return GuardResult(
@@ -467,9 +416,11 @@ class ToolGuard:
         return None
 
     def _resolve_permission_level(self, tool_name: str) -> PermissionLevel:
-        """Return the permission level for *tool_name*.
+        """Return the permission level declared by the registered tool.
 
-        Tool-declared metadata wins; falls back to ``TOOL_PERMISSIONS``.
+        Unknown or unregistered tools are treated as host execution. This is
+        intentionally conservative and avoids a second, name-based security
+        registry drifting away from the provider metadata.
         """
         defn = self._tool_registry.get(tool_name)
         if defn is not None and defn.permission_level:
@@ -477,28 +428,24 @@ class ToolGuard:
                 return PermissionLevel(defn.permission_level)
             except ValueError:
                 pass
-        return TOOL_PERMISSIONS.get(tool_name, PermissionLevel.EXECUTE)
+        return PermissionLevel.EXECUTE
 
     def _resolve_approval_policy(self, tool_name: str) -> str:
-        """Resolve explicit metadata first, then preserve legacy tool safety."""
+        """Resolve approval requirements from registered tool metadata."""
         defn = self._tool_registry.get(tool_name)
-        if defn is not None:
-            if defn.approval_policy != "never":
-                return defn.approval_policy
-            if (
-                defn.is_write_tool
-                or defn.side_effect != "none"
-                or defn.permission_level in {"write", "execute", "destructive"}
-            ):
-                return "policy"
-        return "policy" if tool_name in self._APPROVAL_TOOLS else "never"
+        if defn is None:
+            return "always"
+        if defn.approval_policy != "never":
+            return defn.approval_policy
+        if (
+            defn.is_write_tool
+            or defn.side_effect != "none"
+            or defn.permission_level in {"write", "execute", "destructive"}
+        ):
+            return "policy"
+        return "never"
 
     def _requires_approval(self, tool_call: ToolCall) -> bool:
-        # A shell command is opaque host execution.  The path extractor above
-        # intentionally does not claim to sandbox shell grammar, so even a
-        # command that looks read-only must be explicitly approved.
-        if tool_call.name == "shell":
-            return True
         policy = self._resolve_approval_policy(tool_call.name)
         if policy == "never":
             return False
@@ -508,8 +455,6 @@ class ToolGuard:
         action = str(tool_call.arguments.get("action") or "").lower()
         if definition is not None and action in definition.read_actions:
             return False
-        if tool_call.name == "git_ops":
-            return str(tool_call.arguments.get("action") or "").lower() not in self._READ_ONLY_GIT_ACTIONS
         return True
 
     def check(self, tool_call: ToolCall) -> GuardResult:

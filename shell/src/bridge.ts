@@ -51,7 +51,7 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function formatTraceStatus(diagnosis: RunDiagnosis, proposal: RunImprovementProposal): string {
+function formatTraceStatus(diagnosis: RunDiagnosis, proposal: RunImprovementProposal | null): string {
   const heading = `Trace · ${diagnosis.run_id.slice(0, 10)} · ${diagnosis.status === "healthy" ? "healthy" : "attention"}`;
   const details = [
     `Summary: ${diagnosis.summary}`,
@@ -59,8 +59,9 @@ function formatTraceStatus(diagnosis: RunDiagnosis, proposal: RunImprovementProp
     diagnosis.primary_category ? `Category: ${diagnosis.primary_category}` : null,
     diagnosis.evidence.length ? `Evidence: ${diagnosis.evidence.join(", ")}` : null,
     diagnosis.recommendation ? `Next: ${diagnosis.recommendation}` : null,
-    proposal.status === "proposed" ? `Proposal: ${proposal.title} (approval required)` : null,
-    proposal.suggested_change ? `Change: ${proposal.suggested_change}` : null,
+    proposal?.status === "proposed" ? `Proposal: ${proposal.title} (approval required)` : null,
+    proposal?.suggested_change ? `Change: ${proposal.suggested_change}` : null,
+    proposal === null ? "Proposal: unavailable; RCA remains available." : null,
   ].filter((line): line is string => Boolean(line));
   return [heading, ...details].join("\n");
 }
@@ -421,18 +422,28 @@ export class NodeBridge {
       statusLine: "Loading observability…",
     });
     try {
-      const [observabilityRuns, observabilityHealth, observabilityIncidents] = await Promise.all([
+      const [runsResult, healthResult, incidentsResult] = await Promise.allSettled([
         listObservabilityRuns(baseUrl),
         getObservabilityHealth(baseUrl),
         listRunIncidents(baseUrl),
       ]);
+      if (runsResult.status === "rejected") throw runsResult.reason;
       if (requestId !== this.observabilityRequestId || this.s.panel !== "runs") return;
+      const observabilityRuns = runsResult.value;
+      const observabilityHealth = healthResult.status === "fulfilled" ? healthResult.value : null;
+      const observabilityIncidents = incidentsResult.status === "fulfilled" ? incidentsResult.value : null;
+      const unavailable = [
+        healthResult.status === "rejected" ? "health" : null,
+        incidentsResult.status === "rejected" ? "incidents" : null,
+      ].filter((value): value is string => value !== null);
       this.s.set({
         panel: "runs",
         observabilityRuns,
         observabilityHealth,
         observabilityIncidents,
-        statusLine: `${observabilityRuns.length} recorded run(s) · ${observabilityIncidents.length} incident(s).`,
+        statusLine: `${observabilityRuns.length} recorded run(s) · ${observabilityIncidents?.length ?? 0} incident(s).${
+          unavailable.length ? ` ${unavailable.join(" and ")} unavailable.` : ""
+        }`,
       });
     } catch (error) {
       if (requestId !== this.observabilityRequestId || this.s.panel !== "runs") return;
@@ -456,10 +467,13 @@ export class NodeBridge {
         this.s.set({ statusLine: "No recorded runs yet." });
         return;
       }
-      const [diagnosis, proposal] = await Promise.all([
+      const [diagnosisResult, proposalResult] = await Promise.allSettled([
         getRunDiagnosis(baseUrl, runId),
         getRunImprovementProposal(baseUrl, runId),
       ]);
+      if (diagnosisResult.status === "rejected") throw diagnosisResult.reason;
+      const diagnosis = diagnosisResult.value;
+      const proposal = proposalResult.status === "fulfilled" ? proposalResult.value : null;
       this.s.pushSystemLine(formatTraceStatus(diagnosis, proposal));
       this.s.set({ panel: "chat", statusLine: `Trace for ${runId.slice(0, 10)}.` });
     } catch (error) {

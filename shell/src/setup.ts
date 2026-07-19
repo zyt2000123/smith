@@ -10,9 +10,18 @@ export const PROVIDER_PRESETS = {
 const LLM_USAGES = ["interactive", "gate", "background"] as const satisfies readonly LlmUsage[];
 const TIMEOUT_FIELDS = ["connect", "read", "stream_read", "write", "pool"] as const;
 
-export const INITIAL_SETUP_FIELDS = ["provider", "base_url", "api_key", "model", "review_model", "save"] as const;
+export const INITIAL_SETUP_FIELDS = [
+  "vendor",
+  "provider",
+  "base_url",
+  "api_key",
+  "model",
+  "review_model",
+  "save",
+] as const;
 
 export const SETUP_FIELDS = [
+  "vendor",
   "provider",
   "base_url",
   "api_key",
@@ -33,7 +42,8 @@ type RouteSecretField = "interactive_api_key" | "gate_api_key" | "background_api
 type JsonRecord = Record<string, unknown>;
 
 const SETUP_FIELD_LABELS: Record<SetupField, string> = {
-  provider: "provider",
+  vendor: "supplier name",
+  provider: "compatible protocol (openai | anthropic | gemini)",
   base_url: "base URL",
   model: "model",
   review_model: "review model (optional)",
@@ -103,6 +113,7 @@ function jsonForModels(config: LlmConfig | null): string {
 
 export function createSetupDraft(config: LlmConfig | null): SetupDraft {
   return {
+    vendor: config?.vendor || "",
     provider: config?.provider || "openai",
     base_url: config?.base_url || "",
     model: config?.model || "",
@@ -312,6 +323,7 @@ export function buildLlmConfigInput(draft: SetupDraft): LlmConfigInput {
   const maxOutputTokens = parseMaxOutputTokens(draft.max_output_tokens);
 
   const input: LlmConfigInput = {
+    vendor: draft.vendor.trim(),
     provider: draft.provider.trim(),
     base_url: draft.base_url.trim(),
     model: draft.model.trim(),

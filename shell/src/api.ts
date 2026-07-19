@@ -32,6 +32,8 @@ export type LlmTimeoutProfile = Partial<Record<LlmTimeoutField, number>>;
 export type LlmConfig = {
   configured: boolean;
   has_api_key: boolean;
+  /** Display-only name of the company or relay serving the model. */
+  vendor?: string;
   provider: string;
   model: string;
   base_url: string;
@@ -236,6 +238,7 @@ export type LlmRouteInput = {
 export type LlmTimeoutProfileInput = Partial<Record<LlmTimeoutField, number | null>>;
 
 export type LlmConfigInput = {
+  vendor?: string;
   provider: string;
   api_key?: string | null;
   base_url: string;

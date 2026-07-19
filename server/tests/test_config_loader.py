@@ -110,6 +110,29 @@ llm:
     assert background["timeout"]["stream_read"] == 280.0
 
 
+def test_resolve_llm_config_preserves_vendor_only_as_display_metadata(tmp_path, monkeypatch) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "config.yaml").write_text(
+        """
+llm:
+  vendor: Example Relay
+  provider: openai
+  api_key: key
+  base_url: https://relay.example/v1
+  model: model
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_config, "DATA_DIR", data_dir)
+    monkeypatch.setattr(model_config, "SMITH_PROFILE_DIR", tmp_path / "missing-smith")
+    monkeypatch.setattr(model_config, "AGENT_DIR", tmp_path / "missing-agent")
+
+    resolved = model_config.resolve_llm_config()
+
+    assert resolved["vendor"] == "Example Relay"
+
+
 def test_resolve_llm_config_rejects_a_non_mapping_llm_config(tmp_path, monkeypatch) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -224,6 +247,7 @@ def test_build_engine_runtime_selects_interactive_gate_and_background_clients(mo
         selected_usages.append(usage)
         return {
             "usage": usage.value,
+            "vendor": "Example Relay",
             "provider": "openai",
             "model": f"{usage.value}-model",
             "api_key": "must-not-reach-the-prompt",
@@ -246,6 +270,7 @@ def test_build_engine_runtime_selects_interactive_gate_and_background_clients(mo
 
     assert runtime.agent_id == "smith-id"
     assert runtime.metadata == {
+        "current_vendor": "Example Relay",
         "current_provider": "openai",
         "current_model": "interactive-model",
     }
@@ -280,7 +305,7 @@ def test_llm_client_manager_reuses_clients_for_identical_config(monkeypatch) -> 
     }
 
     first = manager.get_for_config(dict(config))
-    second = manager.get_for_config(dict(config))
+    second = manager.get_for_config(dict(config, vendor="Example Relay"))
 
     assert first is second
     assert clients == [first]

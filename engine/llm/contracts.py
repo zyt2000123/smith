@@ -88,7 +88,6 @@ class ProviderCapabilities:
 
     streaming: bool = True
     tool_calls: bool = True
-    reasoning: bool = False
     prefix_cache_key: bool = False
 
 

@@ -181,7 +181,7 @@ Type `/` for commands · `/help` for all
 
 ### `SetupPanel` 组件
 
-初始配置向导面板，当 `mode === "setup"` 时显示。使用 `SETUP_FIELDS`（`provider` / `base_url` / `model` / `api_key` / `save`）逐字段引导用户填写 LLM 配置。API key 字段以 `"•"` 掩码显示。
+初始配置向导面板，当 `mode === "setup"` 时显示。使用 `SETUP_FIELDS`（`vendor` / `provider` / `base_url` / `model` / `api_key` / `save`）逐字段引导用户填写 LLM 配置。`vendor` 是供应商或中转服务名称；`provider` 是兼容协议（OpenAI / Anthropic / Gemini）。API key 字段以 `"•"` 掩码显示。
 
 ### `SessionsPanel` / `PluginsPanel` / `SkillsPanel`
 
@@ -509,7 +509,7 @@ export type Panel = "welcome" | "chat" | "sessions" | "plugins" | "skills";
 | `slashIndex` | `number` | `0` | 斜杠菜单选中项 |
 | `welcomeNotice` | `{text, tone} \| null` | `null` | 欢迎页通知 |
 
-`SetupDraft` 默认值：`{ provider: "openai", base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini", api_key: "" }`。
+`SetupDraft` 默认值：`{ vendor: "", provider: "openai", base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini", api_key: "" }`。
 
 ### `AppActions` 方法
 
@@ -856,12 +856,12 @@ export const PROVIDER_PRESETS = {
 };
 ```
 
-选择 provider 时自动填充 `base_url` 和 `model`。目前仅支持 `openai` 和 `anthropic` 两个预设。
+选择兼容协议时自动填充 `base_url` 和 `model`。支持 `openai`、`anthropic` 和 `gemini` 三个预设；供应商名称独立保存，不影响协议选择。
 
 ### 表单字段
 
 ```typescript
-export const SETUP_FIELDS = ["provider", "base_url", "model", "api_key", "save"] as const;
+export const SETUP_FIELDS = ["vendor", "provider", "base_url", "model", "api_key", "save"] as const;
 ```
 
 字段导航支持 Tab/上下键，wrap 与 clamp 两种模式（键盘导航时 wrap，Enter 提交时 clamp）。

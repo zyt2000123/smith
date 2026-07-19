@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
 
-from .environment import ExecutionEnvironment, LocalExecutionEnvironment
+from engine.sandbox import ExecutionEnvironment, LocalExecutionEnvironment
 from .interface import ToolCall, ToolDefinition, ToolResult
 from .truncation import truncate_output
 
@@ -49,7 +49,8 @@ class ToolRegistry:
         self._enabled: set[str] | None = None
         self._execution_ledger: ToolExecutionLedger | None = None
         self._working_dir: Path | None = None
-        self._environment: ExecutionEnvironment = LocalExecutionEnvironment()
+        self._host_environment: ExecutionEnvironment = LocalExecutionEnvironment()
+        self._sandbox_environment: ExecutionEnvironment | None = None
         self._wants_environment: set[str] = set()
 
     def register(
@@ -59,6 +60,8 @@ class ToolRegistry:
         parameters: dict,
         func: Callable,
         *,
+        hidden: bool = False,
+        opaque_command: bool = False,
         path_args: Sequence[str] = (),
         list_path_args: Sequence[str] = (),
         is_write_tool: bool = False,
@@ -74,6 +77,10 @@ class ToolRegistry:
     ) -> None:
         if name in self._tools:
             raise ValueError(f"Duplicate tool registered: {name}")
+        if not isinstance(hidden, bool):
+            raise ValueError(f"Tool {name} hidden must be a boolean")
+        if not isinstance(opaque_command, bool):
+            raise ValueError(f"Tool {name} opaque_command must be a boolean")
         if permission_level and permission_level not in _VALID_PERMISSION_LEVELS:
             raise ValueError(
                 f"Tool {name} has invalid permission_level: {permission_level!r} "
@@ -112,6 +119,8 @@ class ToolRegistry:
             name=name,
             description=description,
             parameters=parameters,
+            hidden=hidden,
+            opaque_command=opaque_command,
             path_args=tuple(path_args),
             list_path_args=tuple(list_path_args),
             is_write_tool=bool(is_write_tool or resolved_side_effect != "none"),
@@ -137,7 +146,7 @@ class ToolRegistry:
 
         Each file should define a TOOL_META dict and an execute function.
         TOOL_META keys: name, description, parameters (JSON Schema dict).
-        Optional security metadata keys: path_args, list_path_args,
+        Optional metadata keys: hidden, opaque_command, path_args, list_path_args,
         is_write_tool, permission_level, approval_policy, read_actions — propagated onto the
         ToolDefinition so safety modules can use them instead of hardcoded
         lookup tables.
@@ -172,6 +181,8 @@ class ToolRegistry:
                         description=meta.get("description", ""),
                         parameters=parameters,
                         func=execute_fn,
+                        hidden=meta.get("hidden", False),
+                        opaque_command=meta.get("opaque_command", False),
                         path_args=_meta_str_tuple(meta, "path_args", py_file),
                         list_path_args=_meta_str_tuple(meta, "list_path_args", py_file),
                         is_write_tool=bool(meta.get("is_write_tool", False)),
@@ -231,6 +242,18 @@ class ToolRegistry:
             return names
         return [name for name in names if name in self._enabled]
 
+    def list_visible_tool_names(
+        self,
+        *,
+        include_disabled: bool = False,
+        include_hidden: bool = False,
+    ) -> list[str]:
+        """List tool names visible to a model-facing default configuration."""
+        names = self.list_tool_names(include_disabled=include_disabled)
+        if include_hidden:
+            return names
+        return [name for name in names if not self._tools[name][0].hidden]
+
     def get(self, name: str) -> ToolDefinition | None:
         """Return a tool's public contract for policy enforcement."""
         entry = self._tools.get(_canonical_tool_name(name))
@@ -251,8 +274,29 @@ class ToolRegistry:
         self._execution_ledger = ledger
 
     def bind_execution_environment(self, environment: ExecutionEnvironment | None) -> None:
-        """Bind where side-effecting tool commands run (default: local host)."""
-        self._environment = environment if environment is not None else LocalExecutionEnvironment()
+        """Bind an execution backend without replacing the host backend.
+
+        Tool definitions declare ``host``, ``sandbox``, or ``either``.  A
+        sandbox binding augments the always-present host backend; it must
+        never silently redirect host-only tools into the sandbox or vice versa.
+        """
+        if environment is None:
+            self._sandbox_environment = None
+        elif environment.name == "host":
+            self._host_environment = environment
+        elif environment.name == "sandbox":
+            self._sandbox_environment = environment
+        else:
+            raise ValueError(f"Unsupported execution environment: {environment.name!r}")
+
+    def _environment_for(
+        self, required_environment: str
+    ) -> ExecutionEnvironment | None:
+        if required_environment == "host":
+            return self._host_environment
+        if required_environment == "sandbox":
+            return self._sandbox_environment
+        return self._sandbox_environment or self._host_environment
 
     def bind_working_directory(self, working_dir: str | Path | None) -> None:
         """Bind the root used for relative paths during one agent run."""
@@ -272,10 +316,18 @@ class ToolRegistry:
         are materialized before resolving: otherwise an omitted argument lets a
         provider silently fall back to the process working directory.
         """
+        tool_name = _canonical_tool_name(call.name)
         if self._working_dir is None:
-            return call
+            if tool_name == call.name:
+                return call
+            return ToolCall(
+                id=call.id,
+                name=tool_name,
+                arguments=dict(call.arguments),
+                idempotency_key=call.idempotency_key,
+            )
 
-        entry = self._tools.get(_canonical_tool_name(call.name))
+        entry = self._tools.get(tool_name)
         if entry is None:
             return call
 
@@ -304,7 +356,7 @@ class ToolRegistry:
 
         return ToolCall(
             id=call.id,
-            name=call.name,
+            name=tool_name,
             arguments=arguments,
             idempotency_key=call.idempotency_key,
         )
@@ -361,16 +413,14 @@ class ToolRegistry:
             )
 
         defn, func = entry
-        # ponytail: only LocalExecutionEnvironment ("host") exists today; tools
-        # declaring "sandbox" are rejected explicitly instead of silently
-        # falling back to the host — add a sandbox adapter when one is needed.
         required_env = defn.execution_environment
-        if required_env != "either" and required_env != self._environment.name:
+        environment = self._environment_for(required_env)
+        if environment is None:
             return ToolResult(
                 call_id=call.id,
                 content=(
                     f"Error: tool '{tool_name}' requires the '{required_env}' execution "
-                    f"environment; current environment is '{self._environment.name}'"
+                    "environment, but no matching backend is bound"
                 ),
                 is_error=True,
                 error_kind="environment_unavailable",
@@ -400,7 +450,7 @@ class ToolRegistry:
         if tool_name in self._wants_environment:
             # Injected last so a model-supplied "environment" argument can
             # never smuggle a fake environment past the binding.
-            arguments = {**call.arguments, "environment": self._environment}
+            arguments = {**call.arguments, "environment": environment}
 
         try:
             content = await self._invoke(func, arguments, defn.timeout_seconds)

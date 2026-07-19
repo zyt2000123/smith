@@ -9,6 +9,7 @@ import pytest
 from common.yaml_utils import YamlConfigError
 from engine.llm.adapters.anthropic import AnthropicAdapter
 from engine.llm.adapters.openai import OpenAIAdapter
+from engine.llm.adapters._http import MAX_STREAM_EVENT_BYTES
 from engine.llm.adapters._retry import MAX_RETRY_AFTER_SECONDS, retry_after_seconds
 from engine.llm.client import ProviderClient
 from engine.llm.contracts import GEMINI_OPENAI_BASE_URL, LLMProviderConfig, LLMRequest
@@ -95,6 +96,20 @@ def test_build_llm_client_rejects_unknown_provider() -> None:
             "provider": "not-a-provider",
             "api_key": "key",
             "base_url": "https://example.test",
+            "model": "model",
+        })
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://relay.example/v1", "https://127.0.0.1/v1", "https://localhost/v1"],
+)
+def test_build_llm_client_rejects_insecure_or_private_endpoints(base_url: str) -> None:
+    with pytest.raises(YamlConfigError, match="HTTPS|private or local"):
+        build_llm_client({
+            "provider": "openai",
+            "api_key": "key",
+            "base_url": base_url,
             "model": "model",
         })
 
@@ -385,6 +400,24 @@ def test_openai_stream_malformed_delta_raises() -> None:
 
     client.adapter._http.send = fake_send  # type: ignore[assignment]
     with pytest.raises(_Err, match="delta must be an object"):
+        asyncio.run(_collect_events_generic(client))
+    asyncio.run(client.close())
+
+
+def test_openai_stream_rejects_an_oversized_sse_event() -> None:
+    from engine.llm.contracts import LLMResponseError as _Err
+
+    client = _openai_client()
+
+    async def fake_send(request, *, stream: bool):
+        return httpx.Response(
+            200,
+            request=request,
+            stream=_SseStream([b"data: " + (b"x" * (MAX_STREAM_EVENT_BYTES + 1)) + b"\n\n"]),
+        )
+
+    client.adapter._http.send = fake_send  # type: ignore[assignment]
+    with pytest.raises(_Err, match="stream event exceeds"):
         asyncio.run(_collect_events_generic(client))
     asyncio.run(client.close())
 

@@ -27,6 +27,8 @@ def _config_fingerprint(config: dict[str, Any]) -> str:
 def _normalize_llm_config(config: dict[str, Any]) -> dict[str, Any]:
     """Normalize equivalent LLM configs before cache lookup."""
     normalized = dict(config)
+    # Display metadata must never affect client reuse or provider requests.
+    normalized.pop("vendor", None)
     provider = normalize_provider_name(normalized.get("provider", ""))
     normalized["provider"] = provider
     if provider == "gemini" and not str(normalized.get("base_url") or "").strip():
@@ -76,8 +78,11 @@ def _single_line_runtime_value(value: object) -> str:
 def _interactive_model_metadata(config: dict[str, Any]) -> dict[str, str]:
     """Expose only the active chat route's non-secret identity to the engine."""
     metadata: dict[str, str] = {}
+    vendor = _single_line_runtime_value(config.get("vendor"))
     provider = _single_line_runtime_value(config.get("provider"))
     model = _single_line_runtime_value(config.get("model"))
+    if vendor:
+        metadata["current_vendor"] = vendor
     if provider:
         metadata["current_provider"] = normalize_provider_name(provider)
     if model:

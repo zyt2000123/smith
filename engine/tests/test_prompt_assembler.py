@@ -148,6 +148,7 @@ def test_assembler_marks_runtime_model_metadata_as_directly_answerable(tmp_path:
         FakeToolRegistry(),
         FakeSkillRegistry(),
         {
+            "current_vendor": "Example Relay",
             "current_provider": "openai",
             "current_model": "gpt-test",
         },
@@ -155,6 +156,8 @@ def test_assembler_marks_runtime_model_metadata_as_directly_answerable(tmp_path:
 
     assert "authoritative, non-secret runtime facts" in prompt
     assert "answer it directly" in prompt
+    assert "describe the former as the supplier" in prompt
+    assert "current_vendor: Example Relay" in prompt
     assert "current_provider: openai" in prompt
     assert "current_model: gpt-test" in prompt
 

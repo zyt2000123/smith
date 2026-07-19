@@ -16,6 +16,7 @@ from pathlib import Path
 import asyncio
 import inspect
 import logging
+import sys
 from hashlib import sha256
 from typing import AsyncGenerator, NamedTuple
 from uuid import uuid4
@@ -33,6 +34,7 @@ from engine.context import PromptAssembler, prompt_budget_for_llm
 from engine.react_budget import DEFAULT_MAX_REACT_ITERS
 from engine.safety.fact_gate import FactGate, FactGateContext, use_fact_gate
 from engine.safety.tool_guard import ToolGuard
+from engine.sandbox import MacOSSeatbeltEnvironment
 from engine.skill.executor import execute_skill_events
 from engine.skill.registry import SkillRegistry
 from engine.tool.registry import ToolRegistry
@@ -79,24 +81,6 @@ __all__ = (
 
 logger = logging.getLogger(__name__)
 _RUNTIME_LEARNING_TIMEOUT_SECONDS = 30.0
-
-# Design intent: some tools (memory_ops, search_knowledge, skill_load,
-# skill_manage) are "infrastructure" tools that should be available to the
-# agent but hidden from the user-facing enabled-tools whitelist by default.
-# Ideally each tool would declare ``"hidden": True`` in its TOOL_META so
-# this list is data-driven rather than hardcoded here.
-#
-# TODO: Once engine/tool/interface.py supports a ``hidden`` field on
-# ToolDefinition (and load_providers propagates TOOL_META["hidden"] into it),
-# replace _is_hidden_tool() with a registry query. Until then the names are
-# kept here as a transitional measure.
-_HIDDEN_DEFAULT_TOOLS = frozenset({
-    "memory_ops",
-    "search_knowledge",
-    "skill_load",
-    "skill_manage",
-})
-
 
 # ---------------------------------------------------------------------------
 # Core: routing + dispatch
@@ -321,16 +305,16 @@ def _enabled_tools_from_config(
     tool_registry: ToolRegistry,
     identity: IdentitySpec,
 ) -> list[str]:
-    available = tool_registry.list_tool_names(include_disabled=True)
+    available = tool_registry.list_visible_tool_names(include_disabled=True)
     tools_cfg = profile_config.get("tools") if isinstance(profile_config, dict) else {}
     enabled = tools_cfg.get("enabled") if isinstance(tools_cfg, dict) else None
     if enabled is None:
         # No whitelist configured → default to all non-hidden tools.
-        configured = [name for name in available if name not in _HIDDEN_DEFAULT_TOOLS]
+        configured = available
     elif isinstance(enabled, list):
         configured = [
             name for name in enabled
-            if isinstance(name, str) and name and name not in _HIDDEN_DEFAULT_TOOLS
+            if isinstance(name, str) and name in available
         ]
     else:
         # A malformed whitelist (e.g. `enabled: "shell"`) must fail closed, not
@@ -423,6 +407,10 @@ async def prepare_runtime(
 
     services.tool_registry.load_providers(runtime.agents_dir / "tools")
     services.tool_registry.bind_working_directory(wd)
+    if sys.platform == "darwin":
+        services.tool_registry.bind_execution_environment(
+            MacOSSeatbeltEnvironment(workspace=wd)
+        )
     _bind_snapshot_tools(services, runtime.session_id)
     _bind_memory_ops_tool(services, state_dir)
     _bind_skill_manage_tool(services, state_dir)

@@ -7,6 +7,10 @@ import { BORDER } from "./theme.js";
 import { processingScanSegments, TranscriptEntryView, userMessageBoxProps } from "./transcript.js";
 import { createTurnEntry } from "./transcript-state.js";
 
+function completedTurn(userText: string) {
+  return { ...createTurnEntry(userText), streaming: false };
+}
+
 function stripAnsi(text: string): string {
   const ansiEscape = String.fromCharCode(27);
   return text.replace(new RegExp(`${ansiEscape}\\[[0-?]*[ -/]*[@-~]`, "g"), "");
@@ -21,7 +25,7 @@ test("workflow cards expose non-success terminal labels without mounting Ink", (
 });
 
 test("transcript turns frame user messages while aligning their content with replies", () => {
-  const entry = { ...createTurnEntry("hello"), assistantText: "hi there" };
+  const entry = { ...completedTurn("hello"), assistantText: "hi there" };
   const output = renderToString(<TranscriptEntryView entry={entry} viewMode="compact" />);
 
   assert.match(output, /hello/);
@@ -66,7 +70,7 @@ test("processing placeholder sweeps its bright character from left to right", ()
 
 test("transcript renders simple unlabelled relationship diagrams outside generic code blocks", () => {
   const entry = {
-    ...createTurnEntry("Explain outgoing webhooks"),
+    ...completedTurn("Explain outgoing webhooks"),
     assistantText: `\`\`\`
 用户系统  <——HTTP POST——  云平台
                       (事件发生时)
@@ -83,7 +87,7 @@ test("transcript renders simple unlabelled relationship diagrams outside generic
 
 test("transcript keeps JSON payloads in the code renderer", () => {
   const entry = {
-    ...createTurnEntry("Show an event"),
+    ...completedTurn("Show an event"),
     assistantText: `\`\`\`json
 {
   "event_id": "evt_123"
@@ -97,8 +101,7 @@ test("transcript keeps JSON payloads in the code renderer", () => {
 
 test("transcript renders an invalid smith-ui payload through CodeBlock", () => {
   const entry = {
-    ...createTurnEntry("Show a component"),
-    streaming: false,
+    ...completedTurn("Show a component"),
     blocks: [
       {
         id: "ui-fallback",
@@ -116,7 +119,7 @@ test("transcript renders an invalid smith-ui payload through CodeBlock", () => {
 
 test("transcript keeps ordinary text code in the code renderer", () => {
   const entry = {
-    ...createTurnEntry("Show a command"),
+    ...completedTurn("Show a command"),
     assistantText: `\`\`\`
 curl --request POST https://example.test
 \`\`\``,

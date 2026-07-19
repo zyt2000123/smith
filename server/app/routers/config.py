@@ -61,6 +61,7 @@ class LLMConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    vendor: str | None = None
     provider: str | None = None
     api_key: str | None = None
     base_url: str | None = None

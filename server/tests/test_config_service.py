@@ -135,6 +135,7 @@ def test_config_api_accepts_and_returns_nested_configuration(monkeypatch, tmp_pa
         response = client.post(
             "/api/config/llm",
             json={
+                "vendor": "Example Relay",
                 "provider": "openai",
                 "api_key": "primary-secret",
                 "base_url": "https://primary.example/v1",
@@ -147,6 +148,7 @@ def test_config_api_accepts_and_returns_nested_configuration(monkeypatch, tmp_pa
         )
 
         assert response.status_code == 200
+        assert response.json()["vendor"] == "Example Relay"
         assert response.json()["routes"]["background"] == {
             "model": "cheap-background-model",
             "timeout_profile": "background",
@@ -155,6 +157,48 @@ def test_config_api_accepts_and_returns_nested_configuration(monkeypatch, tmp_pa
         assert response.json()["timeout_profiles"] == {"background": {"read": 240.0, "stream_read": 300.0}}
         assert "api_key" not in response.json()
         assert client.get("/api/config/llm").json()["configured"] is True
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://relay.example/v1", "https://127.0.0.1/v1", "https://localhost/v1"],
+)
+def test_config_api_rejects_insecure_or_private_relay_endpoints(monkeypatch, tmp_path: Path, base_url: str) -> None:
+    monkeypatch.setattr(ConfigService, "_config_path", tmp_path / "config.yaml")
+    app = FastAPI()
+    app.include_router(config_router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/config/llm",
+            json={"provider": "openai", "api_key": "test-key", "base_url": base_url, "model": "test-model"},
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_model_discovery_rejects_a_persisted_local_relay_before_sending_credentials(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+llm:
+  provider: openai
+  api_key: relay-secret
+  base_url: https://localhost/v1
+  model: relay-model
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ConfigService, "_config_path", config_path)
+
+    with pytest.raises(HTTPException, match="private or local") as exc_info:
+        await ConfigService().list_relay_models()
+
+    assert exc_info.value.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -211,6 +255,25 @@ llm:
     assert result == {"models": ["GLM-5.2", "gpt-4.1"]}
     assert calls == [("https://relay.example/v1/models", {"Authorization": "Bearer relay-secret"})]
     assert "secret" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_config_service_rejects_model_discovery_for_native_anthropic(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+llm:
+  provider: anthropic
+  api_key: anthropic-secret
+  base_url: https://api.anthropic.com
+  model: claude-test
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ConfigService, "_config_path", config_path)
+
+    with pytest.raises(HTTPException, match="OpenAI-compatible"):
+        await ConfigService().list_relay_models()
 
 
 def test_config_api_lists_discovered_models_without_exposing_credentials() -> None:

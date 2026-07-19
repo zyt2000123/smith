@@ -53,6 +53,8 @@ export type Mode = "boot" | "setup" | "chat";
 export type SetupFlow = "initial" | "advanced";
 
 export type SetupDraft = {
+  /** Human-readable company or relay name; it does not affect the wire protocol. */
+  vendor: string;
   provider: string;
   base_url: string;
   api_key: string;
@@ -289,6 +291,7 @@ export function createAppStore(initialHistory: string[] = []) {
     historyIndex: -1,
     statusLine: "Booting Smith…",
     setupDraft: {
+      vendor: "",
       provider: "openai",
       base_url: "https://api.openai.com/v1",
       api_key: "",

@@ -14,7 +14,7 @@ import os
 TOOL_META = {
     "name": "shell",
     "description": (
-        "Execute a host shell command from the project directory. Every command requires "
+        "Execute a sandboxed shell command from the project directory. Every command requires "
         "user approval and receives a minimal, credential-free environment."
     ),
     "parameters": {
@@ -37,12 +37,13 @@ TOOL_META = {
         "required": ["command"]
     },
     "path_args": ["cwd"],
+    "opaque_command": True,
     "permission_level": "execute",
     "approval_policy": "always",
     "side_effect": "external",
     "idempotent": False,
     "concurrency": "serial",
-    "execution_environment": "host",
+    "execution_environment": "sandbox",
 }
 
 MAX_TIMEOUT = 120

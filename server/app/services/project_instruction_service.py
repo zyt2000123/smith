@@ -7,7 +7,7 @@ from fastapi import HTTPException
 
 from common.config import SAFETY_RULES_PATH
 from engine.safety.tool_guard import ToolGuard
-from engine.tool.interface import ToolCall
+from engine.tool.interface import ToolCall, ToolDefinition
 
 from ..schemas.project_instruction import ProjectInstructionOut
 
@@ -45,7 +45,21 @@ class ProjectInstructionService:
         if target.exists():
             raise HTTPException(409, "Project instruction path is unsafe")
 
-        guard = ToolGuard(SAFETY_RULES_PATH, allowed_dirs=[])
+        guard = ToolGuard(
+            SAFETY_RULES_PATH,
+            allowed_dirs=[],
+            tool_registry={
+                "write_file": ToolDefinition(
+                    name="write_file",
+                    description="",
+                    path_args=("path",),
+                    is_write_tool=True,
+                    permission_level="write",
+                    approval_policy="policy",
+                    side_effect="write",
+                ),
+            },
+        )
         whitelisted_target = guard.allow_project_instruction_path(project_root)
         if whitelisted_target != target:
             raise HTTPException(409, "Project instruction path is unsafe")

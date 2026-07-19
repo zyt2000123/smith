@@ -9,6 +9,7 @@ import pytest
 from engine.llm.adapters.openai import OpenAIAdapter
 from engine.llm.client import ProviderClient
 from engine.llm.contracts import LLMProviderConfig, LLMResponseError, LLMTimeouts
+from engine.llm.adapters.gemini import GeminiAdapter
 from engine.llm.events import ProviderEventType
 
 
@@ -180,8 +181,8 @@ def test_request_honors_retry_after_header(monkeypatch) -> None:
     assert retry_delays == [7.0]
 
 
-def test_request_failure_includes_bounded_error_body() -> None:
-    """Non-retryable HTTP failures must surface the provider's error body."""
+def test_request_failure_does_not_surface_provider_error_body() -> None:
+    """Remote error bodies can contain secrets and must not reach callers."""
     async def fake_post(url, json):
         return httpx.Response(
             400,
@@ -191,8 +192,9 @@ def test_request_failure_includes_bounded_error_body() -> None:
 
     client = _client_with_post(fake_post)
     try:
-        with pytest.raises(LLMResponseError, match="model not found"):
+        with pytest.raises(LLMResponseError) as exc_info:
             asyncio.run(client.chat([{"role": "user", "content": "hello"}]))
+        assert "model not found" not in str(exc_info.value)
     finally:
         asyncio.run(client.close())
 
@@ -314,6 +316,45 @@ def test_chat_events_exposes_typed_provider_deltas_and_completion() -> None:
         "finish_reason": "tool_calls",
         "raw_finish_reason": "tool_calls",
     }
+
+
+def test_non_streaming_client_emits_normalized_events_without_sse() -> None:
+    client = _make_client()
+    client.stream = False
+    calls: list[bool] = []
+
+    async def fake_send(request, *, stream: bool):
+        calls.append(stream)
+        body = json_mod.dumps({"choices": [{"message": {"content": "complete"}, "finish_reason": "stop"}]}).encode()
+        return httpx.Response(200, request=request, stream=_SseStream([body]))
+
+    client.adapter._http.send = fake_send  # type: ignore[assignment]
+    try:
+        events = asyncio.run(_collect_events(client))
+    finally:
+        asyncio.run(client.close())
+
+    assert calls == [True]
+    assert [event.type for event in events] == [
+        ProviderEventType.RESPONSE_CREATED,
+        ProviderEventType.OUTPUT_TEXT_DELTA,
+        ProviderEventType.RESPONSE_COMPLETED,
+    ]
+    assert events[1].data == {"delta": "complete"}
+
+
+def test_client_rejects_unsupported_prefix_cache_key() -> None:
+    client = ProviderClient(GeminiAdapter(LLMProviderConfig(
+        provider="gemini",
+        api_key="key",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+        model="gemini-test",
+    )))
+    try:
+        with pytest.raises(LLMResponseError, match="prefix cache key"):
+            asyncio.run(client.chat([{"role": "user", "content": "hello"}], prefix_cache_key="cache-key"))
+    finally:
+        asyncio.run(client.close())
 
 
 def test_chat_events_retries_429_before_content(monkeypatch) -> None:

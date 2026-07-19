@@ -33,6 +33,7 @@ packages = [
     "engine.memory",
     "engine.prompt",
     "engine.safety",
+    "engine.sandbox",
     "engine.skill",
     "engine.tool",
 ]

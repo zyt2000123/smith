@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 TOOL_META = {
     "name": "skill_load",
+    "hidden": True,
     "description": "Load a skill definition (SKILL.md) by name. Returns the skill's process and guidelines.",
     "parameters": {
         "type": "object",

@@ -10,7 +10,10 @@ const sourceTests = (await readdir(path.join(shellDir, "src")))
   .sort();
 const compiledTests = sourceTests.map((file) => path.join(shellDir, "dist", file.replace(/\.[cm]?[jt]sx?$/, ".js")));
 
-const result = spawnSync(process.execPath, ["--test", ...compiledTests], {
+// react-ink-markdown creates an internal MessagePort that outlives static
+// renders in Node's test environment. Force exit only after Node has reported
+// every test result, so this third-party handle cannot stall CI.
+const result = spawnSync(process.execPath, ["--test", "--test-force-exit", ...compiledTests], {
   cwd: shellDir,
   stdio: "inherit",
 });

@@ -10,11 +10,13 @@ from fastapi import HTTPException
 from common.config import DATA_DIR
 from common.yaml_utils import YamlConfigError, load_yaml, save_yaml
 from engine.llm.factory import normalize_provider_name
+from engine.llm.model_config import validate_llm_base_url
 from engine.llm.contracts import UnsupportedProviderError
 
 
 _USAGES = frozenset(("interactive", "gate", "background"))
 _BASE_STRING_FIELDS = ("provider", "api_key", "base_url", "model")
+_VENDOR_FIELD = "vendor"
 _ROUTE_STRING_FIELDS = _BASE_STRING_FIELDS
 _ROUTE_FIELDS = frozenset(
     (*_ROUTE_STRING_FIELDS, "stream", "max_output_tokens", "context_window", "timeout_profile")
@@ -77,11 +79,20 @@ class ConfigService:
                 self._invalid(f"{label}.{field} must be a non-empty string")
             if field == "provider":
                 self._validate_provider(value, f"{label}.{field}")
+            if field == "base_url":
+                self._validate_base_url(value, f"{label}.{field}")
 
     def _validate_provider(self, value: object, label: str) -> None:
         try:
             normalize_provider_name(value)
         except UnsupportedProviderError as exc:
+            self._invalid(f"{label}: {exc}")
+
+    def _validate_base_url(self, value: object, label: str) -> None:
+        """Restrict credential-bearing provider calls to public HTTPS endpoints."""
+        try:
+            validate_llm_base_url(value)
+        except YamlConfigError as exc:
             self._invalid(f"{label}: {exc}")
 
     def _validate_max_output_tokens(self, value: object, label: str) -> None:
@@ -120,7 +131,7 @@ class ConfigService:
                 self._invalid(f"{label}.{field} must be a positive number")
 
     def _validate_stored_llm(self, llm: Mapping[str, Any]) -> None:
-        self._validate_string_fields(llm, _BASE_STRING_FIELDS, "llm", allow_none=True)
+        self._validate_string_fields(llm, (*_BASE_STRING_FIELDS, _VENDOR_FIELD), "llm", allow_none=True)
         if "stream" in llm and not isinstance(llm["stream"], bool):
             self._invalid("llm.stream must be a boolean")
         if "max_output_tokens" in llm:
@@ -204,6 +215,7 @@ class ConfigService:
         return {
             "configured": configured,
             "has_api_key": bool(llm.get("api_key")),
+            "vendor": self._string_or_empty(llm.get("vendor")),
             "provider": self._string_or_empty(llm.get("provider")) or "openai",
             "model": self._string_or_empty(llm.get("model")),
             "base_url": self._string_or_empty(llm.get("base_url")),
@@ -224,13 +236,17 @@ class ConfigService:
         def effective(field: str) -> object:
             return interactive[field] if field in interactive else llm.get(field)
 
+        provider = self._string_or_empty(effective("provider")) or "openai"
+        if normalize_provider_name(provider) not in {"openai", "gemini"}:
+            self._invalid("Model discovery is available only for OpenAI-compatible protocols")
         api_key = self._string_or_empty(effective("api_key")).strip()
         base_url = self._string_or_empty(effective("base_url")).strip().rstrip("/")
         if not api_key or not base_url:
             self._invalid("interactive LLM route needs an API key and base URL to list relay models")
+        self._validate_base_url(base_url, "llm.routes.interactive.base_url")
 
         try:
-            async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=5.0, follow_redirects=False, trust_env=False) as client:
                 response = await client.get(f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"})
                 response.raise_for_status()
         except httpx.HTTPError as exc:
@@ -274,6 +290,8 @@ class ConfigService:
             self._invalid(f"{label}.{field} must be a non-empty string")
         if field == "provider":
             self._validate_provider(stripped, f"{label}.{field}")
+        if field == "base_url":
+            self._validate_base_url(stripped, f"{label}.{field}")
         target[field] = stripped
 
     def _apply_route_patch(self, route: dict[str, Any], patch: Mapping[str, Any], label: str) -> None:
@@ -431,6 +449,8 @@ class ConfigService:
         for field in _BASE_STRING_FIELDS:
             if field in updates:
                 self._apply_string_patch(llm, field, updates[field], "llm")
+        if _VENDOR_FIELD in updates:
+            self._apply_string_patch(llm, _VENDOR_FIELD, updates[_VENDOR_FIELD], "llm")
         if "stream" in updates:
             stream = updates["stream"]
             if stream is None:

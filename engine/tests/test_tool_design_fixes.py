@@ -9,8 +9,11 @@ import tempfile
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
+
 from engine.execution.agent_loop import _MemoryToolApi, _enabled_tools_from_config
 from engine.identity_catalog import IdentitySpec
+from engine.sandbox import MacOSSeatbeltEnvironment
 from engine.tool.interface import ToolCall
 from engine.tool.registry import ToolRegistry
 
@@ -250,6 +253,17 @@ def test_register_stores_rich_execution_contract():
     assert defn.execution_environment == "either"
 
 
+def test_registry_excludes_metadata_hidden_tools_from_default_visibility():
+    registry = ToolRegistry()
+    registry.register("public_tool", "", {}, lambda: "OK")
+    registry.register("runtime_tool", "", {}, lambda: "OK", hidden=True)
+
+    assert registry.list_visible_tool_names(include_disabled=True) == ["public_tool"]
+    assert registry.list_visible_tool_names(include_disabled=True, include_hidden=True) == [
+        "public_tool", "runtime_tool",
+    ]
+
+
 def test_register_rejects_invalid_permission_level():
     registry = ToolRegistry()
     try:
@@ -269,6 +283,7 @@ def test_load_providers_reads_security_metadata_from_tool_meta():
         '    "path_args": ["target"],\n'
         '    "list_path_args": ["files"],\n'
         '    "is_write_tool": True,\n'
+        '    "hidden": True,\n'
         '    "permission_level": "write",\n'
         '    "read_actions": ["get"],\n'
         "}\n"
@@ -285,6 +300,7 @@ def test_load_providers_reads_security_metadata_from_tool_meta():
     assert defn.path_args == ("target",)
     assert defn.list_path_args == ("files",)
     assert defn.is_write_tool
+    assert defn.hidden is True
     assert defn.permission_level == "write"
     assert defn.read_actions == frozenset({"get"})
 
@@ -439,6 +455,7 @@ def test_builtin_write_file_writes_relative_paths_under_the_bound_project_dir(tm
     assert (project_dir / "app" / "main.py").read_text(encoding="utf-8") == "print('ok')\n"
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt is macOS-only")
 def test_builtin_shell_uses_the_bound_project_dir_when_cwd_is_omitted(tmp_path: Path):
     async def run():
         project_dir = tmp_path / "OpenAI_project"
@@ -446,6 +463,9 @@ def test_builtin_shell_uses_the_bound_project_dir_when_cwd_is_omitted(tmp_path: 
         registry = ToolRegistry()
         registry.load_providers(ROOT / "agents" / "tools")
         registry.bind_working_directory(project_dir)
+        registry.bind_execution_environment(
+            MacOSSeatbeltEnvironment(workspace=project_dir)
+        )
         call = registry.normalize_call(
             ToolCall(id="shell", name="shell", arguments={"command": "pwd"})
         )
@@ -613,7 +633,13 @@ def test_agent_tool_config_hides_internal_and_stale_tools_by_default():
         "memory_ops",
         "todo",
     ]:
-        registry.register(name, "", {}, lambda: "OK")
+        registry.register(
+            name,
+            "",
+            {},
+            lambda: "OK",
+            hidden=name in {"skill_load", "skill_manage", "memory_ops"},
+        )
 
     enabled = _enabled_tools_from_config(
         {

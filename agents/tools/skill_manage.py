@@ -14,6 +14,7 @@ import yaml
 
 TOOL_META = {
     "name": "skill_manage",
+    "hidden": True,
     "description": (
         "Manage agent skills: list, get, create, edit, patch, versions, rollback. "
         "Built-in skills are read-only; only agent-installed skills can be modified."

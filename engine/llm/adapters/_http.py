@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -25,6 +27,37 @@ from ._retry import (
 logger = logging.getLogger(__name__)
 
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024  # 20 MiB cap on non-streaming responses
+MAX_STREAM_TOTAL_BYTES = 20 * 1024 * 1024
+MAX_STREAM_EVENT_BYTES = 1 * 1024 * 1024
+MAX_STREAM_EVENTS = 10_000
+MAX_STREAM_DURATION_SECONDS = 15 * 60
+
+
+@dataclass
+class SSEStreamLimiter:
+    """Bound an untrusted provider SSE stream across every adapter."""
+
+    total_bytes: int = 0
+    event_bytes: int = 0
+    events: int = 0
+    started_at: float = field(default_factory=time.monotonic)
+
+    def consume_line(self, line: str) -> None:
+        line_bytes = len(line.encode("utf-8"))
+        self.total_bytes += line_bytes
+        self.event_bytes += line_bytes
+        if self.total_bytes > MAX_STREAM_TOTAL_BYTES:
+            raise LLMResponseError("Provider stream exceeds the total byte limit.")
+        if self.event_bytes > MAX_STREAM_EVENT_BYTES:
+            raise LLMResponseError("Provider stream event exceeds the byte limit.")
+        if time.monotonic() - self.started_at > MAX_STREAM_DURATION_SECONDS:
+            raise LLMResponseError("Provider stream exceeds the duration limit.")
+
+    def finish_event(self) -> None:
+        self.events += 1
+        if self.events > MAX_STREAM_EVENTS:
+            raise LLMResponseError("Provider stream exceeds the event limit.")
+        self.event_bytes = 0
 
 
 class HTTPAdapterMixin:
@@ -81,10 +114,9 @@ class HTTPAdapterMixin:
                     attempt,
                     retry_after=retry_after_seconds(exc.response),
                 )
-            body_preview = getattr(exc, "error_body", "")
             raise LLMResponseError(
                 f"{self._error_label} request failed (HTTP {exc.response.status_code}) "
-                f"after {attempt + 1} attempt(s): {body_preview or exc}"
+                f"after {attempt + 1} attempt(s)."
             ) from exc
         except httpx.RequestError as exc:
             if attempt < MAX_RETRIES - 1:
@@ -109,14 +141,7 @@ class HTTPAdapterMixin:
         response = await self._http.send(req, stream=True)
         try:
             if not response.is_success:
-                # Capture a bounded diagnostic slice now: ``finally`` closes
-                # the stream, after which the body can no longer be read.
-                error_body = await self._read_error_body(response)
-                try:
-                    response.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    exc.error_body = error_body  # type: ignore[attr-defined]
-                    raise
+                response.raise_for_status()
             chunks: list[bytes] = []
             total = 0
             async for chunk in response.aiter_bytes():
@@ -129,18 +154,3 @@ class HTTPAdapterMixin:
             return b"".join(chunks)
         finally:
             await response.aclose()
-
-    @staticmethod
-    async def _read_error_body(response: httpx.Response, limit: int = 500) -> str:
-        """Read a bounded slice of an error response body for diagnostics."""
-        try:
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in response.aiter_bytes():
-                chunks.append(chunk)
-                total += len(chunk)
-                if total >= limit:
-                    break
-            return b"".join(chunks)[:limit].decode("utf-8", errors="replace")
-        except Exception:
-            return ""

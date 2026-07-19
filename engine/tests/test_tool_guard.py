@@ -7,16 +7,23 @@ from engine.safety.fact_gate import FactGate, FactGateContext
 from engine.safety.tool_guard import AuditLog, GuardResult, PermissionLevel, ToolGuard
 from engine.safety.tool_policy import ToolPolicy
 from engine.tool.interface import ToolCall, ToolDefinition
+from engine.tool.registry import ToolRegistry
 
 _RULES = Path(__file__).resolve().parents[2] / "agents" / "safety" / "dangerous_commands.json"
 
 
+def _builtin_guard(rules: Path = _RULES, allowed_dirs: list[Path] | None = None) -> ToolGuard:
+    registry = ToolRegistry()
+    registry.load_providers(Path(__file__).resolve().parents[2] / "agents" / "tools")
+    return ToolGuard(rules, allowed_dirs=allowed_dirs, tool_registry=registry.definitions())
+
+
 def _check(command):
-    return ToolGuard(_RULES).check(ToolCall(id="t", name="shell", arguments={"command": command}))
+    return _builtin_guard().check(ToolCall(id="t", name="shell", arguments={"command": command}))
 
 
 def _check_tool(name, arguments):
-    return ToolGuard(_RULES).check(ToolCall(id="t", name=name, arguments=arguments))
+    return _builtin_guard().check(ToolCall(id="t", name=name, arguments=arguments))
 
 
 class _FakeGuard:
@@ -133,7 +140,7 @@ def test_memory_exception_does_not_bypass_fact_gate():
         arguments={"command": f"printf '%s\\n' event >> {memory_file}"},
     )
     gate = FactGate(FactGateContext("session", "turn"))
-    policy = ToolPolicy(ToolGuard(_RULES), fact_gate=gate)
+    policy = ToolPolicy(_builtin_guard(), fact_gate=gate)
 
     first = policy.evaluate(call)
     assert not first.allowed
@@ -160,9 +167,19 @@ def test_path_tools_are_guarded():
         assert not _check_tool(name, arguments).allowed, name
 
 
-def test_web_tool_aliases_keep_read_permission_level():
-    assert _check_tool("websearch", {"query": "docs"}).level is PermissionLevel.READ
-    assert _check_tool("webfetch", {"url": "https://example.com"}).level is PermissionLevel.READ
+def test_registry_normalizes_legacy_alias_before_metadata_policy_check():
+    registry = ToolRegistry()
+    registry.register("web_search", "", {}, lambda: "OK", permission_level="read")
+    registry.register("web_fetch", "", {}, lambda: "OK", permission_level="read")
+    guard = ToolGuard(_RULES, tool_registry=registry.definitions())
+
+    search = registry.normalize_call(ToolCall(id="search", name="websearch", arguments={"query": "docs"}))
+    fetch = registry.normalize_call(ToolCall(id="fetch", name="webfetch", arguments={"url": "https://example.com"}))
+
+    assert search.name == "web_search"
+    assert fetch.name == "web_fetch"
+    assert guard.check(search).level is PermissionLevel.READ
+    assert guard.check(fetch).level is PermissionLevel.READ
 
 
 def test_metadata_declared_path_args_are_guarded_without_hardcoded_entry():
@@ -192,13 +209,21 @@ def test_metadata_declared_path_args_are_guarded_without_hardcoded_entry():
     assert env_write.needs_confirmation
 
 
-def test_metadata_permission_level_overrides_fallback():
+def test_metadata_permission_level_controls_registered_tool():
     defn = ToolDefinition(name="notes_read", description="", permission_level="read")
     guard = ToolGuard(_RULES, tool_registry={"notes_read": defn})
 
     assert guard.check(ToolCall(id="t", name="notes_read", arguments={})).level is PermissionLevel.READ
     # Without metadata an unknown tool stays at the EXECUTE default.
     assert ToolGuard(_RULES).check(ToolCall(id="t", name="notes_read", arguments={})).level is PermissionLevel.EXECUTE
+
+
+def test_unregistered_tool_is_held_for_approval_instead_of_name_based_fallback():
+    result = ToolGuard(_RULES).check(ToolCall(id="t", name="legacy_unknown", arguments={}))
+
+    assert result.allowed
+    assert result.level is PermissionLevel.EXECUTE
+    assert result.approval_required is True
 
 
 def test_metadata_read_actions_do_not_require_approval_but_writes_still_do():
@@ -220,7 +245,7 @@ def test_metadata_read_actions_do_not_require_approval_but_writes_still_do():
 
 
 def test_session_whitelist_extends_boundary_but_not_sensitive_blocks():
-    guard = ToolGuard(_RULES)
+    guard = _builtin_guard()
     call = ToolCall(id="t", name="list_dir", arguments={"path": "/opt/data/project"})
 
     assert not guard.check(call).allowed
@@ -235,7 +260,7 @@ def test_session_whitelist_extends_boundary_but_not_sensitive_blocks():
 
 
 def test_session_tool_whitelist_does_not_bypass_sensitive_paths(tmp_path: Path):
-    guard = ToolGuard(_RULES, allowed_dirs=[tmp_path])
+    guard = _builtin_guard(allowed_dirs=[tmp_path])
     guard.whitelist.allow_tool("write_file")
 
     result = guard.check(
@@ -253,7 +278,7 @@ def test_session_tool_whitelist_does_not_bypass_sensitive_paths(tmp_path: Path):
 def test_project_instruction_whitelist_allows_only_smith_md(tmp_path: Path):
     project_root = tmp_path / "project"
     project_root.mkdir()
-    guard = ToolGuard(tmp_path / "missing-rules.json", allowed_dirs=[])
+    guard = _builtin_guard(tmp_path / "missing-rules.json", allowed_dirs=[])
     smith_file = project_root / ".smith" / "SMITH.md"
 
     assert not guard.check(
@@ -280,7 +305,20 @@ def test_project_instruction_whitelist_allows_only_smith_md(tmp_path: Path):
 
 
 def test_write_tool_requests_approval_after_hard_guard_passes(tmp_path: Path):
-    guard = ToolGuard(tmp_path / "missing-rules.json", allowed_dirs=[tmp_path])
+    definition = ToolDefinition(
+        name="write_file",
+        description="",
+        path_args=("path",),
+        is_write_tool=True,
+        permission_level="write",
+        approval_policy="policy",
+        side_effect="write",
+    )
+    guard = ToolGuard(
+        tmp_path / "missing-rules.json",
+        allowed_dirs=[tmp_path],
+        tool_registry={"write_file": definition},
+    )
 
     result = guard.check(
         ToolCall(
@@ -299,7 +337,7 @@ def test_working_directory_restricts_relative_and_absolute_tool_paths(tmp_path: 
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     outside = tmp_path / "outside.txt"
-    guard = ToolGuard(tmp_path / "missing-rules.json")
+    guard = _builtin_guard(tmp_path / "missing-rules.json")
     guard.set_working_directory(project_dir)
 
     relative = guard.check(
@@ -372,7 +410,7 @@ def test_working_directory_disables_unconfined_shell_execution(tmp_path: Path):
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     (project_dir / "nested").mkdir()
-    guard = ToolGuard(tmp_path / "missing-rules.json")
+    guard = _builtin_guard(tmp_path / "missing-rules.json")
     guard.set_working_directory(project_dir)
 
     attempts = [
@@ -388,7 +426,7 @@ def test_working_directory_disables_unconfined_shell_execution(tmp_path: Path):
 
 
 def test_sensitive_write_remains_hard_blocked_and_not_approvable(tmp_path: Path):
-    guard = ToolGuard(tmp_path / "missing-rules.json", allowed_dirs=[tmp_path])
+    guard = _builtin_guard(tmp_path / "missing-rules.json", allowed_dirs=[tmp_path])
 
     result = guard.check(
         ToolCall(

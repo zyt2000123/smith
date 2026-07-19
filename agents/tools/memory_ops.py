@@ -18,6 +18,7 @@ EpisodeRunner = Callable[[Path, str, list[dict]], Awaitable[Path | None]]
 
 TOOL_META = {
     "name": "memory_ops",
+    "hidden": True,
     "description": (
         "Memory operations: search memories, record structured evidence candidates, "
         "and manage episodes. Plans and Todo items are session state, not memory."

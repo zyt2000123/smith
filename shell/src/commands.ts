@@ -226,7 +226,7 @@ function openConfig(context: CommandContext): void {
   const draft = createSetupDraft(state.config);
   state.set({
     mode: "setup",
-    // Keep /config on the five-field setup flow; advanced routing remains available to the runtime.
+    // Keep /config on the essential setup flow; advanced routing remains available to the runtime.
     setupFlow: "initial",
     setupIndex: 0,
     setupDraft: draft,

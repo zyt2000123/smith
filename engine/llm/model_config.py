@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-import os
+import ipaddress
 import math
+import os
+import socket
 from enum import Enum
 from typing import Any
+from urllib.parse import urlsplit
 
 from common.config import AGENT_DIR, DATA_DIR, SMITH_PROFILE_DIR
 from common.yaml_utils import YamlConfigError, load_yaml, merge_configs
@@ -63,6 +66,38 @@ _ROUTE_FIELDS = (
 )
 
 
+def validate_llm_base_url(value: object) -> str:
+    """Validate the credential-bearing endpoint used by every LLM entry path."""
+    if not isinstance(value, str) or not value.strip():
+        raise YamlConfigError("LLM base_url must be a non-empty string")
+    base_url = value.strip()
+    parsed = urlsplit(base_url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise YamlConfigError("LLM base_url must be an HTTPS URL with a hostname")
+    if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+        raise YamlConfigError("LLM base_url must not contain credentials, a query, or a fragment")
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise YamlConfigError("LLM base_url must not target a private or local IP address")
+
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)}
+    except socket.gaierror:
+        # Leave unresolved public hostnames to the request path, which can
+        # report a useful transport error. Any address that does resolve must
+        # be public before credentials can be sent to it.
+        return base_url
+
+    for candidate in addresses:
+        try:
+            address = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if not address.is_global:
+            raise YamlConfigError("LLM base_url must not target a private or local IP address")
+    return base_url
+
+
 def build_llm_client(config: dict) -> LLMPort:
     """Build the normalized LLM Interface from a merged configuration dict.
 
@@ -84,6 +119,7 @@ def build_llm_client(config: dict) -> LLMPort:
     base_url = config.get("base_url")
     if provider == "gemini" and (base_url is None or str(base_url).strip() == ""):
         base_url = GEMINI_OPENAI_BASE_URL
+    base_url = validate_llm_base_url(base_url)
 
     required_values = {
         "api_key": config.get("api_key"),
@@ -150,7 +186,7 @@ def build_llm_client(config: dict) -> LLMPort:
     return create_llm_client(LLMProviderConfig(
         provider=provider,
         api_key=config["api_key"].strip(),
-        base_url=base_url.strip(),
+        base_url=base_url,
         model=config["model"].strip(),
         stream=stream,
         timeouts=resolved_timeouts,
@@ -287,5 +323,10 @@ def resolve_llm_config(
     }
     if selected_profile:
         selected.update({field: selected_profile[field] for field in _ROUTE_FIELDS if field in selected_profile})
+    # Supplier identity is display metadata only. It deliberately stays out of
+    # route overrides and adapter construction, but must reach runtime prompt
+    # metadata for truthful model identity responses.
+    if "vendor" in llm:
+        selected["vendor"] = llm["vendor"]
     selected["timeout"] = _resolve_timeout(llm, selected_usage, route)
     return selected

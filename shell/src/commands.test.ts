@@ -364,7 +364,7 @@ test("model opens the relay model picker", async () => {
   assert.equal(opened, 1);
 });
 
-test("config reopens the five-field form with saved values intact", async () => {
+test("config reopens the essential setup form with saved values intact", async () => {
   const store = createAppStore();
   store.getState().set({
     config: {

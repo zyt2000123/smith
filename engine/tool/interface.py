@@ -15,9 +15,16 @@ class ToolDefinition:
     name: str
     description: str
     parameters: dict = field(default_factory=dict)
-    # Security metadata — when declared, safety modules use these instead of
-    # hardcoded lookup tables.  Tools that don't declare metadata still work
-    # via the fallback tables in tool_guard / fact_gate.
+    # Runtime infrastructure tools can be registered but kept out of the
+    # model-visible default tool set. Visibility is metadata, never a caller
+    # maintained list of tool names.
+    hidden: bool = False
+    # An opaque command string needs path extraction and explicit approval;
+    # shell is currently the only provider that declares this capability.
+    opaque_command: bool = False
+    # Security metadata — the runtime policy resolves permissions and approval
+    # from these declarations. Path-policy compatibility fallbacks remain in
+    # the guard only for legacy direct callers that have not bound a registry.
     path_args: tuple[str, ...] = ()
     list_path_args: tuple[str, ...] = ()
     is_write_tool: bool = False
