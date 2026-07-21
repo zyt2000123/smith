@@ -936,7 +936,45 @@ async def test_stream_message_marks_model_output_limit_as_incomplete(monkeypatch
     ]
 
     done = json.loads(events[-1]["data"])
-    assert done == {"id": "assistant-1", "status": "incomplete"}
+    assert done == {
+        "id": "assistant-1",
+        "status": "incomplete",
+        "reason": "model_output_limit",
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_message_preserves_a_blocked_run_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_build_engine_runtime(agent_id: str, name: str, *, session_id: str | None = None):
+        return SimpleNamespace(agent_id=agent_id, agent_name=name, session_id=session_id), object()
+
+    async def fake_engine_reply_events(request, runtime, services):
+        yield SimpleNamespace(
+            type=SimpleNamespace(value="run_finished"),
+            data={"run_id": "run-1", "status": "incomplete", "reason": "blocked"},
+        )
+
+    monkeypatch.setattr(session_service_module, "build_engine_runtime", fake_build_engine_runtime)
+    monkeypatch.setattr(
+        session_service_module,
+        "engine_run_stream_with_runtime",
+        _fake_run(fake_engine_reply_events),
+    )
+
+    events = [
+        event
+        async for event in SessionService(FakeSessionRepo(), FakeAgentProfileRepo()).stream_message(
+            "smith-id",
+            "sess-1",
+            "hello",
+        )
+    ]
+
+    assert json.loads(events[-1]["data"]) == {
+        "id": None,
+        "status": "incomplete",
+        "reason": "blocked",
+    }
 
 
 @pytest.mark.asyncio
@@ -967,4 +1005,4 @@ async def test_stream_message_marks_unhandled_engine_error_as_failed(monkeypatch
 
     assert any(event["event"] == "message" for event in events)
     done = json.loads(events[-1]["data"])
-    assert done == {"id": None, "status": "failed"}
+    assert done == {"id": None, "status": "failed", "reason": "server_execution_error"}

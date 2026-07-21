@@ -86,9 +86,16 @@ test("request timeout signals abort and identify timeout rather than user cancel
 });
 
 test("SSE decoder preserves an incomplete terminal status", () => {
-  const event = decodeSseEvent('event: done\ndata: {"id":"message-1","status":"incomplete"}');
+  const event = decodeSseEvent(
+    'event: done\ndata: {"id":"message-1","status":"incomplete","reason":"model_output_limit"}',
+  );
 
-  assert.deepEqual(event, { type: "done", id: "message-1", status: "incomplete" });
+  assert.deepEqual(event, {
+    type: "done",
+    id: "message-1",
+    status: "incomplete",
+    reason: "model_output_limit",
+  });
 });
 
 test("SSE decoder retains the run id on a terminal event", () => {

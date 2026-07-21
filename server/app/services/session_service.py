@@ -511,6 +511,7 @@ class SessionService:
         run_id: str | None = None
         run = None
         terminal_status = "completed"
+        terminal_reason: str | None = None
         terminal_notice: str | None = None
         try:
             runtime, services = await self._build_runtime(agent_id, profile_name, session_id)
@@ -672,12 +673,16 @@ class SessionService:
                     yield sse("compression", {"active": False})
                 elif t == "incomplete":
                     terminal_status = "incomplete"
+                    terminal_reason = str(ev.data.get("reason", "agent_incomplete"))
                 elif t == "failed":
                     terminal_status = "failed"
+                    terminal_reason = str(ev.data.get("reason", "agent_failed"))
                 elif t == "run_finished":
                     status = ev.data.get("status")
                     if status in ("completed", "incomplete", "failed"):
                         terminal_status = status
+                    reason = ev.data.get("reason")
+                    terminal_reason = reason if isinstance(reason, str) and reason else None
                     if ev.data.get("memory_persist_failed"):
                         yield sse(
                             "message",
@@ -691,6 +696,7 @@ class SessionService:
         except Exception:
             logger.exception("agent SSE execution failed (session=%s)", session_id)
             terminal_status = "failed"
+            terminal_reason = "server_execution_error"
             terminal_notice = "执行失败（详情见服务端日志）"
         finally:
             # 客户端断连/引擎异常时生成器在 yield 处被终止，async for 之后的代码不会执行；
@@ -717,6 +723,7 @@ class SessionService:
                 except Exception:
                     logger.exception("failed to persist streamed reply (session=%s)", session_id)
                     terminal_status = "failed"
+                    terminal_reason = "reply_persistence_failed"
                     terminal_notice = "回复保存失败（详情见服务端日志）"
 
         if terminal_notice:
@@ -727,4 +734,6 @@ class SessionService:
         }
         if run_id is not None:
             done_payload["run_id"] = run_id
+        if terminal_reason:
+            done_payload["reason"] = terminal_reason
         yield sse("done", done_payload)

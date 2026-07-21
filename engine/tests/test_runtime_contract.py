@@ -965,6 +965,14 @@ def test_shipped_coding_pipeline_routes_through_gates_and_conditions(tmp_path: P
     async def run() -> tuple[object, list[ExecutionEvent]]:
         runtime, services, _ = _runtime(tmp_path)
         agents_dir = Path(__file__).resolve().parents[2] / "agents"
+        skills_dir = runtime.profile_dir / "skills"
+        for skill_name in ("understanding", "planning", "architecture", "implementation", "validation"):
+            skill_dir = skills_dir / skill_name
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {skill_name}\ndescription: test workflow step\n---\nPerform this workflow step.",
+                encoding="utf-8",
+            )
         runtime = RuntimeContext(
             agent_id=runtime.agent_id,
             agent_name=runtime.agent_name,
