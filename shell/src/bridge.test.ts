@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { NodeBridge } from "./bridge.js";
+import { NodeBridge, terminalStatusMessage } from "./bridge.js";
 import { MAX_QUEUED_MESSAGES } from "./queue.js";
 import { createAppStore } from "./store.js";
 import { createTurnEntry } from "./transcript-state.js";
@@ -22,6 +22,14 @@ test("request errors keep details in the transcript without duplicating them in 
   assert.equal(lastEntry?.kind, "system");
   assert.equal(lastEntry?.kind === "system" && lastEntry.text, "[error] Request timed out after 120000ms.");
   assert.equal(state.statusLine, "Request failed. See the transcript for details.");
+});
+
+test("blocked runs are not described as model output limits", () => {
+  assert.equal(terminalStatusMessage("incomplete", "blocked"), "Agent was blocked; see the transcript for the reason.");
+  assert.equal(
+    terminalStatusMessage("incomplete", "model_output_limit"),
+    "Model output limit reached; the answer may be incomplete.",
+  );
 });
 
 test("frontend message queue is capped and supports removal and clearing", () => {

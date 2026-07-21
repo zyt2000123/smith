@@ -164,7 +164,7 @@ export type StreamEvent =
   | ({ type: "token_usage" } & TokenUsage)
   | ({ type: "context_usage" } & ContextUsage)
   | { type: "compression"; active: boolean }
-  | { type: "done"; id?: string; runId?: string; status: StreamTerminalStatus };
+  | { type: "done"; id?: string; runId?: string; status: StreamTerminalStatus; reason?: string };
 
 type RequestOptions = {
   method?: string;
@@ -696,6 +696,7 @@ const SSE_EVENT_DECODERS: Partial<Record<string, SseEventDecoder>> = {
     type: "done",
     id: payload.id ? String(payload.id) : undefined,
     ...(payload.run_id ? { runId: String(payload.run_id) } : {}),
+    ...(typeof payload.reason === "string" && payload.reason ? { reason: payload.reason.slice(0, 500) } : {}),
     status: terminalStatus(payload),
   }),
 };

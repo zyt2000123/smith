@@ -128,6 +128,28 @@ async def run_agent_stream(
         yield ExecutionEvent(EventType.DONE, {})
         return
 
+    # A workflow's gates describe contracts for concrete skills. Running a
+    # missing step as generic ReAct makes the contract invisible to the model
+    # and can burn several full ReAct attempts before the gate blocks the run.
+    # Treat an incompletely installed pipeline as unavailable and retain the
+    # direct-agent path instead. User-disabled nodes remain an intentional
+    # skip and therefore do not trigger this fallback.
+    missing_skills = sorted({
+        node.skill_name
+        for node in skill_chain.nodes
+        if node.skill_name not in disabled_skill_names and skill_registry.get(node.skill_name) is None
+    })
+    if missing_skills:
+        logger.warning(
+            "pipeline %r unavailable because skills are not installed: %s; falling back to direct ReAct",
+            route.pipeline_id,
+            ", ".join(missing_skills),
+        )
+        async for event in react_event_loop(llm, base_messages, tool_registry, tool_guard, max_react_iters):
+            yield event
+        yield ExecutionEvent(EventType.DONE, {})
+        return
+
     context: dict = {
         CTX_USER_MESSAGE: user_message,
         CTX_IDENTITY_ID: route.identity_id,

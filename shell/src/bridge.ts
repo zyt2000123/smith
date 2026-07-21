@@ -137,6 +137,20 @@ function createProvisionalBatcher(emit: (provisionId: string, text: string) => v
 
 type TextBatcher = ReturnType<typeof createTextBatcher>;
 type ProvisionalBatcher = ReturnType<typeof createProvisionalBatcher>;
+type TerminalOutcome = { status: StreamTerminalStatus; reason?: string };
+
+export function terminalStatusMessage(status: StreamTerminalStatus, reason?: string): string {
+  if (status === "incomplete" && reason === "model_output_limit") {
+    return "Model output limit reached; the answer may be incomplete.";
+  }
+  if (reason === "blocked") {
+    return "Agent was blocked; see the transcript for the reason.";
+  }
+  if (status === "incomplete") {
+    return "Agent did not complete the task; see the transcript for the reason.";
+  }
+  return "Agent execution failed; see the transcript and server log for details.";
+}
 
 function applyBatchedStreamEvent(
   event: StreamEvent,
@@ -939,8 +953,9 @@ export class NodeBridge {
   private async consumeStream(
     events: AsyncIterable<StreamEvent>,
     signal: AbortSignal,
-  ): Promise<StreamTerminalStatus | null> {
+  ): Promise<TerminalOutcome | null> {
     let terminalStatus: StreamTerminalStatus | null = null;
+    let terminalReason: string | undefined;
     const messageBatcher = createTextBatcher((batched) => this.s.applyEvent({ type: "message", text: batched }));
     const provisionalBatcher = createProvisionalBatcher((provisionId, batched) =>
       this.s.applyEvent({ type: "provisional_text_delta", provisionId, text: batched }),
@@ -952,7 +967,10 @@ export class NodeBridge {
         const status = applyBatchedStreamEvent(event, messageBatcher, provisionalBatcher, (next) =>
           this.s.applyEvent(next),
         );
-        if (status) terminalStatus = status;
+        if (status) {
+          terminalStatus = status;
+          terminalReason = event.type === "done" ? event.reason : undefined;
+        }
       }
     } finally {
       // 取消后该轮已被 closeTurn 定格，迟到的文本不再写入。
@@ -967,21 +985,18 @@ export class NodeBridge {
 
     if (signal.aborted) return null;
 
-    return terminalStatus;
+    return terminalStatus ? { status: terminalStatus, reason: terminalReason } : null;
   }
 
-  private reportTerminalStatus(terminalStatus: StreamTerminalStatus | null, signal: AbortSignal): void {
+  private reportTerminalStatus(terminal: TerminalOutcome | null, signal: AbortSignal): void {
     if (signal.aborted) return;
-    if (!terminalStatus) throw new Error("SSE stream ended before completion.");
-    if (terminalStatus === "completed") {
+    if (!terminal) throw new Error("SSE stream ended before completion.");
+    if (terminal.status === "completed") {
       this.s.set({ statusLine: "Ready. Type the next task or /help." });
       return;
     }
 
-    const message =
-      terminalStatus === "incomplete"
-        ? "Model output limit reached; the answer may be incomplete."
-        : "Agent execution failed; see the transcript and server log for details.";
+    const message = terminalStatusMessage(terminal.status, terminal.reason);
     this.s.pushSystemLine(`[warning] ${message}`, "error");
     this.s.set({ statusLine: message });
   }

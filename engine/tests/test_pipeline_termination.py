@@ -117,6 +117,32 @@ def test_user_disabled_pipeline_skill_is_skipped_without_generic_fallback() -> N
     assert events[-1].type is EventType.DONE
 
 
+def test_pipeline_with_a_missing_skill_falls_back_to_direct_react() -> None:
+    """An incomplete workflow installation must not run its strict gates as generic ReAct."""
+
+    class MissingSkillRegistry:
+        def get(self, name):
+            return None
+
+    async def run() -> list[ExecutionEvent]:
+        events: list[ExecutionEvent] = []
+        async for event in run_agent_stream(
+            FakeLLM(), "system prompt", "inspect the configured provider",
+            FakeToolRegistry(), MissingSkillRegistry(), FEATURE_ROUTE,
+            SkillChain([SkillNode("understanding", AlwaysFailGate())]), FailureLoopGuard(),
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+
+    assert EventType.BLOCKED not in [event.type for event in events]
+    assert not [event for event in events if event.type is EventType.SKILL_START]
+    assert [event.data["text"] for event in events if event.type is EventType.TEXT_DELTA] == [
+        _RUBRIC_PASSING_TEXT,
+    ]
+
+
 def test_guard_escalates_per_node_despite_varying_output_hash() -> None:
     guard = FailureLoopGuard()
     # LLM 输出每次不同（hash 不同）也必须按节点计数收敛
