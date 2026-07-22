@@ -3,6 +3,12 @@ export type ListNavigation = "up" | "down" | "pageUp" | "pageDown" | "home" | "e
 export const SLASH_MENU_VISIBLE_ITEMS = 8;
 export const SKILLS_PANEL_VISIBLE_ITEMS = 4;
 
+export type CategorizedVisibleListItem<T> = {
+  item: T;
+  index: number;
+  showCategory: boolean;
+};
+
 export function moveListIndex(
   currentIndex: number,
   itemCount: number,
@@ -42,4 +48,17 @@ export function getVisibleList<T>(
   const centeredStart = selected - Math.floor(count / 2);
   const startIndex = Math.min(Math.max(centeredStart, 0), maxStart);
   return { items: items.slice(startIndex, startIndex + count), startIndex };
+}
+
+/** Adds absolute indexes and category-heading boundaries to a visible window. */
+export function getCategorizedVisibleList<T extends { category: string }>(
+  items: readonly T[],
+  startIndex: number,
+): CategorizedVisibleListItem<T>[] {
+  let previousCategory = "";
+  return items.map((item, offset) => {
+    const showCategory = item.category !== previousCategory;
+    previousCategory = item.category;
+    return { item, index: startIndex + offset, showCategory };
+  });
 }

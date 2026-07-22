@@ -1,7 +1,8 @@
 import { Box, Text } from "ink";
 
 import type { AgentHealth, ObservabilityRun, RunIncident } from "./api.js";
-import { ACCENT, ERROR, INFO, MUTED, WARNING } from "./theme.js";
+import { PanelContainer } from "./panel-container.js";
+import { ERROR, INFO, MUTED, WARNING } from "./theme.js";
 import { formatTokenCount } from "./token-stats.js";
 
 function outcomeColor(outcome: string | null | undefined): string {
@@ -11,23 +12,17 @@ function outcomeColor(outcome: string | null | undefined): string {
   return MUTED;
 }
 
-export function RunExplorerPanel({
+function RunExplorerContent({
   runs,
   health,
   incidents,
 }: {
-  runs: ObservabilityRun[] | null;
+  runs: ObservabilityRun[];
   health: AgentHealth | null;
   incidents: RunIncident[] | null;
 }) {
-  if (runs === null) return <Text color={MUTED}>Loading observability…</Text>;
-  if (runs.length === 0) return <Text color={MUTED}>No completed or interrupted runs recorded yet.</Text>;
   return (
-    <Box flexDirection="column">
-      <Text bold color={ACCENT}>
-        Observability
-      </Text>
-      <Text color={MUTED}>Local run health · `/trace &lt;run-id&gt;` for RCA · Esc back</Text>
+    <>
       {health ? (
         <Box marginTop={1} gap={2}>
           <Text color={health.success_rate >= 0.8 ? INFO : WARNING}>
@@ -81,6 +76,31 @@ export function RunExplorerPanel({
           </Text>
         </Box>
       ))}
-    </Box>
+    </>
+  );
+}
+
+export function RunExplorerPanel({
+  runs,
+  health,
+  incidents,
+}: {
+  runs: ObservabilityRun[] | null;
+  health: AgentHealth | null;
+  incidents: RunIncident[] | null;
+}) {
+  const content =
+    runs === null ? (
+      <Text color={MUTED}>Loading observability…</Text>
+    ) : runs.length === 0 ? (
+      <Text color={MUTED}>No completed or interrupted runs recorded yet.</Text>
+    ) : (
+      <RunExplorerContent runs={runs} health={health} incidents={incidents} />
+    );
+
+  return (
+    <PanelContainer title="Observability" description="Local run health · `/trace <run-id>` for RCA" footer="Esc back">
+      {content}
+    </PanelContainer>
   );
 }

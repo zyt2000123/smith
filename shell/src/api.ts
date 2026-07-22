@@ -301,10 +301,6 @@ export async function setLlmConfig(baseUrl: string, payload: LlmConfigInput): Pr
   });
 }
 
-export async function getAgentProfile(baseUrl: string): Promise<AgentProfile> {
-  return request<AgentProfile>(baseUrl, "/api/agent");
-}
-
 export async function ensureAgentProfile(baseUrl: string): Promise<AgentProfile> {
   return request<AgentProfile>(baseUrl, "/api/agent/ensure", {
     method: "POST",

@@ -1,6 +1,8 @@
 import { Box, Text, useWindowSize } from "ink";
 
 import type { TokenDay, TokenStats } from "./api.js";
+import { PanelContainer } from "./panel-container.js";
+import { TabbedPanel } from "./tabbed-panel.js";
 import { ACCENT, ASSISTANT, INFO, MUTED, WARNING } from "./theme.js";
 import { buildRecentDays, formatTokenCount, TOKEN_TAB_LABELS, TOKEN_TABS, type TokenTab } from "./token-stats.js";
 
@@ -13,20 +15,6 @@ function Detail({ label, value, tone = INFO }: { label: string; value: string | 
     <Box>
       <Text color={MUTED}>{label.padEnd(15)}</Text>
       <Text color={tone}>{value}</Text>
-    </Box>
-  );
-}
-
-function Tabs({ selected }: { selected: TokenTab }) {
-  const { columns } = useWindowSize();
-  return (
-    <Box flexWrap="wrap" gap={2} marginBottom={1}>
-      {TOKEN_TABS.map((tab) => (
-        <Text key={tab} color={tab === selected ? ACCENT : MUTED} bold={tab === selected}>
-          {TOKEN_TAB_LABELS[tab]}
-        </Text>
-      ))}
-      <Text color={MUTED}>{columns < 64 ? "←/→ · Esc" : "←/→ switch · Esc back"}</Text>
     </Box>
   );
 }
@@ -168,18 +156,24 @@ function ModelsView({ stats }: { stats: TokenStats }) {
 }
 
 export function TokenStatsPanel({ stats, selectedTab }: { stats: TokenStats | null; selectedTab: TokenTab }) {
+  const { columns } = useWindowSize();
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Tabs selected={selectedTab} />
-      {!stats ? (
-        <Text color={MUTED}>Loading local token statistics…</Text>
-      ) : selectedTab === "overview" ? (
-        <OverviewView stats={stats} />
-      ) : selectedTab === "models" ? (
-        <ModelsView stats={stats} />
-      ) : (
-        <StatsView stats={stats} />
-      )}
-    </Box>
+    <PanelContainer title="Token usage">
+      <TabbedPanel
+        tabs={TOKEN_TABS.map((tab) => ({ id: tab, label: TOKEN_TAB_LABELS[tab] }))}
+        selected={selectedTab}
+        hint={columns < 64 ? "←/→ · Esc" : "←/→ switch · Esc back"}
+      >
+        {!stats ? (
+          <Text color={MUTED}>Loading local token statistics…</Text>
+        ) : selectedTab === "overview" ? (
+          <OverviewView stats={stats} />
+        ) : selectedTab === "models" ? (
+          <ModelsView stats={stats} />
+        ) : (
+          <StatsView stats={stats} />
+        )}
+      </TabbedPanel>
+    </PanelContainer>
   );
 }

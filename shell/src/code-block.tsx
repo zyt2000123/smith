@@ -30,15 +30,18 @@ export function CodeBlock({
   code,
   language,
   highlighter,
+  width: requestedWidth,
 }: {
   code: string;
   language?: string;
   highlighter?: CodeHighlighter;
+  /** Total horizontal footprint available to the bordered block. */
+  width?: number;
 }) {
   const { columns } = useWindowSize();
   const lines = useMemo(() => formatCodeLines(code, highlighter, language), [code, highlighter, language]);
   const displayLanguage = language || "text";
-  const width = Math.max(1, columns - 4);
+  const width = Math.max(1, requestedWidth ?? columns - 4);
 
   return (
     <Box
@@ -54,7 +57,7 @@ export function CodeBlock({
         [{displayLanguage}] · {lines.length} 行
       </Text>
       {lines.map((line) => (
-        <Text key={`${line.number}-${line.text}`} wrap="truncate">
+        <Text key={`${line.number}-${line.text}`}>
           <Text color={MUTED} dimColor>
             {line.number} │{" "}
           </Text>

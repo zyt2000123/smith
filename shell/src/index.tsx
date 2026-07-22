@@ -25,13 +25,20 @@ import { loadHistory, saveHistory } from "./history.js";
 import { LIFECYCLE_HOOKS } from "./hooks.js";
 import { RunProgress, StatusHud } from "./hud.js";
 import { useShellInput } from "./input.js";
-import { getVisibleList, SKILLS_PANEL_VISIBLE_ITEMS, SLASH_MENU_VISIBLE_ITEMS } from "./list-navigation.js";
+import {
+  getCategorizedVisibleList,
+  getVisibleList,
+  SKILLS_PANEL_VISIBLE_ITEMS,
+  SLASH_MENU_VISIBLE_ITEMS,
+} from "./list-navigation.js";
 import {
   MODEL_PICKER_VISIBLE_ITEMS,
   type ModelPickerState,
   modelPickerOptions,
   modelPickerTargetLabel,
 } from "./model-picker.js";
+import { MultiSelectList } from "./multi-select-list.js";
+import { PanelContainer } from "./panel-container.js";
 import type { QueuedMessage } from "./queue.js";
 import { RunExplorerPanel } from "./run-panel.js";
 import {
@@ -129,13 +136,14 @@ function SetupPanel() {
   const activeField = setupFieldAt(index, flow);
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Text color={ACCENT}>{flow === "initial" ? "SMITH SETUP" : "LLM CONFIG"}</Text>
-      <Text color={MUTED}>
-        {flow === "initial"
+    <PanelContainer
+      title={flow === "initial" ? "SMITH SETUP" : "LLM CONFIG"}
+      description={
+        flow === "initial"
           ? "Connect a model to get started."
-          : "Tab/arrows to move. Advanced route and timeout fields are optional."}
-      </Text>
+          : "Tab/arrows to move. Advanced route and timeout fields are optional."
+      }
+    >
       <Box flexDirection="column" marginTop={1}>
         {fields.map((field) => (
           <Text key={field} color={field === activeField ? ACCENT : INFO}>
@@ -150,15 +158,14 @@ function SetupPanel() {
           </Text>
         ))}
       </Box>
-    </Box>
+    </PanelContainer>
   );
 }
 
 function SessionsPanel() {
   const sessions = useS((state) => state.sessions);
   return (
-    <Box flexDirection="column">
-      <Text color={ACCENT}>Recent sessions</Text>
+    <PanelContainer title="Recent sessions">
       {sessions.length === 0 ? (
         <Text color={MUTED}>No sessions.</Text>
       ) : (
@@ -168,7 +175,7 @@ function SessionsPanel() {
           </Text>
         ))
       )}
-    </Box>
+    </PanelContainer>
   );
 }
 
@@ -178,8 +185,7 @@ function SkillsPanel() {
   const enabledSkills = skills.filter(isSkillEnabled);
   const visible = getVisibleList(enabledSkills, selectedIndex, SKILLS_PANEL_VISIBLE_ITEMS);
   return (
-    <Box flexDirection="column">
-      <Text color={ACCENT}>Enabled skills</Text>
+    <PanelContainer title="Enabled skills" footer="↑/↓ select · Enter run · Esc back">
       {enabledSkills.length === 0 ? (
         <Text color={MUTED}>No enabled skills.</Text>
       ) : (
@@ -201,7 +207,7 @@ function SkillsPanel() {
           ) : null}
         </>
       )}
-    </Box>
+    </PanelContainer>
   );
 }
 
@@ -212,9 +218,7 @@ function SkillActionsPanel() {
     { title: "2. Enable/Disable skills", description: "Turn skills on or off." },
   ];
   return (
-    <Box flexDirection="column">
-      <Text color={ACCENT}>Skills</Text>
-      <Text color={MUTED}>Choose an action</Text>
+    <PanelContainer title="Skills" description="Choose an action" footer="↑/↓ select · Enter confirm · Esc back">
       <Box flexDirection="column" marginTop={1}>
         {actions.map((action, index) => {
           const selected = index === selectedIndex;
@@ -228,8 +232,7 @@ function SkillActionsPanel() {
           );
         })}
       </Box>
-      <Text color={MUTED}>↑/↓ select · Enter confirm · Esc back</Text>
-    </Box>
+    </PanelContainer>
   );
 }
 
@@ -240,43 +243,33 @@ function SkillTogglePanel() {
   const matchedSkills = filterSkills(skills, inputValue);
   const visible = getVisibleList(matchedSkills, selectedIndex, SKILLS_PANEL_VISIBLE_ITEMS);
   return (
-    <Box flexDirection="column">
-      <Text color={ACCENT}>Enable/Disable Skills</Text>
-      <Text color={MUTED}>Turn skills on or off. Changes are saved automatically.</Text>
+    <PanelContainer
+      title="Enable/Disable Skills"
+      description="Turn skills on or off. Changes are saved automatically."
+      footer="↑/↓ select · Enter toggle · Esc back"
+    >
       <Text color={MUTED}>Type below to search skills.</Text>
-      {matchedSkills.length === 0 ? (
-        <Text color={MUTED}>No matching skills.</Text>
-      ) : (
-        <>
-          {visible.startIndex > 0 ? <Text color={MUTED}>↑ more skills</Text> : null}
-          {visible.items.map((skill, offset) => {
-            const index = visible.startIndex + offset;
-            const selected = index === selectedIndex;
-            const enabled = isSkillEnabled(skill);
-            return (
-              <Box key={skill.name} width="100%" backgroundColor={selected ? SELECTED_BACKGROUND : undefined}>
-                <Text color={selected ? SELECTED_FOREGROUND : INFO} bold={selected}>
-                  {selected ? ">" : " "} [{enabled ? "✓" : " "}] {skill.name}
-                </Text>
-                <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{`  ${truncate(skill.description, 60)}`}</Text>
-              </Box>
-            );
-          })}
-          {visible.startIndex + visible.items.length < matchedSkills.length ? (
-            <Text color={MUTED}>↓ more skills</Text>
-          ) : null}
-        </>
-      )}
-      <Text color={MUTED}>↑/↓ select · Enter toggle · Esc back</Text>
-    </Box>
+      <MultiSelectList
+        items={visible.items.map((skill) => ({
+          id: skill.name,
+          label: skill.name,
+          description: truncate(skill.description, 60),
+          selected: isSkillEnabled(skill),
+        }))}
+        focusedIndex={selectedIndex}
+        startIndex={visible.startIndex}
+        totalCount={matchedSkills.length}
+        moreLabel="more skills"
+        emptyLabel="No matching skills."
+      />
+    </PanelContainer>
   );
 }
 
 function McpPanel() {
   const servers = useS((state) => state.mcpServers);
   return (
-    <Box flexDirection="column">
-      <Text color={ACCENT}>MCP servers</Text>
+    <PanelContainer title="MCP servers">
       {servers.length === 0 ? (
         <Text color={MUTED}>No MCP servers configured.</Text>
       ) : (
@@ -294,7 +287,7 @@ function McpPanel() {
           </Box>
         ))
       )}
-    </Box>
+    </PanelContainer>
   );
 }
 
@@ -373,9 +366,34 @@ function HookDetailsPanel() {
   );
 }
 
+function SlashMenuRow({
+  item,
+  index,
+  showCategory,
+  selectedIndex,
+}: {
+  item: SlashItem;
+  index: number;
+  showCategory: boolean;
+  selectedIndex: number;
+}) {
+  const selected = index === selectedIndex;
+  return (
+    <Box flexDirection="column" marginTop={showCategory ? 1 : 0}>
+      {showCategory ? <Text color={MUTED}>{item.category}</Text> : null}
+      <Box width="100%" backgroundColor={selected ? SELECTED_BACKGROUND : undefined}>
+        <Text color={selected ? SELECTED_FOREGROUND : INFO} bold={selected}>
+          {selected ? ">" : " "} {item.command}
+        </Text>
+        <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{`  ${truncate(item.description, 60)}`}</Text>
+      </Box>
+    </Box>
+  );
+}
+
 function SlashMenu({ items, selectedIndex }: { items: SlashItem[]; selectedIndex: number }) {
   const visible = getVisibleList(items, selectedIndex, SLASH_MENU_VISIBLE_ITEMS);
-  let category = "";
+  const rows = getCategorizedVisibleList(visible.items, visible.startIndex);
   return (
     <Box flexDirection="column" marginBottom={1} marginTop={1}>
       <Text color={ACCENT}>Slash palette</Text>
@@ -384,23 +402,15 @@ function SlashMenu({ items, selectedIndex }: { items: SlashItem[]; selectedIndex
       ) : (
         <>
           {visible.startIndex > 0 ? <Text color={MUTED}>↑ more</Text> : null}
-          {visible.items.map((item, offset) => {
-            const index = visible.startIndex + offset;
-            const selected = index === selectedIndex;
-            const showCategory = item.category !== category;
-            category = item.category;
-            return (
-              <Box key={item.id} flexDirection="column" marginTop={showCategory ? 1 : 0}>
-                {showCategory ? <Text color={MUTED}>{item.category}</Text> : null}
-                <Box width="100%" backgroundColor={selected ? SELECTED_BACKGROUND : undefined}>
-                  <Text color={selected ? SELECTED_FOREGROUND : INFO} bold={selected}>
-                    {selected ? ">" : " "} {item.command}
-                  </Text>
-                  <Text color={selected ? SELECTED_FOREGROUND : MUTED}>{`  ${truncate(item.description, 60)}`}</Text>
-                </Box>
-              </Box>
-            );
-          })}
+          {rows.map((row) => (
+            <SlashMenuRow
+              key={row.item.id}
+              item={row.item}
+              index={row.index}
+              showCategory={row.showCategory}
+              selectedIndex={selectedIndex}
+            />
+          ))}
           {visible.startIndex + visible.items.length < items.length ? <Text color={MUTED}>↓ more</Text> : null}
         </>
       )}

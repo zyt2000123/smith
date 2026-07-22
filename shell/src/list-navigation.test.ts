@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getVisibleList, moveListIndex } from "./list-navigation.js";
+import { getCategorizedVisibleList, getVisibleList, moveListIndex } from "./list-navigation.js";
 
 test("list navigation clamps at the first and last item", () => {
   assert.equal(moveListIndex(0, 5, "up", 4), 0);
@@ -23,4 +23,21 @@ test("visible list window follows the selected item without dropping data", () =
   assert.deepEqual(getVisibleList(items, 0, 4), { items: ["a", "b", "c", "d"], startIndex: 0 });
   assert.deepEqual(getVisibleList(items, 4, 4), { items: ["c", "d", "e", "f"], startIndex: 2 });
   assert.deepEqual(getVisibleList(items, 99, 4), { items: ["c", "d", "e", "f"], startIndex: 2 });
+});
+
+test("visible categorized rows retain absolute selection and visible category headings", () => {
+  const rows = getCategorizedVisibleList(
+    [
+      { id: "a", category: "Core" },
+      { id: "b", category: "Core" },
+      { id: "c", category: "Tools" },
+    ],
+    4,
+  );
+
+  assert.deepEqual(rows, [
+    { item: { id: "a", category: "Core" }, index: 4, showCategory: true },
+    { item: { id: "b", category: "Core" }, index: 5, showCategory: false },
+    { item: { id: "c", category: "Tools" }, index: 6, showCategory: true },
+  ]);
 });

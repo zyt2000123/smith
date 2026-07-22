@@ -4,6 +4,7 @@ import stringWidth from "string-width";
 export type MarkdownSegment =
   | { type: "markdown"; text: string }
   | { type: "mermaid"; text: string }
+  | { type: "diff"; language: "diff" | "patch"; text: string }
   | { type: "code"; language: string; text: string };
 
 type OpenFence = {
@@ -39,6 +40,25 @@ function isClosingFence(line: string, fence: OpenFence): boolean {
   return Boolean(match && match[2]?.[0] === fence.marker && match[2].length >= fence.length);
 }
 
+function fencedSegment(fence: OpenFence): MarkdownSegment {
+  const text = fence.body.join("\n");
+  if (fence.language === "mermaid") return { type: "mermaid", text };
+  if (fence.language === "diff" || fence.language === "patch") {
+    return { type: "diff", language: fence.language, text };
+  }
+  return { type: "code", language: fence.language, text };
+}
+
+function openFence(line: string, opening: RegExpMatchArray): OpenFence {
+  return {
+    marker: opening[2][0] as "`" | "~",
+    length: opening[2].length,
+    line,
+    language: opening[3]?.toLowerCase() || "text",
+    body: [],
+  };
+}
+
 /** Splits fenced code blocks from surrounding Markdown. */
 export function splitMarkdownBlocks(markdown: string): MarkdownSegment[] {
   const segments: MarkdownSegment[] = [];
@@ -50,13 +70,7 @@ export function splitMarkdownBlocks(markdown: string): MarkdownSegment[] {
       const opening = line.match(FENCE_PATTERN);
       if (opening) {
         pushMarkdown(segments, pendingMarkdown.splice(0));
-        fence = {
-          marker: opening[2][0] as "`" | "~",
-          length: opening[2].length,
-          line,
-          language: opening[3]?.toLowerCase() || "text",
-          body: [],
-        };
+        fence = openFence(line, opening);
         continue;
       }
 
@@ -65,10 +79,7 @@ export function splitMarkdownBlocks(markdown: string): MarkdownSegment[] {
     }
 
     if (isClosingFence(line, fence)) {
-      const text = fence.body.join("\n");
-      segments.push(
-        fence.language === "mermaid" ? { type: "mermaid", text } : { type: "code", language: fence.language, text },
-      );
+      segments.push(fencedSegment(fence));
       fence = null;
       continue;
     }
@@ -81,11 +92,6 @@ export function splitMarkdownBlocks(markdown: string): MarkdownSegment[] {
   }
   pushMarkdown(segments, pendingMarkdown);
   return segments;
-}
-
-/** Backward-compatible alias for callers that only need Mermaid handling. */
-export function splitMermaidBlocks(markdown: string): MarkdownSegment[] {
-  return splitMarkdownBlocks(markdown);
 }
 
 function normalizeDiagramText(value: string): string {
