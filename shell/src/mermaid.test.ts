@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import stringWidth from "string-width";
 
-import { renderMermaidDiagram, renderSimpleTextDiagram, splitMarkdownBlocks, splitMermaidBlocks } from "./mermaid.js";
+import { renderMermaidDiagram, renderSimpleTextDiagram, splitMarkdownBlocks } from "./mermaid.js";
 
 test("splits ordinary fenced code into a code segment", () => {
   assert.deepEqual(splitMarkdownBlocks("Before\n\n```python\nprint('hi')\n```\n\nAfter"), [
@@ -12,8 +12,16 @@ test("splits ordinary fenced code into a code segment", () => {
   ]);
 });
 
+test("splits fenced diff blocks into a dedicated structured-rendering segment", () => {
+  assert.deepEqual(splitMarkdownBlocks("before\n```diff\n-old\n+new\n```\nafter"), [
+    { type: "markdown", text: "before" },
+    { type: "diff", language: "diff", text: "-old\n+new" },
+    { type: "markdown", text: "after" },
+  ]);
+});
+
 test("splits Mermaid fenced blocks from surrounding Markdown", () => {
-  const segments = splitMermaidBlocks("Before\n\n```mermaid\nflowchart TD\n  A[Start] --> B[End]\n```\n\nAfter");
+  const segments = splitMarkdownBlocks("Before\n\n```mermaid\nflowchart TD\n  A[Start] --> B[End]\n```\n\nAfter");
 
   assert.deepEqual(segments, [
     { type: "markdown", text: "Before\n" },
@@ -23,7 +31,7 @@ test("splits Mermaid fenced blocks from surrounding Markdown", () => {
 });
 
 test("recognizes Mermaid language tags case-insensitively", () => {
-  const segments = splitMermaidBlocks("```Mermaid\ngraph LR\n  A --> B\n```");
+  const segments = splitMarkdownBlocks("```Mermaid\ngraph LR\n  A --> B\n```");
 
   assert.deepEqual(segments, [{ type: "mermaid", text: "graph LR\n  A --> B" }]);
 });
@@ -31,7 +39,7 @@ test("recognizes Mermaid language tags case-insensitively", () => {
 test("keeps an unfinished Mermaid fence as ordinary Markdown", () => {
   const source = "```mermaid\nflowchart TD\n  A --> B";
 
-  assert.deepEqual(splitMermaidBlocks(source), [{ type: "markdown", text: source }]);
+  assert.deepEqual(splitMarkdownBlocks(source), [{ type: "markdown", text: source }]);
 });
 
 test("renders a basic Mermaid flowchart as terminal Unicode", () => {

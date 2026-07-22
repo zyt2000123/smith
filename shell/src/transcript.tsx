@@ -6,11 +6,15 @@ import { useEffect, useState } from "react";
 
 import type { ToolState } from "./activity.js";
 import { CodeBlock, type CodeHighlighter } from "./code-block.js";
+import { DiffBlock } from "./diff-block.js";
+import { DisplayText } from "./display-text.js";
 import { splitMarkdownLayoutBlocks } from "./markdown-layout.js";
+import { MarkdownTableBlock } from "./markdown-table.js";
 import { type MarkdownSegment, renderMermaidDiagram, renderSimpleTextDiagram, splitMarkdownBlocks } from "./mermaid.js";
 import { stripEmojiIcons } from "./output.js";
 import { skillPresentation } from "./skill-presentation.js";
 import { SmithUiBlock as SmithUiView } from "./smith-ui.js";
+import { splitStreamingMarkdown } from "./streaming-markdown.js";
 import { ACCENT, ASSISTANT, BORDER, ERROR, INFO, MUTED, SKILL, SUCCESS, WARNING } from "./theme.js";
 import type {
   SkillBlock,
@@ -63,17 +67,15 @@ export function userMessageBoxProps(columns: number) {
   } as const;
 }
 
-function DiagramBlock({ diagram }: { diagram: string }) {
+function DiagramBlock({ diagram, width }: { diagram: string; width: number }) {
   return (
     <Box flexDirection="column" marginTop={1} marginBottom={1}>
-      <Text color={ASSISTANT} wrap="truncate">
-        {diagram}
-      </Text>
+      <DisplayText text={diagram} width={width} color={ASSISTANT} breakLongTokens preserveWhitespace />
     </Box>
   );
 }
 
-function MarkdownContent({ text }: { text: string }) {
+function MarkdownContent({ text, width }: { text: string; width: number }) {
   const layoutBlocks = splitMarkdownLayoutBlocks(text);
   const blockKeyCounts = new Map<string, number>();
 
@@ -87,7 +89,11 @@ function MarkdownContent({ text }: { text: string }) {
         blockKeyCounts.set(blockBaseKey, blockOccurrence + 1);
         return (
           <Box key={`${blockBaseKey}-${blockOccurrence}`} marginBottom={needsSpacing ? 1 : 0}>
-            <MarkdownText text={block.text} {...MARKDOWN_OPTIONS} />
+            {block.kind === "table" ? (
+              <MarkdownTableBlock markdown={block.text} width={width} />
+            ) : (
+              <MarkdownText text={block.text} width={width} {...MARKDOWN_OPTIONS} />
+            )}
           </Box>
         );
       })}
@@ -98,36 +104,67 @@ function MarkdownContent({ text }: { text: string }) {
 function CodeSegment({
   segment,
   highlighter,
+  width,
 }: {
   segment: Extract<MarkdownSegment, { type: "code" }>;
   highlighter?: CodeHighlighter;
+  width: number;
 }) {
   const diagram =
     segment.language === "text" || segment.language === "diagram" ? renderSimpleTextDiagram(segment.text) : null;
 
   return diagram ? (
-    <DiagramBlock diagram={diagram} />
+    <DiagramBlock diagram={diagram} width={width} />
   ) : (
-    <CodeBlock code={segment.text} language={segment.language} highlighter={highlighter} />
+    <CodeBlock code={segment.text} language={segment.language} highlighter={highlighter} width={width} />
   );
 }
 
-function MermaidSegment({ source }: { source: string }) {
+function MermaidSegment({ source, width }: { source: string; width: number }) {
   const diagram = renderMermaidDiagram(source);
   return diagram ? (
-    <DiagramBlock diagram={diagram} />
+    <DiagramBlock diagram={diagram} width={width} />
   ) : (
-    <MarkdownText text={`\`\`\`mermaid\n${source}\n\`\`\``} {...MARKDOWN_OPTIONS} />
+    <MarkdownText text={`\`\`\`mermaid\n${source}\n\`\`\``} width={width} {...MARKDOWN_OPTIONS} />
   );
 }
 
-function MarkdownSegmentView({ segment, highlighter }: { segment: MarkdownSegment; highlighter?: CodeHighlighter }) {
-  if (segment.type === "markdown") return segment.text ? <MarkdownContent text={segment.text} /> : null;
-  if (segment.type === "code") return <CodeSegment segment={segment} highlighter={highlighter} />;
-  return <MermaidSegment source={segment.text} />;
+function DiffSegment({
+  segment,
+  highlighter,
+  width,
+}: {
+  segment: Extract<MarkdownSegment, { type: "diff" }>;
+  highlighter?: CodeHighlighter;
+  width: number;
+}) {
+  return <DiffBlock source={segment.text} width={width} highlighter={highlighter} />;
 }
 
-function MarkdownMessage({ text, highlighter }: { text: string; highlighter?: CodeHighlighter }) {
+function MarkdownSegmentView({
+  segment,
+  highlighter,
+  width,
+}: {
+  segment: MarkdownSegment;
+  highlighter?: CodeHighlighter;
+  width: number;
+}) {
+  if (segment.type === "markdown") return segment.text ? <MarkdownContent text={segment.text} width={width} /> : null;
+  if (segment.type === "diff") return <DiffSegment segment={segment} highlighter={highlighter} width={width} />;
+  if (segment.type === "code") return <CodeSegment segment={segment} highlighter={highlighter} width={width} />;
+  return <MermaidSegment source={segment.text} width={width} />;
+}
+
+function MarkdownDocument({
+  text,
+  highlighter,
+  width,
+}: {
+  text: string;
+  highlighter?: CodeHighlighter;
+  width: number;
+}) {
   const segments = splitMarkdownBlocks(text);
   const keyCounts = new Map<string, number>();
   return (
@@ -137,8 +174,28 @@ function MarkdownMessage({ text, highlighter }: { text: string; highlighter?: Co
         const occurrence = keyCounts.get(baseKey) ?? 0;
         keyCounts.set(baseKey, occurrence + 1);
         const key = `${baseKey}-${occurrence}`;
-        return <MarkdownSegmentView key={key} segment={segment} highlighter={highlighter} />;
+        return <MarkdownSegmentView key={key} segment={segment} highlighter={highlighter} width={width} />;
       })}
+    </>
+  );
+}
+
+function MarkdownMessage({
+  text,
+  highlighter,
+  streaming = false,
+  width,
+}: {
+  text: string;
+  highlighter?: CodeHighlighter;
+  streaming?: boolean;
+  width: number;
+}) {
+  const snapshot = splitStreamingMarkdown(text, streaming);
+  return (
+    <>
+      {snapshot.stable ? <MarkdownDocument text={snapshot.stable} highlighter={highlighter} width={width} /> : null}
+      {snapshot.pending ? <MarkdownDocument text={snapshot.pending} highlighter={highlighter} width={width} /> : null}
     </>
   );
 }
@@ -181,12 +238,20 @@ function truncateLines(text: string, max = 4): { text: string; hidden: number } 
   };
 }
 
-function SystemMessage({ entry, highlighter }: { entry: SystemEntry; highlighter?: CodeHighlighter }) {
+function SystemMessage({
+  entry,
+  highlighter,
+  width,
+}: {
+  entry: SystemEntry;
+  highlighter?: CodeHighlighter;
+  width: number;
+}) {
   const trimmed = entry.text.trim();
   return (
     <Box marginBottom={1} paddingLeft={1}>
       {trimmed ? (
-        <MarkdownMessage text={trimmed} highlighter={highlighter} />
+        <MarkdownMessage text={trimmed} highlighter={highlighter} width={width} />
       ) : (
         <Text color={entry.tone === "error" ? ERROR : MUTED}>{entry.text}</Text>
       )}
@@ -512,12 +577,15 @@ function TurnView({
   entry,
   viewMode,
   highlighter,
+  terminalColumns,
 }: {
   entry: TurnEntry;
   viewMode: TranscriptViewMode;
   highlighter?: CodeHighlighter;
+  terminalColumns: number;
 }) {
-  const { columns } = useWindowSize();
+  const columns = terminalColumns;
+  const markdownWidth = Math.max(1, columns - 4);
   const hasAssistantBody = entry.assistantText.trim().length > 0;
   const assistantBody = hasAssistantBody ? stripEmojiIcons(entry.assistantText).trimEnd() : "";
   const provisionalBody = stripEmojiIcons(entry.provisional.map((item) => item.text).join(""));
@@ -559,13 +627,20 @@ function TurnView({
         <Box marginTop={1} paddingLeft={2}>
           <AssistantMarker active={entry.streaming} />
           <Box flexDirection="column" flexGrow={1}>
-            {hasAssistantBody ? <MarkdownMessage text={assistantBody} highlighter={highlighter} /> : null}
+            {hasAssistantBody ? (
+              <MarkdownMessage
+                text={assistantBody}
+                highlighter={highlighter}
+                streaming={entry.streaming}
+                width={markdownWidth}
+              />
+            ) : null}
             {hasProvisionalBody ? (
               <Box flexDirection="column">
                 <Text color={MUTED} italic>
                   draft…
                 </Text>
-                <MarkdownMessage text={provisionalBody} highlighter={highlighter} />
+                <MarkdownMessage text={provisionalBody} highlighter={highlighter} streaming width={markdownWidth} />
               </Box>
             ) : hasAssistantBody ? null : (
               <ProcessingIndicator />
@@ -586,18 +661,23 @@ export function TranscriptEntryView({
   entry,
   viewMode,
   highlighter,
+  terminalColumns,
 }: {
   entry: TranscriptEntry;
   viewMode: TranscriptViewMode;
   highlighter?: CodeHighlighter;
+  /** Optional viewport injection for deterministic terminal-renderer tests. */
+  terminalColumns?: number;
 }) {
+  const { columns: windowColumns } = useWindowSize();
+  const columns = terminalColumns ?? windowColumns;
   if (entry.kind === "system") {
-    return <SystemMessage entry={entry} highlighter={highlighter} />;
+    return <SystemMessage entry={entry} highlighter={highlighter} width={Math.max(1, columns - 1)} />;
   }
 
   return (
     <Box flexDirection="column">
-      <TurnView entry={entry} viewMode={viewMode} highlighter={highlighter} />
+      <TurnView entry={entry} viewMode={viewMode} highlighter={highlighter} terminalColumns={columns} />
     </Box>
   );
 }
