@@ -22,6 +22,7 @@ from typing import AsyncGenerator, NamedTuple
 from uuid import uuid4
 
 from engine.identity_catalog import IdentityCatalog, IdentitySpec, RouteDecision
+from engine.llm.observability import generation_context, llm_purpose
 from engine.llm.port import LLMPort
 from engine.observability import (
     EventType,
@@ -1118,7 +1119,7 @@ async def _run_events_with_runtime(
         guard = FailureLoopGuard()
         with use_fact_gate(_fact_gate_for_request(request, runtime, services)), use_approval_context(
             APPROVAL_BROKER, run_id
-        ):
+        ), generation_context(run_id=run_id, session_id=runtime.session_id), llm_purpose("main"):
             async for event in run_agent_stream(
                 services.llm, s.system_prompt,
                 _merge_context(request.message, request.context),

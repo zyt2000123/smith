@@ -86,6 +86,7 @@ class AnthropicAdapter(HTTPAdapterMixin):
             raw_finish_reason: str | None = None
             usage: dict[str, Any] = {}
             emitted_usage = False
+            served_model: str | None = None
             try:
                 response = await self._http.send(http_request, stream=True)
                 response.raise_for_status()
@@ -107,6 +108,9 @@ class AnthropicAdapter(HTTPAdapterMixin):
                         message = event.get("message")
                         if isinstance(message, dict):
                             self._merge_usage(usage, message.get("usage"))
+                            message_model = message.get("model")
+                            if isinstance(message_model, str) and message_model:
+                                served_model = message_model
                         continue
 
                     if event_type == "content_block_start":
@@ -201,6 +205,7 @@ class AnthropicAdapter(HTTPAdapterMixin):
                     {
                         "finish_reason": normalize_finish_reason(raw_finish_reason),
                         "raw_finish_reason": raw_finish_reason,
+                        "model": served_model or self.model,
                     },
                 )
                 return
@@ -457,6 +462,7 @@ class AnthropicAdapter(HTTPAdapterMixin):
 
         raw_finish_reason = payload.get("stop_reason")
         usage = payload.get("usage")
+        served_model = payload.get("model")
         return ChatResponse(
             text="".join(text_parts),
             reasoning="".join(reasoning_parts),
@@ -464,6 +470,7 @@ class AnthropicAdapter(HTTPAdapterMixin):
             usage=usage if isinstance(usage, dict) else None,
             finish_reason=normalize_finish_reason(raw_finish_reason),
             raw_finish_reason=raw_finish_reason if isinstance(raw_finish_reason, str) else None,
+            model=served_model if isinstance(served_model, str) else "",
         )
 
     @staticmethod

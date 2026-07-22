@@ -311,7 +311,11 @@ def test_anthropic_stream_normalizes_text_tools_usage_and_completion() -> None:
     assert events[3].data["arguments_delta"] == '{"query":"'
     assert events[4].data["arguments_delta"] == 'status"}'
     assert events[5].data == {"usage": {"input_tokens": 4, "output_tokens": 9}}
-    assert events[-1].data == {"finish_reason": "tool_calls", "raw_finish_reason": "tool_use"}
+    assert events[-1].data == {
+        "finish_reason": "tool_calls",
+        "raw_finish_reason": "tool_use",
+        "model": "claude-test",
+    }
 
 
 def test_anthropic_moves_late_system_instruction_into_ordered_user_turn() -> None:

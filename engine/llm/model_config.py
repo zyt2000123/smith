@@ -253,6 +253,35 @@ def _resolve_timeout(
     return resolved
 
 
+def resolve_price_table() -> dict[str, dict[str, float]]:
+    """Return the optional ``llm.pricing`` table (USD per million tokens).
+
+    Keys are model names; each value may price ``input``, ``output``,
+    ``cache_read`` and ``cache_write`` tokens.  Prices always come from local
+    configuration — never from a gateway or provider API.
+    """
+    platform = load_yaml(DATA_DIR / "config.yaml")
+    template = load_yaml(SMITH_PROFILE_DIR / "config.yaml")
+    agent = load_yaml(AGENT_DIR / "config.yaml")
+    merged = merge_configs(platform, template, agent)
+    llm = merged.get("llm")
+    pricing = llm.get("pricing") if isinstance(llm, dict) else None
+    if not isinstance(pricing, dict):
+        return {}
+    table: dict[str, dict[str, float]] = {}
+    for model, prices in pricing.items():
+        if not isinstance(prices, dict):
+            continue
+        entry: dict[str, float] = {}
+        for key in ("input", "output", "cache_read", "cache_write"):
+            value = prices.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                entry[key] = float(value)
+        if entry:
+            table[str(model)] = entry
+    return table
+
+
 def resolve_llm_config(
     session_override: dict[str, Any] | None = None,
     usage: LLMUsage | str = LLMUsage.INTERACTIVE,

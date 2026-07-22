@@ -37,6 +37,9 @@ def test_server_lifespan_materializes_local_auth_token_before_shell_requests(
         async def sync_from_traces(self) -> int:
             return 0
 
+        async def record_generation(self, record) -> None:
+            return None
+
     monkeypatch.setattr(main, "get_app_db", fake_get_app_db)
     monkeypatch.setattr(main, "close_db", fake_close_db)
     monkeypatch.setattr(main, "close_shared_llm_clients", fake_close_clients)
@@ -58,6 +61,9 @@ def test_server_lifespan_syncs_token_stats_before_serving_requests(
         async def sync_from_traces(self) -> int:
             calls.append("sync")
             return 0
+
+        async def record_generation(self, record) -> None:
+            return None
 
     async def fake_get_app_db():
         return None
@@ -100,6 +106,9 @@ def test_server_lifespan_recovers_interrupted_runs_before_serving_requests(
         async def sync_from_traces(self) -> int:
             return 0
 
+        async def record_generation(self, record) -> None:
+            return None
+
     async def fake_get_app_db():
         return None
 
@@ -135,6 +144,9 @@ def test_server_lifespan_survives_unavailable_run_state_storage(
     class FakeTokenStatsService:
         async def sync_from_traces(self) -> int:
             return 0
+
+        async def record_generation(self, record) -> None:
+            return None
 
     async def fake_get_app_db():
         return None

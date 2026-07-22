@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from engine.llm.contracts import ChatResponse, LLMResponseError, ToolCallData
 from engine.llm.events import ProviderEvent, ProviderEventType
+from engine.llm.usage import normalize_usage
 from engine.react_budget import (
     CONTINUE_AFTER_LENGTH_HINT,
     CONVERSATION_HARD_LIMIT,
@@ -92,6 +93,7 @@ class _ProviderResponseAccumulator:
     finish_reason: str | None = None
     raw_finish_reason: str | None = None
     streamed_text: bool = False
+    model: str = ""
 
     def add(self, event: ProviderEvent) -> None:
         if event.type == ProviderEventType.OUTPUT_TEXT_DELTA:
@@ -134,6 +136,9 @@ class _ProviderResponseAccumulator:
             raw_finish_reason = event.data.get("raw_finish_reason")
             self.finish_reason = finish_reason if isinstance(finish_reason, str) else None
             self.raw_finish_reason = raw_finish_reason if isinstance(raw_finish_reason, str) else None
+            model = event.data.get("model")
+            if isinstance(model, str) and model:
+                self.model = model
 
     def build(self) -> ChatResponse:
         tool_calls: list[ToolCallData] = []
@@ -172,6 +177,7 @@ class _ProviderResponseAccumulator:
             usage=self.usage,
             finish_reason=self.finish_reason,
             raw_finish_reason=self.raw_finish_reason,
+            model=self.model,
         )
 
 
@@ -215,29 +221,15 @@ def _provisional_retract_event(provision_id: str, reason: str) -> ExecutionEvent
 
 
 def _usage_event_data(usage: dict | None) -> dict | None:
-    if not isinstance(usage, dict):
+    normalized = normalize_usage(usage)
+    if not any(normalized.values()):
         return None
-
-    def number(*keys: str) -> int:
-        for key in keys:
-            value = usage.get(key)
-            if isinstance(value, (int, float)) and value >= 0:
-                return int(value)
-        return 0
-
-    input_tokens = number("prompt_tokens", "input_tokens")
-    output_tokens = number("completion_tokens", "output_tokens")
-    total_tokens = number("total_tokens")
-    if total_tokens == 0:
-        total_tokens = input_tokens + output_tokens
-
-    if input_tokens == 0 and output_tokens == 0 and total_tokens == 0:
-        return None
-
+    # Detail keys (cache/reasoning) appear only when non-zero so traces stay
+    # compact and pre-existing three-key consumers see an unchanged payload.
     return {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": total_tokens,
+        key: value
+        for key, value in normalized.items()
+        if value or key in ("input_tokens", "output_tokens", "total_tokens")
     }
 
 

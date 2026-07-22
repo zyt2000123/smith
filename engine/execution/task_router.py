@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from engine.identity_catalog import IdentityCatalog, RouteDecision
+from engine.llm.observability import llm_purpose
 
 # Backward-compatible re-exports — canonical home is engine.safety.eval_guard.
 from engine.safety.eval_guard import (  # noqa: F401
@@ -54,16 +55,17 @@ async def route_task_with_llm(
     if not choices:
         return deterministic
     try:
-        response = await llm.chat([
-            {
-                "role": "system",
-                "content": (
-                    "Choose exactly one declared route token, or DIRECT. "
-                    f"Declared routes: {', '.join(choices)}"
-                ),
-            },
-            {"role": "user", "content": user_message[:1000]},
-        ])
+        with llm_purpose("routing"):
+            response = await llm.chat([
+                {
+                    "role": "system",
+                    "content": (
+                        "Choose exactly one declared route token, or DIRECT. "
+                        f"Declared routes: {', '.join(choices)}"
+                    ),
+                },
+                {"role": "user", "content": user_message[:1000]},
+            ])
         selected = response.text.strip()
         if selected.upper() == "DIRECT":
             return deterministic
