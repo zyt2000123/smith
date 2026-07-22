@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from engine.llm.contracts import DEFAULT_CONTEXT_WINDOW
+from engine.llm.observability import llm_purpose
 
 if TYPE_CHECKING:
     from engine.llm.port import LLMPort
@@ -314,7 +315,8 @@ async def compact_history(conversation: list[dict], llm: "LLMPort") -> list[dict
         if role in ("user", "assistant") and content:
             summary_messages.append({"role": role, "content": content[:2000]})
 
-    response = await llm.chat(summary_messages + [{"role": "user", "content": COMPACT_USER_PROMPT}])
+    with llm_purpose("compact"):
+        response = await llm.chat(summary_messages + [{"role": "user", "content": COMPACT_USER_PROMPT}])
     summary = (response.text or "").strip()
     finish_reason = getattr(response, "finish_reason", None)
     if not summary or finish_reason not in (None, "stop"):

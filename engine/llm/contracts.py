@@ -108,6 +108,9 @@ class ChatResponse:
     usage: dict[str, Any] | None = None
     finish_reason: str | None = None
     raw_finish_reason: str | None = None
+    # The model that actually served the call, as reported by the provider;
+    # empty when the provider omits it (callers fall back to the config model).
+    model: str = ""
 
     @property
     def has_tool_calls(self) -> bool:

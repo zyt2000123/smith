@@ -296,3 +296,64 @@ async def test_sync_from_messages_provides_explicit_local_estimate(tmp_path: Pat
     async with db.execute("SELECT count(*) AS count FROM token_usage_events") as cursor:
         row = await cursor.fetchone()
     assert row["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_from_traces_skips_orphaned_sessions(tmp_path: Path) -> None:
+    """Traces referencing deleted sessions must be skipped, not crash the sync."""
+    db = await aiosqlite.connect(":memory:")
+    db.row_factory = aiosqlite.Row
+    await db.executescript(
+        """
+        PRAGMA foreign_keys=ON;
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL
+        );
+        CREATE TABLE token_usage_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            run_id TEXT,
+            source_key TEXT UNIQUE,
+            project_name TEXT NOT NULL DEFAULT '',
+            project_path TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            occurred_at TEXT NOT NULL
+        );
+        INSERT INTO sessions (id, agent_id) VALUES ('s1', 'agent-1');
+        """
+    )
+    runs = tmp_path / "runs"
+    traces = tmp_path / "traces"
+    runs.mkdir()
+    traces.mkdir()
+
+    def _write_run(run_id: str, session_id: str) -> None:
+        (runs / f"{run_id}.json").write_text(
+            json.dumps({"run_id": run_id, "session_id": session_id}),
+            encoding="utf-8",
+        )
+        (traces / f"{run_id}.jsonl").write_text(
+            json.dumps({
+                "seq": 1,
+                "timestamp": "2026-07-14T10:00:00+00:00",
+                "type": "token_usage",
+                "data": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+    _write_run("run-live", "s1")
+    _write_run("run-orphan", "ghost-session")
+
+    async def db_provider() -> aiosqlite.Connection:
+        return db
+
+    service = TokenStatsService(db_provider, trace_root=tmp_path)
+    assert await service.sync_from_traces() == 1
+
+    rows = await db.execute_fetchall("SELECT run_id FROM token_usage_events")
+    assert [row["run_id"] for row in rows] == ["run-live"]

@@ -67,6 +67,7 @@ class OpenAIAdapter(HTTPAdapterMixin):
         reasoning = choice.get("reasoning_content")
         if reasoning is not None and not isinstance(reasoning, str):
             raise LLMResponseError("LLM response reasoning_content must be a string or null.")
+        served_model = data.get("model")
         return ChatResponse(
             text=text or "",
             reasoning=reasoning or "",
@@ -74,6 +75,7 @@ class OpenAIAdapter(HTTPAdapterMixin):
             usage=data.get("usage") if isinstance(data.get("usage"), dict) else None,
             finish_reason=normalize_finish_reason(raw_finish_reason),
             raw_finish_reason=raw_finish_reason if isinstance(raw_finish_reason, str) else None,
+            model=served_model if isinstance(served_model, str) else "",
         )
 
     def stream_response(self, request: LLMRequest) -> AsyncIterator[ProviderEvent]:
@@ -89,6 +91,7 @@ class OpenAIAdapter(HTTPAdapterMixin):
             saw_content_event = False
             saw_done = False
             raw_finish_reason: str | None = None
+            served_model: str | None = None
             try:
                 response = await self._http.send(http_request, stream=True)
                 response.raise_for_status()
@@ -110,6 +113,10 @@ class OpenAIAdapter(HTTPAdapterMixin):
                         raise LLMResponseError("Provider stream contains invalid JSON.") from exc
                     if not isinstance(chunk, dict):
                         raise LLMResponseError("Provider stream event must be a JSON object.")
+
+                    chunk_model = chunk.get("model")
+                    if served_model is None and isinstance(chunk_model, str) and chunk_model:
+                        served_model = chunk_model
 
                     usage = chunk.get("usage")
                     if isinstance(usage, dict):
@@ -176,6 +183,7 @@ class OpenAIAdapter(HTTPAdapterMixin):
                     {
                         "finish_reason": normalize_finish_reason(raw_finish_reason),
                         "raw_finish_reason": raw_finish_reason,
+                        "model": served_model or self.model,
                     },
                 )
                 return

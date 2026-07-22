@@ -15,6 +15,8 @@ import logging
 from dataclasses import dataclass
 from typing import Literal, Mapping, Protocol
 
+from engine.llm.observability import llm_purpose
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,10 +79,11 @@ class LLMGate:
 
         try:
             prompt = self._prompt_template.format(output=output[:2000])
-            resp = await self._llm.chat([
-                {"role": "system", "content": "You are a quality gate. Evaluate the output and respond with ONLY 'PASS' or 'FAIL: <reason>'. Be strict."},
-                {"role": "user", "content": prompt},
-            ])
+            with llm_purpose("gate"):
+                resp = await self._llm.chat([
+                    {"role": "system", "content": "You are a quality gate. Evaluate the output and respond with ONLY 'PASS' or 'FAIL: <reason>'. Be strict."},
+                    {"role": "user", "content": prompt},
+                ])
             text = resp.text.strip()
             if text.startswith("FAIL"):
                 reason = text[5:].strip(": ")

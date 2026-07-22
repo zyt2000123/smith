@@ -4,12 +4,15 @@ from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
 from common.config import AGENT_DIR
 from engine.observability import ObservabilityReader
+
+if TYPE_CHECKING:
+    from engine.llm.observability import GenerationRecord
 
 from ..infrastructure.database import get_app_db
 
@@ -84,6 +87,122 @@ class TokenStatsService:
         )
         await db.commit()
 
+    async def record_generation(self, record: "GenerationRecord") -> None:
+        """Persist one generation record; the engine-side sink implementation."""
+        usage = record.usage if isinstance(record.usage, dict) else {}
+        db = await self._db_provider()
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO llm_generations (
+                source_key, session_id, run_id, purpose, provider, model,
+                input_tokens, output_tokens, total_tokens,
+                cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                ttft_ms, total_ms, stream, ok, occurred_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.source_key,
+                record.session_id,
+                record.run_id,
+                record.purpose,
+                record.provider,
+                record.model,
+                self._non_negative_int(usage.get("input_tokens")),
+                self._non_negative_int(usage.get("output_tokens")),
+                self._non_negative_int(usage.get("total_tokens")),
+                self._non_negative_int(usage.get("cache_read_tokens")),
+                self._non_negative_int(usage.get("cache_write_tokens")),
+                self._non_negative_int(usage.get("reasoning_tokens")),
+                record.ttft_ms,
+                max(0, int(record.total_ms)),
+                1 if record.stream else 0,
+                1 if record.ok else 0,
+                record.occurred_at,
+            ),
+        )
+        await db.commit()
+
+    async def get_generation_stats(self, year: int | None = None) -> dict[str, Any]:
+        """Aggregate generation records by model and purpose, with optional cost.
+
+        Cost is derived read-side from the local ``llm.pricing`` table (USD per
+        million tokens); without a price entry a group reports ``cost=None``.
+        """
+        selected_year = year or datetime.now(timezone.utc).year
+        start = date(selected_year, 1, 1)
+        end = date(selected_year + 1, 1, 1)
+        db = await self._db_provider()
+        rows = await db.execute_fetchall(
+            """
+            SELECT model, purpose,
+                   COUNT(*) AS calls,
+                   SUM(input_tokens) AS input_tokens,
+                   SUM(output_tokens) AS output_tokens,
+                   SUM(total_tokens) AS total_tokens,
+                   SUM(cache_read_tokens) AS cache_read_tokens,
+                   SUM(cache_write_tokens) AS cache_write_tokens,
+                   SUM(reasoning_tokens) AS reasoning_tokens,
+                   SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS failed_calls,
+                   AVG(CASE WHEN ok=1 THEN total_ms END) AS avg_total_ms,
+                   AVG(CASE WHEN ok=1 THEN ttft_ms END) AS avg_ttft_ms
+            FROM llm_generations
+            WHERE substr(occurred_at, 1, 10) >= ?
+              AND substr(occurred_at, 1, 10) < ?
+            GROUP BY model, purpose
+            ORDER BY total_tokens DESC
+            """,
+            (start.isoformat(), end.isoformat()),
+        )
+        price_table = self._load_price_table()
+        groups: list[dict[str, Any]] = []
+        total_cost: float | None = None
+        for row in rows:
+            group = {key: row[key] for key in row.keys()}
+            for key in ("avg_total_ms", "avg_ttft_ms"):
+                group[key] = round(row[key], 1) if row[key] is not None else None
+            cost = self._generation_cost(group, price_table.get(str(row["model"])))
+            group["cost"] = cost
+            if cost is not None:
+                total_cost = (total_cost or 0.0) + cost
+            groups.append(group)
+        return {
+            "year": selected_year,
+            "groups": groups,
+            "total_cost": round(total_cost, 6) if total_cost is not None else None,
+        }
+
+    @staticmethod
+    def _load_price_table() -> dict[str, dict[str, float]]:
+        try:
+            from engine.llm.model_config import resolve_price_table
+
+            return resolve_price_table()
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _generation_cost(
+        group: dict[str, Any],
+        prices: dict[str, float] | None,
+    ) -> float | None:
+        if not prices:
+            return None
+        # Cached tokens are billed at their own rate. OpenAI-style usage counts
+        # them inside input_tokens, so they are subtracted before pricing the
+        # uncached remainder; Anthropic-style usage keeps them separate, where
+        # the subtraction clamps to zero and slightly underprices instead of
+        # double-charging. Local prices are reference figures either way.
+        input_tokens = max(0, int(group.get("input_tokens") or 0))
+        cache_read = max(0, int(group.get("cache_read_tokens") or 0))
+        uncached_input = max(0, input_tokens - cache_read)
+        cost = (
+            uncached_input * prices.get("input", 0.0)
+            + cache_read * prices.get("cache_read", prices.get("input", 0.0))
+            + max(0, int(group.get("output_tokens") or 0)) * prices.get("output", 0.0)
+            + max(0, int(group.get("cache_write_tokens") or 0)) * prices.get("cache_write", 0.0)
+        ) / 1_000_000
+        return round(cost, 6)
+
     async def sync_from_traces(self) -> int:
         """Import exact token events from durable run traces, once per trace record.
 
@@ -91,6 +210,19 @@ class TokenStatsService:
         are not trustworthy numeric usage data. New traces preserve these metrics
         while continuing to redact secrets.
         """
+        try:
+            return await self._sync_from_traces_inner()
+        except Exception:
+            # A failed import must not leave the shared connection inside an
+            # open write transaction: that would hold the database write lock
+            # for the process lifetime and lock out every other writer.
+            try:
+                await (await self._db_provider()).rollback()
+            except Exception:
+                pass
+            raise
+
+    async def _sync_from_traces_inner(self) -> int:
         runs_dir = self._trace_root / "runs"
         if not runs_dir.is_dir():
             return await self._sync_message_estimates(await self._db_provider())
@@ -112,10 +244,17 @@ class TokenStatsService:
             return await self._sync_message_estimates(await self._db_provider())
 
         db = await self._db_provider()
+        # Old traces may reference sessions deleted since; importing them would
+        # violate the sessions FK, so they are skipped up front.
+        try:
+            session_rows = await db.execute_fetchall("SELECT id FROM sessions")
+        except aiosqlite.OperationalError:
+            session_rows = []
+        known_sessions = {str(row["id"]) for row in session_rows}
         imported = 0
         for run_id, records in self._observability.iter_traces():
             session_id = run_sessions.get(run_id)
-            if not session_id:
+            if not session_id or session_id not in known_sessions:
                 continue
             project_path = ""
             model = "unknown"

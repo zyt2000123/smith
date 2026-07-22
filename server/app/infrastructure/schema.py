@@ -96,6 +96,33 @@ CREATE TABLE IF NOT EXISTS token_usage_events (
 CREATE INDEX IF NOT EXISTS idx_token_usage_session_time
     ON token_usage_events(session_id, occurred_at);
 
+CREATE TABLE IF NOT EXISTS llm_generations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_key TEXT,
+    session_id TEXT,
+    run_id TEXT,
+    purpose TEXT NOT NULL DEFAULT 'other',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+    total_tokens INTEGER NOT NULL DEFAULT 0 CHECK (total_tokens >= 0),
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_read_tokens >= 0),
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_write_tokens >= 0),
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_tokens >= 0),
+    ttft_ms INTEGER,
+    total_ms INTEGER NOT NULL DEFAULT 0,
+    stream INTEGER NOT NULL DEFAULT 0,
+    ok INTEGER NOT NULL DEFAULT 1,
+    occurred_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_generations_source_key
+    ON llm_generations(source_key) WHERE source_key IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_llm_generations_time
+    ON llm_generations(occurred_at);
+
 """
 
 

@@ -76,8 +76,14 @@ __all__ = [
 
 async def async_main(argv: Sequence[str] | None = None) -> int:
     from common.database import close_db
+    from engine.llm.observability import set_default_generation_sink
+
+    from .services.token_stats_service import TokenStatsService
 
     parser = build_parser()
+    # The CLI runs the engine in-process (no server lifespan), so it installs
+    # the same generation-accounting sink the server installs at startup.
+    set_default_generation_sink(TokenStatsService().record_generation)
     try:
         args = parser.parse_args(list(argv) if argv is not None else None)
         handler = getattr(args, "handler", None)
@@ -86,6 +92,7 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
             return 1
         return await handler(args)
     finally:
+        set_default_generation_sink(None)
         await close_db()
 
 

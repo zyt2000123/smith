@@ -315,6 +315,7 @@ def test_chat_events_exposes_typed_provider_deltas_and_completion() -> None:
     assert events[-1].data == {
         "finish_reason": "tool_calls",
         "raw_finish_reason": "tool_calls",
+        "model": "m",
     }
 
 

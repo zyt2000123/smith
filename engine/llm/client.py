@@ -7,12 +7,26 @@ instances through :func:`engine.llm.factory.create_llm_client`.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
 from .adapters.base import ProviderAdapter
 from .contracts import ChatResponse, LLMRequest, LLMResponseError, ToolCallData
 from .events import ProviderEvent, ProviderEventType
+from .observability import (
+    GenerationRecord,
+    current_generation_scope,
+    current_purpose,
+    emit_generation,
+)
+from .usage import normalize_usage
+
+_CONTENT_EVENT_TYPES = (
+    ProviderEventType.OUTPUT_TEXT_DELTA,
+    ProviderEventType.REASONING_DELTA,
+    ProviderEventType.FUNCTION_CALL_ARGUMENTS_DELTA,
+)
 
 
 class ProviderClient:
@@ -22,6 +36,7 @@ class ProviderClient:
         self._adapter = adapter
         self.stream = stream
         self.provider = adapter.provider
+        self.model = getattr(adapter, "model", "") or ""
         self.capabilities = adapter.capabilities
         self.context_window = adapter.context_window
         self.context_window_declared = adapter.context_window_declared
@@ -38,13 +53,26 @@ class ProviderClient:
         prefix_cache_key: str | None = None,
     ) -> ChatResponse:
         self._validate_requested_capabilities(tools, prefix_cache_key)
-        return await self._adapter.complete(
-            LLMRequest(
-                messages=messages,
-                tools=tools,
-                prefix_cache_key=prefix_cache_key,
+        started_at = time.monotonic()
+        response: ChatResponse | None = None
+        try:
+            response = await self._adapter.complete(
+                LLMRequest(
+                    messages=messages,
+                    tools=tools,
+                    prefix_cache_key=prefix_cache_key,
+                )
             )
-        )
+            return response
+        finally:
+            await self._emit_generation(
+                usage_raw=response.usage if response is not None else None,
+                model=response.model if response is not None else "",
+                ttft_ms=None,
+                started_at=started_at,
+                stream=False,
+                ok=response is not None,
+            )
 
     def chat_events(
         self,
@@ -53,10 +81,76 @@ class ProviderClient:
     ) -> AsyncIterator[ProviderEvent]:
         self._validate_requested_capabilities(tools, None)
         if not self.stream:
+            # The non-streaming path funnels through ``chat()``, which already
+            # emits the generation record; wrapping it again would double-count.
             return self._complete_as_events(messages, tools)
         if not self.capabilities.streaming:
             raise LLMResponseError(f"Provider {self.provider} does not support streaming.")
-        return self._adapter.stream_response(LLMRequest(messages=messages, tools=tools))
+        return self._observed_stream(LLMRequest(messages=messages, tools=tools))
+
+    async def _observed_stream(self, request: LLMRequest) -> AsyncIterator[ProviderEvent]:
+        """Relay the adapter stream while accounting one generation record."""
+        # Attribution is captured eagerly: when a consumer abandons the stream
+        # without closing it, cleanup runs in a GC-scheduled task whose context
+        # no longer carries the caller's purpose/scope.
+        purpose = current_purpose()
+        scope = current_generation_scope()
+        started_at = time.monotonic()
+        ttft_ms: int | None = None
+        usage_raw: dict[str, Any] | None = None
+        served_model = ""
+        ok = False
+        try:
+            async for event in self._adapter.stream_response(request):
+                if ttft_ms is None and event.type in _CONTENT_EVENT_TYPES:
+                    ttft_ms = max(0, int((time.monotonic() - started_at) * 1000))
+                if event.type is ProviderEventType.USAGE:
+                    usage = event.data.get("usage")
+                    if isinstance(usage, dict):
+                        usage_raw = usage
+                elif event.type is ProviderEventType.RESPONSE_COMPLETED:
+                    model = event.data.get("model")
+                    if isinstance(model, str) and model:
+                        served_model = model
+                yield event
+            ok = True
+        finally:
+            await self._emit_generation(
+                usage_raw=usage_raw,
+                model=served_model,
+                ttft_ms=ttft_ms,
+                started_at=started_at,
+                stream=True,
+                ok=ok,
+                purpose=purpose,
+                scope=scope,
+            )
+
+    async def _emit_generation(
+        self,
+        *,
+        usage_raw: object,
+        model: str,
+        ttft_ms: int | None,
+        started_at: float,
+        stream: bool,
+        ok: bool,
+        purpose: str | None = None,
+        scope: tuple[str | None, str | None] | None = None,
+    ) -> None:
+        run_id, session_id = scope if scope is not None else current_generation_scope()
+        await emit_generation(GenerationRecord(
+            provider=self.provider,
+            model=model or self.model,
+            purpose=purpose if purpose is not None else current_purpose(),
+            usage=normalize_usage(usage_raw),
+            ttft_ms=ttft_ms,
+            total_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+            stream=stream,
+            ok=ok,
+            run_id=run_id,
+            session_id=session_id,
+        ))
 
     def _validate_requested_capabilities(
         self,

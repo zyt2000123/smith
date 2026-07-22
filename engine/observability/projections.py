@@ -47,7 +47,14 @@ class RunSummaryProjection:
         elif event.type is EventType.TOOL_CALL_RESULT and event.data.get("approval_required"):
             self._approval_required_count += 1
         elif event.type is EventType.TOKEN_USAGE:
-            for key in ("input_tokens", "output_tokens", "total_tokens"):
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "total_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "reasoning_tokens",
+            ):
                 value = event.data.get(key)
                 if isinstance(value, int) and value >= 0:
                     self._token_usage[key] += value

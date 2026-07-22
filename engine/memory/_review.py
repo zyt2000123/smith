@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from engine.llm.observability import llm_purpose
+
 from ._files import contains_injection, contains_secret
 
 if TYPE_CHECKING:
@@ -67,10 +69,11 @@ async def _llm_summarize(
     *,
     system_prompt: str | None = None,
 ) -> str:
-    resp = await llm.chat([
-        {"role": "system", "content": system_prompt or _DEFAULT_SYSTEM_PROMPT},
-        {"role": "user", "content": prompt},
-    ])
+    with llm_purpose("memory"):
+        resp = await llm.chat([
+            {"role": "system", "content": system_prompt or _DEFAULT_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ])
     return resp.text.strip()
 
 
@@ -130,21 +133,22 @@ async def _review_draft(
     review_policy: str = "(legacy quality rules)",
 ) -> dict:
     """Ask the reviewer model to evaluate a compilation draft."""
-    resp = await reviewer.chat([
-        {
-            "role": "system",
-            "content": "You are a memory quality reviewer. Output only valid JSON.",
-        },
-        {
-            "role": "user",
-            "content": _REVIEW_PROMPT.format(
-                target_view=target_view,
-                review_policy=review_policy,
-                source=_truncate_source(source, _MAX_REVIEW_SOURCE_CHARS),
-                draft=draft,
-            ),
-        },
-    ])
+    with llm_purpose("memory"):
+        resp = await reviewer.chat([
+            {
+                "role": "system",
+                "content": "You are a memory quality reviewer. Output only valid JSON.",
+            },
+            {
+                "role": "user",
+                "content": _REVIEW_PROMPT.format(
+                    target_view=target_view,
+                    review_policy=review_policy,
+                    source=_truncate_source(source, _MAX_REVIEW_SOURCE_CHARS),
+                    draft=draft,
+                ),
+            },
+        ])
     text = resp.text.strip()
     parsed = _parse_review_json(text)
     if not isinstance(parsed, dict):

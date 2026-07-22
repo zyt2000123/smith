@@ -9,6 +9,7 @@ from fastapi import Depends
 from common.database import close_db
 from common.config import AGENT_DIR
 from engine.execution.run_state import RunStateError, RunStateStore
+from engine.llm.observability import set_default_generation_sink
 
 from .infrastructure.auth import get_local_token, require_auth
 from .infrastructure.database import get_app_db
@@ -39,8 +40,10 @@ async def lifespan(app: FastAPI):
         await TokenStatsService().sync_from_traces()
     except Exception:
         logger.warning("failed to sync token statistics during startup", exc_info=True)
+    set_default_generation_sink(TokenStatsService().record_generation)
     scheduler_task = asyncio.create_task(run_scheduler())
     yield
+    set_default_generation_sink(None)
     scheduler_task.cancel()
     try:
         await scheduler_task
