@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { displayWidth, padDisplayText, wrapDisplayText } from "./text-layout.js";
+import { displayWidth, padDisplayText, truncateDisplay, wrapDisplayText } from "./text-layout.js";
 
 test("hard-wraps CJK and unspaced identifiers without losing characters", () => {
   const source = `模块职责：${"sha256:"}${"a".repeat(24)}`;
@@ -32,4 +32,13 @@ test("hard-wraps preserved indentation instead of creating a wide whitespace lin
 test("pads CJK text using terminal display width", () => {
   assert.equal(padDisplayText("模块", 8, "right"), "    模块");
   assert.equal(displayWidth(padDisplayText("模块", 8, "center")), 8);
+});
+
+test("truncateDisplay caps by display width on grapheme boundaries", () => {
+  assert.equal(truncateDisplay("repo", 80), "repo");
+  const capped = truncateDisplay("模".repeat(40), 40);
+  assert.ok(displayWidth(capped) <= 40);
+  assert.ok(capped.endsWith("…"));
+  // Never split a surrogate pair into a lone half.
+  assert.equal(truncateDisplay("😀😀😀", 3), "😀…");
 });

@@ -15,7 +15,7 @@ type OpenFence = {
   body: string[];
 };
 
-const FENCE_PATTERN = /^( {0,3})(`{3,}|~{3,})\s*([^\s`~]+)?\s*$/;
+const FENCE_PATTERN = /^( {0,3})(`{3,}|~{3,})\s*([^\s`~]*)/;
 const PLACEHOLDER_START = 0xe000;
 const MAX_INLINE_EDGE_LABEL_WIDTH = 24;
 const EDGE_ANNOTATION_WIDTH = 80;

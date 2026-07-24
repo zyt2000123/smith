@@ -1,4 +1,5 @@
 import type { ApprovalDetail, PendingApproval } from "./api.js";
+import { truncateDisplay } from "./text-layout.js";
 
 const DETAIL_ORDER = ["command", "cwd", "path", "file_path", "timeout"];
 const DETAIL_LABELS: Record<string, string> = {
@@ -28,7 +29,7 @@ export function oneLine(value: unknown, maxLength = 240): string {
   }
 
   const compact = text.replace(/\s+/g, " ").trim();
-  return compact.length <= maxLength ? compact : `${compact.slice(0, maxLength - 1)}…`;
+  return truncateDisplay(compact, maxLength);
 }
 
 function detailLabel(key: string): string {

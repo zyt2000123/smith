@@ -42,6 +42,15 @@ test("keeps an unfinished Mermaid fence as ordinary Markdown", () => {
   assert.deepEqual(splitMarkdownBlocks(source), [{ type: "markdown", text: source }]);
 });
 
+test("keeps the language when a fence info string has extra words", () => {
+  const segments = splitMarkdownBlocks("```ts twoslash\nconst x = 1;\n```\nDone.");
+
+  assert.deepEqual(segments, [
+    { type: "code", language: "ts", text: "const x = 1;" },
+    { type: "markdown", text: "Done." },
+  ]);
+});
+
 test("renders a basic Mermaid flowchart as terminal Unicode", () => {
   const rendered = renderMermaidDiagram("flowchart TD\n  A[Start] --> B[End]");
 

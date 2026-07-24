@@ -200,7 +200,7 @@ function validateStaticTree(spec: Record<string, unknown>): SmithUiSpec | null {
 function localProjectImagePath(value: unknown): string | null {
   if (typeof value !== "string" || !value || /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(value)) return null;
   const projectRoot = path.resolve(process.env.SMITH_PROJECT_CWD?.trim() || process.cwd());
-  const resolved = path.resolve(value);
+  const resolved = path.resolve(projectRoot, value);
   if (resolved !== projectRoot && !resolved.startsWith(`${projectRoot}${path.sep}`)) return null;
   return IMAGE_EXTENSIONS.has(path.extname(resolved).toLowerCase()) ? resolved : null;
 }
@@ -229,7 +229,11 @@ function parseImage(value: unknown): SmithUiImage | null {
 function parseImages(value: unknown): SmithUiImage[] | null {
   if (!Array.isArray(value) || value.length > MAX_IMAGES) return null;
   const images = value.map(parseImage);
-  return images.every((image): image is SmithUiImage => image !== null) ? images : null;
+  // De-duplicate by resolved path: ImageAttachments keys its list by path, and
+  // duplicate React keys render unpredictably.
+  return images.every((image): image is SmithUiImage => image !== null)
+    ? images.filter((image, index) => images.findIndex((other) => other.path === image.path) === index)
+    : null;
 }
 
 function catalogSpec(tree: SmithUiSpec) {

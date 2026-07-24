@@ -62,6 +62,8 @@ import {
   selectedSkillMentionState,
 } from "./skill-mention.js";
 import { type AppStore, createAppStore } from "./store.js";
+import { clearTerminal } from "./term.js";
+import { truncateDisplay } from "./text-layout.js";
 import { ACCENT, BORDER, ERROR, INFO, MUTED, SELECTED_BACKGROUND, SELECTED_FOREGROUND, WARNING } from "./theme.js";
 import { TokenStatsPanel } from "./token-panel.js";
 import { TranscriptEntryView } from "./transcript.js";
@@ -91,7 +93,7 @@ function useS<T>(selector: (state: AppStore) => T): T {
 }
 
 function truncate(text: string, max = 80): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+  return truncateDisplay(text, max);
 }
 
 function armSkill(skill: SkillSummary): void {
@@ -1014,6 +1016,18 @@ function SmithApp() {
   useEffect(() => {
     if (skillMentionIndex >= skillMentions.length) getState().set({ skillMentionIndex: 0 });
   }, [skillMentionIndex, skillMentions.length]);
+  const isFullScreenPanel = panel === "tokens" || panel === "runs";
+  const prevFullScreenPanel = useRef(isFullScreenPanel);
+  useEffect(() => {
+    if (prevFullScreenPanel.current === isFullScreenPanel) return;
+    prevFullScreenPanel.current = isFullScreenPanel;
+    // Entering or leaving the full-screen tokens/runs panels unmounts and later
+    // remounts <Static>, which reprints the whole transcript into scrollback.
+    // Clear and bump the epoch on the transition so it repaints exactly once,
+    // matching the /clear, /new, and /resume paths.
+    clearTerminal();
+    getState().set({ transcriptEpoch: getState().transcriptEpoch + 1 });
+  }, [isFullScreenPanel]);
   const handleInputChange = useCallback(
     (value: string) => {
       const suppressed = suppressRef.current;

@@ -89,10 +89,6 @@ function handleViewToggle(input: string, key: Key, options: ShellInputOptions): 
   options.suppressRef.current = input;
   const viewMode = options.viewMode === "compact" ? "transcript" : "compact";
   options.getState().set({ viewMode, statusLine: `${viewMode} view.` });
-  queueMicrotask(() => {
-    const state = options.getState();
-    if (state.inputValue.endsWith(input)) state.set({ inputValue: state.inputValue.slice(0, -input.length) });
-  });
   return true;
 }
 
@@ -352,7 +348,7 @@ export function handleQueuedEdit(key: Key, options: ShellInputOptions): boolean 
   return true;
 }
 
-function handleHistoryNavigation(key: Key, options: ShellInputOptions): boolean {
+export function handleHistoryNavigation(key: Key, options: ShellInputOptions): boolean {
   if (
     options.panel !== "chat" ||
     options.slashMenuOpen ||
@@ -371,11 +367,12 @@ function handleHistoryNavigation(key: Key, options: ShellInputOptions): boolean 
     return true;
   }
 
-  const index = state.historyIndex === -1 ? -1 : state.historyIndex + 1;
+  if (state.historyIndex === -1) return false;
+  const index = state.historyIndex + 1;
   if (index >= state.inputHistory.length) {
     state.set({ historyIndex: -1, inputValue: "" });
   } else {
-    state.set({ historyIndex: index, inputValue: index === -1 ? "" : state.inputHistory[index] || "" });
+    state.set({ historyIndex: index, inputValue: state.inputHistory[index] || "" });
   }
   return true;
 }

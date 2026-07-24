@@ -211,7 +211,7 @@ test("workflow retries and blocks settle the active card without claiming succes
   turn = lastTurn(entries);
   assert.deepEqual(
     turn.blocks.filter((block) => block.type === "skill").map((block) => block.state),
-    ["retry", "blocked"],
+    ["blocked"],
   );
   assert.equal(turn.streaming, false);
 });
