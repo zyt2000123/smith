@@ -49,6 +49,15 @@ test("transcript turns frame user messages while aligning their content with rep
   assert.equal(userMessageBoxProps(2).width, 1);
 });
 
+test("transcript keeps the assistant marker on the first Markdown heading line", () => {
+  const entry = { ...completedTurn("Explain memory"), assistantText: "## Agent 记忆系统的核心关注点" };
+  const output = stripAnsi(renderToString(<TranscriptEntryView entry={entry} viewMode="compact" />));
+  const headingLine = output.split("\n").find((line) => line.includes("Agent 记忆系统的核心关注点"));
+
+  assert.ok(headingLine);
+  assert.match(headingLine, /●\s+Agent 记忆系统的核心关注点/);
+});
+
 test("processing placeholder sweeps its bright character from left to right", () => {
   const firstFrame = processingScanSegments(0);
   const nextFrame = processingScanSegments(1);
@@ -143,6 +152,50 @@ test("transcript keeps every long table cell visible in a narrow terminal", () =
   assert.match(compactOutput, new RegExp(detail));
   assert.match(compactOutput, new RegExp(checksum));
   assert.doesNotMatch(output, /…/);
+});
+
+test("transcript keeps Markdown tables compact between headings", () => {
+  const entry = {
+    ...completedTurn("Explain memory layers"),
+    assistantText: `## 1. 记忆分层
+
+| 层级 | 生命周期 |
+| --- | --- |
+| 会话记忆 | 单次对话 |
+
+## 2. 写什么`,
+  };
+  const lines = stripAnsi(renderToString(<TranscriptEntryView entry={entry} viewMode="compact" />)).split("\n");
+  const firstHeading = lines.findIndex((line) => line.includes("1. 记忆分层"));
+  const tableTop = lines.findIndex((line) => line.includes("┌"));
+  const tableBottom = lines.findIndex((line, index) => index > tableTop && line.includes("└"));
+  const secondHeading = lines.findIndex((line, index) => index > tableBottom && line.includes("2. 写什么"));
+
+  assert.ok(firstHeading >= 0);
+  assert.ok(tableTop > firstHeading);
+  assert.ok(tableBottom > tableTop);
+  assert.ok(secondHeading > tableBottom);
+  assert.equal(lines.slice(firstHeading + 1, tableTop).filter((line) => !line.trim()).length, 1);
+  assert.equal(lines.slice(tableBottom + 1, secondHeading).filter((line) => !line.trim()).length, 1);
+});
+
+test("transcript keeps ordinary code blocks compact between prose", () => {
+  const entry = {
+    ...completedTurn("Explain a session shape"),
+    assistantText: `最朴素的形态是有序消息列表。\n\n\`\`\`\nSession {\n  session_id: "abc123"\n}\n\`\`\`\n\n继续说明会话级 context。`,
+  };
+  const lines = stripAnsi(renderToString(<TranscriptEntryView entry={entry} viewMode="compact" />)).split("\n");
+  const prose = lines.findIndex((line) => line.includes("最朴素的形态"));
+  const codeTop = lines.findIndex((line) => line.includes("┌"));
+  const codeBottom = lines.findIndex((line, index) => index > codeTop && line.includes("└"));
+  const trailing = lines.findIndex((line, index) => index > codeBottom && line.includes("继续说明会话级 context"));
+
+  assert.ok(prose >= 0);
+  assert.ok(codeTop > prose);
+  assert.ok(codeBottom > codeTop);
+  assert.ok(trailing > codeBottom);
+  assert.equal(lines.slice(prose + 1, codeTop).filter((line) => !line.trim()).length, 1);
+  assert.equal(lines.slice(codeBottom + 1, trailing).filter((line) => !line.trim()).length, 1);
 });
 
 test("transcript keeps an ordinary long Markdown token visible in a 40-column terminal", () => {

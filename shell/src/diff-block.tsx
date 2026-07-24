@@ -233,15 +233,27 @@ export function renderDiffLines(diff: UnifiedDiff, width: number): RenderedDiffL
       preserveWhitespace: true,
     });
 
+    let offset = 0;
     return fragments.map((content, index) => {
       const currentPrefix = index === 0 ? prefix : continuation;
+      const fragmentStart = offset;
+      offset += content.length;
+      // Remap whole-line changedRanges onto this fragment's local offsets and
+      // clip to the slice it covers, so an intraline highlight lands on the
+      // correct wrapped fragment instead of only the first one.
+      const changedRanges = line.changedRanges
+        ?.map((range) => ({
+          start: Math.max(0, range.start - fragmentStart),
+          end: Math.min(content.length, range.end - fragmentStart),
+        }))
+        .filter((range) => range.start < range.end);
       return {
         kind: line.kind,
         prefix: currentPrefix,
         content,
         text: `${currentPrefix}${content}`,
         continuation: index > 0,
-        ...(index === 0 && line.changedRanges ? { changedRanges: line.changedRanges } : {}),
+        ...(changedRanges?.length ? { changedRanges } : {}),
       };
     });
   });

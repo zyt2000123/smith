@@ -230,13 +230,12 @@ async function waitForCompatibleServer(
       };
     }
 
+    const spawnError = launch.getSpawnError();
+    if (spawnError) {
+      throw new Error(`Could not launch the local Smith server: ${spawnError.message}`);
+    }
     if (launch.child.exitCode !== null) {
-      const spawnError = launch.getSpawnError();
-      throw new Error(
-        spawnError
-          ? `Could not launch the local Smith server: ${spawnError.message}`
-          : "Local server exited before becoming healthy.",
-      );
+      throw new Error("Local server exited before becoming healthy.");
     }
     await sleep(500);
   }

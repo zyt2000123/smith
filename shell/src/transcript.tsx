@@ -81,14 +81,12 @@ function MarkdownContent({ text, width }: { text: string; width: number }) {
 
   return (
     <Box flexDirection="column">
-      {layoutBlocks.map((block, index) => {
-        const next = layoutBlocks[index + 1];
-        const needsSpacing = block.kind === "content" && next?.kind === "table";
+      {layoutBlocks.map((block) => {
         const blockBaseKey = `${block.kind}-${block.text}`;
         const blockOccurrence = blockKeyCounts.get(blockBaseKey) ?? 0;
         blockKeyCounts.set(blockBaseKey, blockOccurrence + 1);
         return (
-          <Box key={`${blockBaseKey}-${blockOccurrence}`} marginBottom={needsSpacing ? 1 : 0}>
+          <Box key={`${blockBaseKey}-${blockOccurrence}`}>
             {block.kind === "table" ? (
               <MarkdownTableBlock markdown={block.text} width={width} />
             ) : (
@@ -99,6 +97,10 @@ function MarkdownContent({ text, width }: { text: string; width: number }) {
       })}
     </Box>
   );
+}
+
+function startsWithMarkdownHeading(text: string): boolean {
+  return /^(?:[ \t]*\r?\n)*[ \t]{0,3}#{1,6}(?:\s|$)/u.test(text);
 }
 
 function CodeSegment({
@@ -588,6 +590,7 @@ function TurnView({
   const markdownWidth = Math.max(1, columns - 4);
   const hasAssistantBody = entry.assistantText.trim().length > 0;
   const assistantBody = hasAssistantBody ? stripEmojiIcons(entry.assistantText).trimEnd() : "";
+  const assistantStartsWithHeading = startsWithMarkdownHeading(assistantBody);
   const provisionalBody = stripEmojiIcons(entry.provisional.map((item) => item.text).join(""));
   const hasProvisionalBody = provisionalBody.trim().length > 0;
   const grouped = groupToolBlocks(entry.blocks, viewMode);
@@ -625,7 +628,9 @@ function TurnView({
 
       {hasAssistantBody || hasProvisionalBody || entry.streaming ? (
         <Box marginTop={1} paddingLeft={2}>
-          <AssistantMarker active={entry.streaming} />
+          <Box marginTop={assistantStartsWithHeading ? 1 : 0}>
+            <AssistantMarker active={entry.streaming} />
+          </Box>
           <Box flexDirection="column" flexGrow={1}>
             {hasAssistantBody ? (
               <MarkdownMessage

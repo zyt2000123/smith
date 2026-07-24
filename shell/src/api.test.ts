@@ -394,3 +394,36 @@ test("stream timeout still fails after an idle gap", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("streamMessage reassembles a CRLF frame separator split across read chunks", async () => {
+  const originalFetch = globalThis.fetch;
+  const encoder = new TextEncoder();
+  // sse-starlette separates frames with CRLF. Split the done frame's first
+  // `\r\n` across two reads (chunk A ends with `\r`, chunk B starts with `\n`)
+  // to reproduce the phantom-boundary bug from per-chunk newline normalization.
+  const frame = 'event: done\r\ndata: {"id":"message-1"}\r\n\r\n';
+  const splitAt = frame.indexOf("\r\n") + 1;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(frame.slice(0, splitAt)));
+      controller.enqueue(encoder.encode(frame.slice(splitAt)));
+      controller.close();
+    },
+  });
+
+  globalThis.fetch = async () =>
+    new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+
+  try {
+    const events = [];
+    for await (const event of streamMessage("http://127.0.0.1:8140", "session-1", "hello", { timeoutMs: 1_000 })) {
+      events.push(event);
+    }
+    assert.deepEqual(events, [{ type: "done", id: "message-1", status: "completed" }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

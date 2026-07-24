@@ -528,17 +528,21 @@ type ParsedSseChunk = {
 };
 
 function splitSseBuffer(buffer: string): { chunks: string[]; remainder: string } {
+  // Split on the SSE frame separator (a blank line), accepting LF or CRLF. The
+  // raw buffer keeps a trailing CR until its LF arrives, so a `\r\n` that a read
+  // boundary splits across chunks is never mistaken for a frame boundary.
   const chunks: string[] = [];
-  let remainder = buffer;
-  let boundary = remainder.indexOf("\n\n");
+  const boundary = /\r?\n\r?\n/g;
+  let lastIndex = 0;
+  let match = boundary.exec(buffer);
 
-  while (boundary !== -1) {
-    chunks.push(remainder.slice(0, boundary));
-    remainder = remainder.slice(boundary + 2);
-    boundary = remainder.indexOf("\n\n");
+  while (match !== null) {
+    chunks.push(buffer.slice(lastIndex, match.index));
+    lastIndex = match.index + match[0].length;
+    match = boundary.exec(buffer);
   }
 
-  return { chunks, remainder };
+  return { chunks, remainder: buffer.slice(lastIndex) };
 }
 
 function parseSseChunk(rawChunk: string): ParsedSseChunk | null {
@@ -738,7 +742,7 @@ async function* readSseEvents(
       if (done) break;
       onActivity?.();
 
-      buffer += decoder.decode(value, { stream: true }).replace(/\r\n?/g, "\n");
+      buffer += decoder.decode(value, { stream: true });
       const parsed = splitSseBuffer(buffer);
       buffer = parsed.remainder;
       const consumed = consumeSseChunks(parsed.chunks, sawDone);
@@ -747,7 +751,7 @@ async function* readSseEvents(
       if (sawDone) return;
     }
 
-    buffer += decoder.decode().replace(/\r\n?/g, "\n");
+    buffer += decoder.decode();
     const parsed = splitSseBuffer(buffer);
     const chunks = parsed.remainder.trim() ? [...parsed.chunks, parsed.remainder] : parsed.chunks;
     const consumed = consumeSseChunks(chunks, sawDone);

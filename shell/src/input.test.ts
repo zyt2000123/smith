@@ -7,6 +7,7 @@ import {
   handleApprovalInput,
   handleCtrlC,
   handleEscape,
+  handleHistoryNavigation,
   handleHooksNavigation,
   handleHooksSelection,
   handleModelPickerInput,
@@ -461,4 +462,14 @@ test("shift-left edits the newest queued message back into the input", () => {
     store.getState().queuedMessages.map((item) => item.text),
     ["first"],
   );
+});
+
+test("Down leaves the draft untouched when not browsing history", () => {
+  const store = createAppStore();
+  const bridge = new NodeBridge(store);
+  store.getState().set({ inputHistory: ["earlier message"], historyIndex: -1, inputValue: "important draft" });
+  const options = inputOptions(bridge, store);
+
+  assert.equal(handleHistoryNavigation({ downArrow: true } as Key, options), false);
+  assert.equal(store.getState().inputValue, "important draft");
 });

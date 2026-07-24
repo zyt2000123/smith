@@ -227,7 +227,7 @@ export function MarkdownTableBlock({ markdown, width }: { markdown: string; widt
   let sawHeader = false;
   let headerOpen = true;
   return (
-    <Box flexDirection="column" marginTop={1} marginBottom={1}>
+    <Box flexDirection="column">
       {lines.map((line) => {
         const isBorder = /^[┌├└]/u.test(line);
         if (isBorder && sawHeader) headerOpen = false;

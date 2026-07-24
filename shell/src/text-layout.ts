@@ -145,3 +145,25 @@ export function padDisplayText(value: string, width: number, alignment: TextAlig
   }
   return `${value}${" ".repeat(remaining)}`;
 }
+
+/**
+ * Truncate to a terminal-cell width (not UTF-16 length), cutting only on
+ * grapheme boundaries so surrogate pairs and ZWJ emoji sequences are never
+ * split, and appending an ellipsis when shortened. Returns the value unchanged
+ * when it already fits.
+ */
+export function truncateDisplay(value: string, maxWidth: number): string {
+  const limit = Math.max(1, Math.floor(maxWidth));
+  if (displayWidth(value) <= limit) return value;
+
+  const budget = limit - 1; // reserve one cell for the ellipsis
+  let out = "";
+  let width = 0;
+  for (const grapheme of graphemes(value)) {
+    const graphemeWidth = displayWidth(grapheme);
+    if (width + graphemeWidth > budget) break;
+    out += grapheme;
+    width += graphemeWidth;
+  }
+  return `${out}…`;
+}

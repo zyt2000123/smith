@@ -60,7 +60,7 @@ function barSegments(day: TokenDay, maxTokens: number): { filled: number; input:
 function RollingBarChart({ days }: { days: TokenDay[] }) {
   const { columns } = useWindowSize();
   const maxTokens = Math.max(1, ...days.map((day) => day.total_tokens));
-  const width = Math.max(6, Math.min(BAR_WIDTH, Math.floor((columns - 4) / days.length)));
+  const width = Math.max(2, Math.min(BAR_WIDTH, Math.floor((columns - 4) / days.length)));
   return (
     <Box flexDirection="column">
       <Box>

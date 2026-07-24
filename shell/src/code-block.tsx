@@ -44,15 +44,7 @@ export function CodeBlock({
   const width = Math.max(1, requestedWidth ?? columns - 4);
 
   return (
-    <Box
-      flexDirection="column"
-      width={width}
-      borderStyle="single"
-      borderColor={BORDER}
-      paddingX={1}
-      marginTop={1}
-      marginBottom={1}
-    >
+    <Box flexDirection="column" width={width} borderStyle="single" borderColor={BORDER} paddingX={1} marginBottom={1}>
       <Text color={MUTED} dimColor>
         [{displayLanguage}] · {lines.length} 行
       </Text>

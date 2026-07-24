@@ -475,41 +475,28 @@ export function applyStreamEvent(entries: TranscriptEntry[], event: StreamEvent)
         const blocks = finishThinkingBlocks(turn.blocks);
         const state = nextSkillState(event.status);
 
-        if (event.status === "start") {
-          return {
-            ...turn,
-            blocks: [
-              ...blocks,
-              {
-                id: createId(),
-                type: "skill",
-                name: event.name || "skill",
-                state,
-                activities: [],
-              },
-            ],
-          };
-        }
+        const name = event.name || "skill";
 
+        // Reuse the most recent non-terminal (running/retry) block for this
+        // skill instead of appending a duplicate. A domain-gate retry re-emits
+        // SKILL_START after a "retry" status; matching retry as well as running
+        // lets that repeated start reuse the block, so it can't leave a phantom
+        // block stuck forever in the retry state.
         const reversedIndex = [...blocks]
           .reverse()
           .findIndex(
-            (block) => block.type === "skill" && block.name === (event.name || "skill") && block.state === "running",
+            (block) =>
+              block.type === "skill" && block.name === name && (block.state === "running" || block.state === "retry"),
           );
 
         if (reversedIndex >= 0) {
           const index = blocks.length - 1 - reversedIndex;
           const existing = blocks[index];
-          if (existing?.type !== "skill") {
-            return turn;
+          if (existing?.type === "skill") {
+            const nextBlocks = [...blocks];
+            nextBlocks[index] = { ...existing, state };
+            return { ...turn, blocks: nextBlocks };
           }
-
-          const nextBlocks = [...blocks];
-          nextBlocks[index] = {
-            ...existing,
-            state,
-          };
-          return { ...turn, blocks: nextBlocks };
         }
 
         return {
@@ -519,7 +506,7 @@ export function applyStreamEvent(entries: TranscriptEntry[], event: StreamEvent)
             {
               id: createId(),
               type: "skill",
-              name: event.name || "skill",
+              name,
               state,
               activities: [],
             },
